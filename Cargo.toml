@@ -1,0 +1,3 @@
+[workspace]
+members = ["twilight_kernel"]
+resolver = "2"
