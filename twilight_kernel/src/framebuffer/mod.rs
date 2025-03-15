@@ -46,11 +46,23 @@ pub fn init_framebuffer(fb: &Framebuffer) {
     unsafe {
         FRAMEBUFFER.call_once(|| TwilightFrameBuffer::new(fb));
     }
+    let fb_ptr = fb.addr();
+    let width = fb.width() as usize;
+    let height = fb.height() as usize;
+    let total_pixels = width * height; // 4 bytes per pixel (ARGB or RGBA format)
+    let bg_color = 0x282C34u32;
+
+    unsafe {
+        let fb_u32_ptr = fb_ptr.cast::<u32>(); // Cast to u32 pointer
+        for i in 0..total_pixels {
+            fb_u32_ptr.add(i).write(bg_color);
+        }
+    }
 }
 
 pub fn init_writer() {
     #[allow(static_mut_refs)]
-    unsafe { WRITER = Some(Writer::new(0xFFFFFF)); }
+    unsafe { WRITER = Some(Writer::new(0xE2E3E4)); }
 }
 
 pub fn get_writer() -> &'static mut Writer {
