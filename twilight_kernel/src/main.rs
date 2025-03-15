@@ -4,14 +4,10 @@
 use core::arch::asm;
 
 use limine::BaseRevision;
-use limine::request::{FramebufferRequest, RequestsEndMarker, RequestsStartMarker};
-use twilight_kernel::{print};
+use limine::request::{FramebufferRequest};
+use twilight_kernel::{print, println};
 
-/// Sets the base revision to the latest revision supported by the crate.
-/// See specification for further info.
-/// Be sure to mark all limine requests with #[used], otherwise they may be removed by the compiler.
 #[used]
-// The .requests section allows limine to find the requests faster and more safely.
 #[unsafe(link_section = ".requests")]
 static BASE_REVISION: BaseRevision = BaseRevision::new();
 
@@ -19,13 +15,6 @@ static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[unsafe(link_section = ".requests")]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
-/// Define the stand and end markers for Limine requests.
-#[used]
-#[unsafe(link_section = ".requests_start_marker")]
-static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
-#[used]
-#[unsafe(link_section = ".requests_end_marker")]
-static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
@@ -33,20 +22,18 @@ unsafe extern "C" fn kmain() -> ! {
 
     if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
         if let Some(framebuffer) = framebuffer_response.framebuffers().next() {
-            print(&framebuffer, 0, 0, 0xFFFFFF, 2, 3, b'A'); // Wider characters (2x width, 4x height)
-            print(&framebuffer, 20, 0, 0xFF0000, 2, 3, b'B'); // Even taller characters
-
-
-            print(&framebuffer, 0, 30, 0xFFFFFF, 2, 3, b'A'); // Wider characters (2x width, 4x height)
-            print(&framebuffer, 20, 30, 0xFF0000, 2, 3, b'B'); // Even taller characters
+            twilight_kernel::init(&framebuffer);
         }
     }
+
+    println!("Hello from Twilight kernel!");
 
     hcf();
 }
 
 #[panic_handler]
-fn rust_panic(_info: &core::panic::PanicInfo) -> ! {
+fn rust_panic(info: &core::panic::PanicInfo) -> ! {
+    println!("{}", info);
     hcf();
 }
 
