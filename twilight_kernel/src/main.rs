@@ -26,9 +26,7 @@ unsafe extern "C" fn kmain() -> ! {
         }
     }
 
-    for i in 0..51 {
-        println!("Hello from Twilight kernel! {}", i);
-    }
+    println!("Hello from Twilight kernel!");
 
     x86_64::instructions::interrupts::int3();
 

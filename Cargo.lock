@@ -49,6 +49,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pic8259"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62d9a86c292b165f757e47e7fd66855def189b2564609bc4203727b27c33db22"
+dependencies = [
+ "x86_64",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -75,6 +84,7 @@ version = "0.1.0"
 dependencies = [
  "lazy_static",
  "limine",
+ "pic8259",
  "spin",
  "x86_64",
 ]
