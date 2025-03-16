@@ -4,7 +4,7 @@
 use core::arch::asm;
 
 use limine::BaseRevision;
-use limine::request::{FramebufferRequest};
+use limine::request::FramebufferRequest;
 use twilight_kernel::{print, println};
 
 #[used]
@@ -15,11 +15,9 @@ static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[unsafe(link_section = ".requests")]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
-
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
-
     if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
         if let Some(framebuffer) = framebuffer_response.framebuffers().next() {
             twilight_kernel::init(&framebuffer);
@@ -29,6 +27,14 @@ unsafe extern "C" fn kmain() -> ! {
     println!("Hello from Twilight kernel!");
 
     hcf();
+}
+
+pub fn check_interrupts_enabled() -> bool {
+    let flags: u64;
+    unsafe {
+        asm!("pushfq; pop {}", out(reg) flags, options(nomem, nostack));
+    }
+    flags & (1 << 9) != 0 // Check if IF (bit 9) is set
 }
 
 #[panic_handler]
