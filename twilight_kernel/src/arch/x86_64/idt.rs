@@ -17,7 +17,9 @@ lazy_static! {
         idt.page_fault.set_handler_fn(page_fault_handler);
         idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
         unsafe {
-            idt.double_fault.set_handler_fn(double_fault_handler).set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+            idt.double_fault
+                .set_handler_fn(double_fault_handler)
+                .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         }
         idt[interrupt_index(0)].set_handler_fn(timer_interrupt_handler);
         idt[interrupt_index(1)].set_handler_fn(keyboard_interrupt_handler);
@@ -41,7 +43,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    println!(
+    panic!(
         "[GP FAULT] at {:#x}, Error Code: {:#x}",
         stack_frame.instruction_pointer.as_u64(),
         error_code
