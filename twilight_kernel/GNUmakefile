@@ -20,7 +20,7 @@ ifeq ($(RUST_TARGET),)
 endif
 
 ifeq ($(RUST_PROFILE),)
-    override RUST_PROFILE := dev
+    override RUST_PROFILE := release
 endif
 
 override RUST_PROFILE_SUBDIR := $(RUST_PROFILE)

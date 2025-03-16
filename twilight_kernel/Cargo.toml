@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
+lazy_static = { version = "1.0.0", features = ["spin_no_std"] }
 limine = "0.4.0"
 pc-keyboard = "0.8.0"
 pic8259 = { version = "0.11.0", features = ["nightly"] }
