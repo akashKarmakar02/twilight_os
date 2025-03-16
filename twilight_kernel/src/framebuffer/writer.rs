@@ -14,18 +14,18 @@ pub fn print(
     let fb_ptr = framebuffer.addr();
     let pitch = framebuffer.pitch();
 
-    let font_bitmap = PSF_FONTS.get(ascii as usize - 32).unwrap();
-
-    for (row, &bitmap) in font_bitmap.iter().enumerate() {
-        let rev_bitmap = bitmap.reverse_bits();
-        for col in 0..16 {
-            if (rev_bitmap & (1 << col)) != 0 {
-                let pixel_offset = ((y + row) * pitch as usize) + ((x + col) * 4);
-                unsafe {
-                    fb_ptr
-                        .offset(pixel_offset as isize)
-                        .cast::<u32>()
-                        .write(color);
+    if let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32) {
+        for (row, &bitmap) in font_bitmap.iter().enumerate() {
+            let rev_bitmap = bitmap.reverse_bits();
+            for col in 0..16 {
+                if (rev_bitmap & (1 << col)) != 0 {
+                    let pixel_offset = ((y + row) * pitch as usize) + ((x + col) * 4);
+                    unsafe {
+                        fb_ptr
+                            .offset(pixel_offset as isize)
+                            .cast::<u32>()
+                            .write(color);
+                    }
                 }
             }
         }
