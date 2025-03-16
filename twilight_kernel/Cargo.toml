@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 limine = "0.4.0"
-pic8259 = "0.11.0"
+pc-keyboard = "0.8.0"
+pic8259 = { version = "0.11.0", features = ["nightly"] }
 spin = "0.9.8"
 x86_64 = "0.15.2"
