@@ -3,6 +3,7 @@
 
 pub mod framebuffer;
 pub mod arch;
+pub mod memory;
 
 use limine::framebuffer::Framebuffer;
 use crate::framebuffer::{init_framebuffer, init_writer};

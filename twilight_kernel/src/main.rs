@@ -4,7 +4,9 @@
 use core::arch::asm;
 
 use limine::BaseRevision;
-use limine::request::FramebufferRequest;
+use limine::framebuffer::Framebuffer;
+use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest};
+use limine::response::{HhdmResponse, MemoryMapResponse};
 use twilight_kernel::{print, println};
 
 #[used]
@@ -15,27 +17,53 @@ static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[unsafe(link_section = ".requests")]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
+
+#[used]
+#[unsafe(link_section = ".requests")]
+static MEMMAP: MemoryMapRequest = MemoryMapRequest::new();
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
+
+    let mut framebuffer: Option<Framebuffer> = None;
+    let mut hhdm_response: Option<&HhdmResponse> = None;
+    let mut memory_map_response: Option<&MemoryMapResponse> = None;
+
+
     if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
-        if let Some(framebuffer) = framebuffer_response.framebuffers().next() {
-            twilight_kernel::init(&framebuffer);
+        if let Some(fb) = framebuffer_response.framebuffers().next() {
+            framebuffer = Some(fb);
         }
     }
+
+    if let Some(hr) = HHDM_REQUEST.get_response() {
+        hhdm_response = Some(hr);
+    }
+
+    if let Some(mmr) = MEMMAP.get_response() {
+        memory_map_response = Some(mmr);
+    }
+
+    twilight_kernel::init(&framebuffer.unwrap());
+
+
+    let mut frame_allocator = unsafe {
+        twilight_kernel::memory::BootInfoFrameAllocator::init(memory_map_response.unwrap().entries())
+    };
+
+    // Print higher-half direct mapping base
+    println!("HHDM Offset: {:#x}", hhdm_response.unwrap().offset());
 
     println!("Hello from Twilight kernel!");
 
     hcf();
 }
 
-pub fn check_interrupts_enabled() -> bool {
-    let flags: u64;
-    unsafe {
-        asm!("pushfq; pop {}", out(reg) flags, options(nomem, nostack));
-    }
-    flags & (1 << 9) != 0 // Check if IF (bit 9) is set
-}
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {

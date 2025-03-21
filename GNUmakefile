@@ -37,7 +37,7 @@ run-x86_64-uefi: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_N
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
 	qemu-system-$(KARCH) \
-		-m 10 \
+		-m 2 \
 		-cdrom $(IMAGE_NAME).iso \
 
 .PHONY: run-hdd-x86_64
