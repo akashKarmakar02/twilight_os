@@ -49,6 +49,7 @@ unsafe extern "C" fn kmain() -> ! {
         memory_map_response = Some(mmr);
     }
 
+    twilight_kernel::init(&framebuffer.unwrap(), hhdm_response.unwrap(), memory_map_response.unwrap());
 
     let x = Box::new(41);
     println!("is even: {}", x);
