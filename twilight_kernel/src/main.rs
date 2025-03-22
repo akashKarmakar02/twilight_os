@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
+extern crate alloc;
 
+use alloc::boxed::Box;
 use core::arch::asm;
 
 use limine::BaseRevision;
@@ -16,7 +18,6 @@ static BASE_REVISION: BaseRevision = BaseRevision::new();
 #[used]
 #[unsafe(link_section = ".requests")]
 static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
-
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -34,7 +35,6 @@ unsafe extern "C" fn kmain() -> ! {
     let mut hhdm_response: Option<&HhdmResponse> = None;
     let mut memory_map_response: Option<&MemoryMapResponse> = None;
 
-
     if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
         if let Some(fb) = framebuffer_response.framebuffers().next() {
             framebuffer = Some(fb);
@@ -49,15 +49,9 @@ unsafe extern "C" fn kmain() -> ! {
         memory_map_response = Some(mmr);
     }
 
-    twilight_kernel::init(&framebuffer.unwrap());
 
-
-    let mut frame_allocator = unsafe {
-        twilight_kernel::memory::BootInfoFrameAllocator::init(memory_map_response.unwrap().entries())
-    };
-
-    // Print higher-half direct mapping base
-    println!("HHDM Offset: {:#x}", hhdm_response.unwrap().offset());
+    let x = Box::new(41);
+    println!("is even: {}", x);
 
     println!("Hello from Twilight kernel!");
 
