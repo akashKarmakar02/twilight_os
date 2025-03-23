@@ -11,7 +11,6 @@ use limine::response::{HhdmResponse, MemoryMapResponse};
 use twilight_kernel::{print, println};
 use twilight_kernel::driver::keyboard::keyboard_interrupt;
 use twilight_kernel::task::executor::Executor;
-use twilight_kernel::task::simple_executor::SimpleExecutor;
 use twilight_kernel::task::Task;
 
 #[used]
