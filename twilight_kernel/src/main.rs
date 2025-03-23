@@ -9,6 +9,10 @@ use limine::framebuffer::Framebuffer;
 use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest};
 use limine::response::{HhdmResponse, MemoryMapResponse};
 use twilight_kernel::{print, println};
+use twilight_kernel::driver::keyboard::keyboard_interrupt;
+use twilight_kernel::task::executor::Executor;
+use twilight_kernel::task::simple_executor::SimpleExecutor;
+use twilight_kernel::task::Task;
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -52,7 +56,9 @@ unsafe extern "C" fn kmain() -> ! {
 
     twilight_kernel::console::start_kernel_console();
 
-    hcf();
+    let mut executor = Executor::new();
+    executor.spawn(Task::new(keyboard_interrupt()));
+    executor.run();
 }
 
 

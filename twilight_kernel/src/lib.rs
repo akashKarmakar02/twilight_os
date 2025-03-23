@@ -8,6 +8,7 @@ pub mod memory;
 pub mod console;
 pub mod driver;
 pub mod kernel_utils;
+pub mod task;
 
 extern crate alloc;
 
