@@ -2,7 +2,6 @@
 #![no_main]
 extern crate alloc;
 
-use alloc::boxed::Box;
 use core::arch::asm;
 
 use limine::BaseRevision;
@@ -51,10 +50,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     twilight_kernel::init(&framebuffer.unwrap(), hhdm_response.unwrap(), memory_map_response.unwrap());
 
-    let x = Box::new(41);
-    println!("is even: {}", x);
-
-    println!("Hello from Twilight kernel!");
+    twilight_kernel::console::start_kernel_console();
 
     hcf();
 }

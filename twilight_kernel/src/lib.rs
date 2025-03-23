@@ -5,6 +5,9 @@
 pub mod framebuffer;
 pub mod arch;
 pub mod memory;
+pub mod console;
+pub mod driver;
+pub mod kernel_utils;
 
 extern crate alloc;
 

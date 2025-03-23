@@ -8,9 +8,8 @@ pub fn print(framebuffer: &'static TwilightFrameBuffer, x: usize, y: usize, colo
     let pitch = framebuffer.pitch();
     if let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32) {
         for (row, &bitmap) in font_bitmap.iter().enumerate() {
-            let rev_bitmap = bitmap.reverse_bits();
-            for col in 0..16 {
-                if (rev_bitmap & (1 << col)) != 0 {
+            for col in 0..8 {
+                if (bitmap & (1 << (7 - col))) != 0 {
                     let pixel_offset = ((y + row) * pitch as usize) + ((x + col) * 4);
                     unsafe {
                         fb_ptr
@@ -24,28 +23,30 @@ pub fn print(framebuffer: &'static TwilightFrameBuffer, x: usize, y: usize, colo
     }
 }
 
+
 pub fn clear_char(framebuffer: &'static TwilightFrameBuffer, x: usize, y: usize, color: u32) {
     let fb_ptr = framebuffer.addr();
     let pitch = framebuffer.pitch() as usize;
-    let char_width = 8; // Assuming 8x16 font size
+    let char_width = 8;
     let char_height = 16;
 
     for row in 0..char_height {
-        let row_start = ((y + row) * pitch) + (x * 4);
-        let row_ptr = unsafe { fb_ptr.offset(row_start as isize).cast::<u32>() };
-
-        // Use a single unsafe block to reduce function call overhead
-        unsafe {
-            for col in 0..char_width {
-                row_ptr.add(col).write(color);
+        for col in 0..char_width {
+            let pixel_offset = ((y + row) * pitch) + ((x + col - 8) * 4);
+            unsafe {
+                fb_ptr
+                    .offset(pixel_offset as isize)
+                    .cast::<u32>()
+                    .write(color);
             }
         }
     }
 }
+
 pub struct Writer {
     framebuffer: &'static TwilightFrameBuffer,
-    column_position: usize,
-    row_position: usize,
+    pub column_position: usize,
+    pub row_position: usize,
     color: u32,
     need_flush: bool,
 }

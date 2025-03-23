@@ -60,6 +60,31 @@ pub fn init_framebuffer(fb: &Framebuffer) {
     }
 }
 
+pub fn clear_screen() {
+    let framebuffer = get_framebuffer();
+    let color = 0x282C34u32;
+
+    let fb_ptr = framebuffer.addr();
+    let pitch = framebuffer.pitch() as usize;
+    let width = framebuffer.width();
+    let height = framebuffer.height();
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel_offset = (y * pitch as u64) + (x * 4);
+            unsafe {
+                fb_ptr
+                    .offset(pixel_offset as isize)
+                    .cast::<u32>()
+                    .write(color);
+            }
+        }
+    }
+    get_writer().row_position = 0;
+    get_writer().column_position = 0;
+}
+
+
 pub fn init_writer() {
     #[allow(static_mut_refs)]
     unsafe { WRITER = Some(Writer::new(0xE2E3E4)); }
