@@ -60,7 +60,7 @@ pub fn init_framebuffer(fb: &Framebuffer) {
     }
 }
 
-pub fn clear_screen() {
+pub fn clear_screen(clear_buffer: bool) {
     let framebuffer = get_framebuffer();
     let color = 0x282C34u32;
 
@@ -82,6 +82,9 @@ pub fn clear_screen() {
     }
     get_writer().row_position = 0;
     get_writer().column_position = 0;
+    if clear_buffer {
+        get_writer().buffer_content.clear();
+    }
 }
 
 

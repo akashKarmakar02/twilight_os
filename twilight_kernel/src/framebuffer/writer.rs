@@ -1,5 +1,6 @@
+use alloc::vec::Vec;
 use crate::framebuffer::font::PSF_FONTS;
-use crate::framebuffer::{TwilightFrameBuffer, get_framebuffer};
+use crate::framebuffer::{TwilightFrameBuffer, get_framebuffer, clear_screen};
 use core::fmt;
 use core::fmt::Write;
 
@@ -45,20 +46,20 @@ pub fn clear_char(framebuffer: &'static TwilightFrameBuffer, x: usize, y: usize,
 
 pub struct Writer {
     framebuffer: &'static TwilightFrameBuffer,
+    pub buffer_content: Vec<Vec<char>>,
     pub column_position: usize,
     pub row_position: usize,
     color: u32,
-    need_flush: bool,
 }
 
 impl Writer {
     pub fn new(color: u32) -> Self {
         Self {
             framebuffer: get_framebuffer(),
+            buffer_content: Vec::new(),
             column_position: 0,
             row_position: 0,
             color,
-            need_flush: false,
         }
     }
 
@@ -78,6 +79,15 @@ impl Writer {
                 }
             },
             _ => {
+                if let Some(current_buffer) = self.buffer_content.get_mut(self.row_position) {
+                    current_buffer.push(c);
+                } else {
+                    let mut current_buffer = Vec::new();
+                    current_buffer.push(c);
+                    self.buffer_content.push(current_buffer);
+                }
+
+
                 print(self.framebuffer, self.column_position * 8, self.row_position * 16, self.color, c as u8);
                 self.column_position += 1;
                 if self.column_position >= (self.framebuffer.width() / 8) as usize {
@@ -90,21 +100,35 @@ impl Writer {
     fn new_line(&mut self) {
         self.column_position = 0;
         self.row_position += 1;
-        if self.row_position >= (self.framebuffer.height() / 16) as usize {
-            self.row_position = 0;
-            self.need_flush = true;
-        }
 
-        if self.need_flush {
-            self.clear_line(self.row_position);
+        let max_rows = (self.framebuffer.height() / 16) as usize;
+
+        if self.row_position >= max_rows {
+            self.buffer_content.remove(0);
+
+            self.buffer_content.push(Vec::new());
+
+            self.redraw_screen();
+
+            self.row_position = max_rows - 1;
         }
     }
 
-    pub fn clear_line(&mut self, row: usize) {
+    fn redraw_screen(&mut self) {
+        clear_screen(false);
+
+        for (row_idx, line) in self.buffer_content.iter().enumerate() {
+            for (col_idx, c) in line.iter().enumerate() {
+                print(self.framebuffer, col_idx * 8, row_idx * 16, self.color, *c as u8);
+            }
+        }
+    }
+
+    pub fn clear_line(&mut self) {
         let clear_color = 0x282C34u32;
 
         for i in 0..self.framebuffer.width() / 8 {
-            clear_char(self.framebuffer, i as usize * 8, row * 16, clear_color);
+            clear_char(self.framebuffer, (i as usize + 1) * 8, self.row_position *  16, clear_color);
         }
     }
 
@@ -117,10 +141,6 @@ impl Writer {
 
 impl Write for Writer {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        // if self.need_flush {
-        //     self.clear_line(self.row_position);
-        //     self.need_flush = false;  // Reset the flag after clearing
-        // }
         self.write_string(s);
         Ok(())
     }

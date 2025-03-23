@@ -52,7 +52,7 @@ fn exec(cmd: &str, args: &[&str]) {
     match cmd {
         "echo" => crate::kernel_utils::echo::main(args),
         "clear" => {
-            crate::framebuffer::clear_screen();
+            crate::framebuffer::clear_screen(true);
         },
         "meminfo" => crate::kernel_utils::meminfo::main(),
         "uname" => {
