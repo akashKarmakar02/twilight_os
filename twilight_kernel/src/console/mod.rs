@@ -1,15 +1,15 @@
 extern crate alloc;
 
+use crate::{print, println};
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
-use crate::{print, println};
 
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
 pub static CURSOR_POSITION: Mutex<usize> = Mutex::new(0);
 
 pub fn start_kernel_console() {
-    print!("# ");
+    print!("twilight > ");
     let mut cur_pos = CURSOR_POSITION.lock();
     *cur_pos = 2;
 }
@@ -28,7 +28,7 @@ pub fn get_stdio_keypress(c: char) {
             }
             cmd_line.clear();
             start_kernel_console();
-        },
+        }
         '\x08' => {
             if *CURSOR_POSITION.lock() > 2 {
                 print!("{}", c);
@@ -38,7 +38,7 @@ pub fn get_stdio_keypress(c: char) {
                 }
                 *CURSOR_POSITION.lock() -= 1;
             }
-        },
+        }
         _ => {
             print!("{}", c);
             STDIO.lock().push(c);
@@ -53,11 +53,15 @@ fn exec(cmd: &str, args: &[&str]) {
         "echo" => crate::kernel_utils::echo::main(args),
         "clear" => {
             crate::framebuffer::clear_screen(true);
-        },
+        }
+        "uptime" => {
+            println!("{:.6} seconds", crate::driver::timer::pit::uptime());
+        }
+        "date" => crate::kernel_utils::date::main(),
         "meminfo" => crate::kernel_utils::meminfo::main(),
         "uname" => {
-            println!("TwilightOS Twilight-Kernel 0.1 DevBuild (22/03/25)")
-        },
+            println!("TwilightOS Twilight-Kernel 0.1 DevBuild (23/03/25)")
+        }
         _ => {
             println!("{}: not a command", cmd);
         }

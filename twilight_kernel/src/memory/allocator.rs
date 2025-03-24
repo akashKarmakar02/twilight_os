@@ -4,7 +4,7 @@ use x86_64::structures::paging::mapper::MapToError;
 use x86_64::VirtAddr;
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 100 * 1024;
+pub const HEAP_SIZE: usize = 300 * 1024;
 
 #[global_allocator]
 pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -36,4 +36,12 @@ pub fn init_heap(
     };
 
     Ok(())
+}
+
+pub fn get_total_heap_size() -> usize {
+    ALLOCATOR.lock().size()
+}
+
+pub fn get_used_heap_size() -> usize {
+    ALLOCATOR.lock().used()
 }
