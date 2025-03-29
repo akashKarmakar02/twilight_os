@@ -10,6 +10,7 @@ pub mod driver;
 pub mod kernel_utils;
 pub mod task;
 pub mod buffer;
+pub mod fs;
 
 extern crate alloc;
 
