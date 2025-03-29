@@ -5,7 +5,6 @@ use crossbeam_queue::ArrayQueue;
 use futures_util::{Stream, StreamExt};
 use futures_util::task::AtomicWaker;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
-use crate::console::get_stdio_keypress;
 use crate::{println, print};
 
 pub mod ps2;
@@ -44,7 +43,8 @@ pub async fn keyboard_interrupt() {
 }
 
 fn send_char(c: char) {
-    get_stdio_keypress(c);
+    // get_stdio_keypress(c);
+    crate::buffer::stdin::send_char(c);
 }
 
 pub struct ScancodeStream {

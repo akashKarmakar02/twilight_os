@@ -2,13 +2,26 @@ use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc};
 use alloc::task::Wake;
 use core::task::{Context, Poll, Waker};
+use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
+use spin::Mutex;
+
+pub static EXECUTOR: OnceCell<Mutex<Executor>> = OnceCell::uninit();
+
+pub fn init_executor() {
+    EXECUTOR.try_init_once(|| {
+        Mutex::new(Executor::new())
+    }).unwrap()
+}
 
 pub struct Executor {
     tasks: BTreeMap<TaskId, Task>,
     task_queue: Arc<ArrayQueue<TaskId>>,
     waker_cache: BTreeMap<TaskId, Waker>,
 }
+
+unsafe impl Sync for Executor {}
+unsafe impl Send for Executor {}
 
 struct TaskWaker {
     task_id: TaskId,

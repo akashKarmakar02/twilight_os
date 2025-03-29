@@ -2,7 +2,7 @@ use crate::print;
 use x86_64::instructions::port::Port;
 
 #[repr(u8)]
-enum Register {
+pub enum Register {
     Second = 0x00,
     Minute = 0x02,
     Hour = 0x04,

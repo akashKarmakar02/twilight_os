@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use crate::framebuffer::font::PSF_FONTS;
 use crate::framebuffer::{TwilightFrameBuffer, get_framebuffer, clear_screen};
 use core::fmt;
@@ -46,6 +46,7 @@ pub fn clear_char(framebuffer: &'static TwilightFrameBuffer, x: usize, y: usize,
 
 pub struct Writer {
     framebuffer: &'static TwilightFrameBuffer,
+    buffer: Vec<u64>,
     pub buffer_content: Vec<Vec<char>>,
     pub column_position: usize,
     pub row_position: usize,
@@ -59,11 +60,15 @@ impl Writer {
             buffer_content: Vec::new(),
             column_position: 0,
             row_position: 0,
+            buffer: Vec::new(),
             color,
         }
     }
 
     pub fn write_char(&mut self, c: char) {
+        if self.buffer.is_empty() {
+            self.buffer = vec![0x282C34, self.framebuffer.width * self.framebuffer.height]
+        }
         match c {
             '\n' => self.new_line(),
             '\x08' => {

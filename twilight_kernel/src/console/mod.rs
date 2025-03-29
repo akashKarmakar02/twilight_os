@@ -3,10 +3,24 @@ extern crate alloc;
 use crate::{print, println};
 use alloc::string::String;
 use alloc::vec::Vec;
+use futures_util::{StreamExt};
 use spin::Mutex;
+use crate::buffer::stdin::{StdinStream};
+use crate::task::executor::{EXECUTOR};
+use crate::task::Task;
 
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
 pub static CURSOR_POSITION: Mutex<usize> = Mutex::new(0);
+
+async fn handle_input() {
+    while let Some(c) = StdinStream::new().next().await {
+        handle_console_key(c);
+    }
+}
+
+pub fn init_console() {
+    EXECUTOR.get().unwrap().lock().spawn(Task::new(handle_input()));
+}
 
 pub fn start_kernel_console() {
     print!("twilight > ");
@@ -14,7 +28,7 @@ pub fn start_kernel_console() {
     *cur_pos = 2;
 }
 
-pub fn get_stdio_keypress(c: char) {
+fn handle_console_key(c: char) {
     match c {
         '\n' => {
             print!("\n");

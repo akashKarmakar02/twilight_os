@@ -9,6 +9,7 @@ pub mod console;
 pub mod driver;
 pub mod kernel_utils;
 pub mod task;
+pub mod buffer;
 
 extern crate alloc;
 
@@ -16,6 +17,7 @@ use limine::framebuffer::Framebuffer;
 use limine::response::{HhdmResponse, MemoryMapResponse};
 use x86_64::VirtAddr;
 use crate::framebuffer::{init_framebuffer, init_writer};
+use crate::task::executor;
 
 pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static MemoryMapResponse) {
     init_framebuffer(fb);
@@ -32,6 +34,7 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     };
 
     memory::allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
+    executor::init_executor();
 }
 
 #[alloc_error_handler]
