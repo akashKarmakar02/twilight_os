@@ -17,12 +17,12 @@ extern crate alloc;
 use limine::framebuffer::Framebuffer;
 use limine::response::{HhdmResponse, MemoryMapResponse};
 use x86_64::VirtAddr;
-use crate::framebuffer::{init_framebuffer, init_writer};
+use crate::console::writer::init_writer;
+use crate::framebuffer::{init_framebuffer};
 use crate::task::executor;
 
 pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static MemoryMapResponse) {
     init_framebuffer(fb);
-    init_writer();
     arch::x86_64::gdt::init();
     arch::x86_64::idt::init();
     arch::x86_64::idt::init_pics();
@@ -34,9 +34,14 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
         memory::BootInfoFrameAllocator::init(memory_map_response.entries())
     };
 
-    memory::allocator::init_heap(&mut mapper, &mut frame_allocator).expect("Failed to initialize heap");
+    memory::allocator::init_heap(&mut mapper, &mut frame_allocator, memory_map_response).expect("Failed to initialize heap");
     executor::init_executor();
+    fs::init_fs();
+    init_writer();
 }
+
+
+
 
 #[alloc_error_handler]
 fn alloc_error(layout: alloc::alloc::Layout) -> ! {

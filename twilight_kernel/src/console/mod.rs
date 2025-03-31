@@ -3,11 +3,15 @@ extern crate alloc;
 use crate::{print, println};
 use alloc::string::String;
 use alloc::vec::Vec;
-use futures_util::{StreamExt};
+use futures_util::StreamExt;
 use spin::Mutex;
-use crate::buffer::stdin::{StdinStream};
-use crate::task::executor::{EXECUTOR};
+use crate::buffer::stdin::StdinStream;
+use crate::console::writer::clear_screen;
+use crate::task::executor::EXECUTOR;
 use crate::task::Task;
+
+pub mod writer;
+pub mod font;
 
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
 pub static CURSOR_POSITION: Mutex<usize> = Mutex::new(0);
@@ -66,7 +70,7 @@ fn exec(cmd: &str, args: &[&str]) {
     match cmd {
         "echo" => crate::kernel_utils::echo::main(args),
         "clear" => {
-            crate::framebuffer::clear_screen(true);
+            clear_screen(true);
         }
         "uptime" => {
             println!("{:.6} seconds", crate::driver::timer::pit::uptime());
@@ -75,6 +79,11 @@ fn exec(cmd: &str, args: &[&str]) {
         "meminfo" => crate::kernel_utils::meminfo::main(),
         "uname" => {
             println!("TwilightOS Twilight-Kernel 0.1 DevBuild (23/03/25)")
+        }
+        "cat" => crate::kernel_utils::cat::main(args),
+        "ls" => crate::kernel_utils::ls::main(args, "/"),
+        "pitch" => {
+            println!("{}", crate::framebuffer::get_pitch());
         }
         _ => {
             println!("{}: not a command", cmd);
