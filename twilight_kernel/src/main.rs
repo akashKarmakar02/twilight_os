@@ -9,6 +9,7 @@ use limine::framebuffer::Framebuffer;
 use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest};
 use limine::response::{HhdmResponse, MemoryMapResponse};
 use twilight_kernel::{print, println};
+use twilight_kernel::driver::disk::ata::Ata;
 use twilight_kernel::driver::keyboard::keyboard_interrupt;
 use twilight_kernel::task::executor::{EXECUTOR};
 use twilight_kernel::task::Task;
@@ -54,8 +55,24 @@ unsafe extern "C" fn kmain() -> ! {
     twilight_kernel::init(&framebuffer.unwrap(), hhdm_response.unwrap(), memory_map_response.unwrap());
 
 
-    twilight_kernel::console::start_kernel_console();
     twilight_kernel::console::init_console();
+
+    let mut ata = Ata {
+        base_port: 0x1F0,
+        sector_size: 512,
+        sector_count: 0,
+    };
+
+    ata.detect();
+
+    if ata.sector_count > 0 {
+        println!("ATA device found!\n");
+        println!("Total Sectors: {}", ata.sector_count);
+    } else {
+        println!("No ATA device detected.\n");
+    }
+
+    twilight_kernel::console::start_kernel_console();
 
     let mut executor = EXECUTOR.get().unwrap().lock();
     executor.spawn(Task::new(keyboard_interrupt()));
