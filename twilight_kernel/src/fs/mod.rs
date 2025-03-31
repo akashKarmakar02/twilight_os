@@ -1,49 +1,46 @@
-use lazy_static::lazy_static;
+
+pub mod ram_fs;
+use alloc::vec::Vec;
+use alloc::string::String;
+use conquer_once::spin::OnceCell;
 use spin::Mutex;
-use heapless::{LinearMap, String};
+use crate::fs::ram_fs::RamFS;
 
-lazy_static! {
-    pub static ref FS: Mutex<LinearMap<String<256>, File, 1024>> = Mutex::new(LinearMap::new());
+pub static FS: OnceCell<Mutex<RamFS>>= OnceCell::uninit();
+
+#[derive(Debug)]
+pub enum VfsError {
+    NotFound,
+    PermissionDenied,
+    InvalidOperation,
+    IoError,
 }
 
-#[derive(Clone)]
-pub struct File {
-    pathname: String<256>,
-    content: String<1024>
+pub fn init_fs() {
+    FS.try_init_once(|| {
+        Mutex::new(RamFS::new())
+    }).unwrap()
 }
 
-impl File {
-    pub fn create(path: &str) -> Option<Self> {
-        let fs = FS.lock();
+pub trait VfsNode {
+    fn read(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, VfsError>;
 
-        if fs.contains_key(&String::from(path.parse().unwrap())) {
-            None
-        } else {
-            Some(File {
-                pathname: String::from(path.parse().unwrap()),
-                content: String::new()
-            })
-        }
-    }
+    fn write(&mut self, offset: u64, buffer: &[u8]) -> Result<usize, VfsError>;
 
-    pub fn open(path: &str) -> Option<Self> {
-        let fs = FS.lock();
+    fn size(&self) -> u64;
 
-        if fs.contains_key(&String::from(path.parse().unwrap())) {
-            Some(fs.get(&String::from(path.parse().unwrap())).unwrap().clone())
-        } else {
-            None
-        }
-    }
+    fn is_directory(&self) -> bool;
+}
 
-    pub fn read(&mut self) -> String<1024> {
-        self.content.clone()
-    }
 
-    pub fn write(&mut self, content: &str) {
-        let mut fs = FS.lock();
-
-        let _ = self.content.push_str(content);
-        let _ = fs.insert(String::from(self.pathname.clone()), self.clone());
-    }
+pub trait Vfs {
+    fn read(&self, inode: u64, offset: u64, buffer: &mut [u8]) -> Result<usize, VfsError>;
+    fn write(&mut self, inode: u64, offset: u64, buffer: &[u8]) -> Result<usize, VfsError>;
+    fn open(&self, path: &str) -> Result<u64, VfsError>;
+    fn close(&self, path: &str) -> Result<(), VfsError>;
+    fn create(&mut self, path: &str) -> Result<u64, VfsError>;
+    fn delete(&mut self, path: &str) -> Result<(), VfsError>;
+    fn readdir(&self, inode: u64) -> Result<Vec<String>, VfsError>;
+    fn mount(&mut self, device: &str) -> Result<(), VfsError>;
+    fn unmount(&mut self, path: &str) -> Result<(), VfsError>;
 }
