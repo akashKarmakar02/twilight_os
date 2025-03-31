@@ -1,17 +1,13 @@
-use core::fmt;
 use limine::framebuffer::Framebuffer;
 use spin::Once;
-use crate::framebuffer::writer::Writer;
-
-pub mod font;
-pub mod writer;
+use crate::fs::{VfsError, VfsNode};
 
 #[allow(static_mut_refs)]
 pub static mut FRAMEBUFFER: Once<TwilightFrameBuffer> = Once::new();
 pub struct TwilightFrameBuffer {
     addr: *mut u8,
-    height: u64,
-    width: u64,
+    pub(crate) height: u64,
+    pub(crate) width: u64,
     pitch: u64,
 }
 
@@ -37,91 +33,103 @@ impl TwilightFrameBuffer {
     pub fn pitch(&self) -> u64 {
         self.pitch
     }
+
+    fn extract_color(&self, pixels: &[u8]) -> u32 {
+        if pixels.len() < 4 {
+            panic!("Input data is too short to extract a color!");
+        }
+
+        let r = pixels[0] as u32;
+        let g = pixels[1] as u32;
+        let b = pixels[2] as u32;
+
+        (r << 16) | (g << 8) | b // Keep the RGB format same as input
+    }
 }
 
-static mut WRITER: Option<Writer> = None;
+impl Clone for TwilightFrameBuffer {
+    fn clone(&self) -> Self {
+        Self {
+            addr: self.addr,
+            height: self.height,
+            width: self.width,
+            pitch: self.pitch,
+        }
+    }
+}
+
+impl VfsNode for TwilightFrameBuffer {
+    fn read(&self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, VfsError> {
+        Err(VfsError::PermissionDenied)
+    }
+
+    fn write(&mut self, offset: u64, buffer: &[u8]) -> Result<usize, VfsError> {
+        if buffer.len() % 4 != 0 {
+            return Err(VfsError::InvalidOperation);
+        }
+
+        let fb_ptr = self.addr();
+
+        unsafe {
+            let fb_u32_ptr = fb_ptr.cast::<u32>();
+            for i in 0..(buffer.len() / 4) {
+                let color = self.extract_color(&buffer[i * 4..(i + 1) * 4]);
+                fb_u32_ptr.add(i + offset as usize).write(color);
+            }
+        }
+
+        Ok(buffer.len())
+    }
+
+
+
+    fn size(&self) -> u64 {
+        self.width * self.height
+    }
+
+    fn is_directory(&self) -> bool {
+        false
+    }
+}
+
+unsafe impl Send for TwilightFrameBuffer {}
+
+unsafe impl Sync for TwilightFrameBuffer {}
+
 
 pub fn init_framebuffer(fb: &Framebuffer) {
     #[allow(static_mut_refs)]
     unsafe {
         FRAMEBUFFER.call_once(|| TwilightFrameBuffer::new(fb));
     }
-    let fb_ptr = fb.addr();
-    let width = fb.width() as usize;
-    let height = fb.height() as usize;
-    let total_pixels = width * height; // 4 bytes per pixel (ARGB or RGBA format)
-    let bg_color = 0x282C34u32;
 
+
+}
+
+pub fn get_pitch() -> u64 {
+    #[allow(static_mut_refs)]
     unsafe {
-        let fb_u32_ptr = fb_ptr.cast::<u32>(); // Cast to u32 pointer
-        for i in 0..total_pixels {
-            fb_u32_ptr.add(i).write(bg_color);
-        }
-    }
-}
-
-pub fn clear_screen(clear_buffer: bool) {
-    let framebuffer = get_framebuffer();
-    let color = 0x282C34u32;
-
-    let fb_ptr = framebuffer.addr();
-    let pitch = framebuffer.pitch() as usize;
-    let width = framebuffer.width();
-    let height = framebuffer.height();
-
-    for y in 0..height {
-        for x in 0..width {
-            let pixel_offset = (y * pitch as u64) + (x * 4);
-            unsafe {
-                fb_ptr
-                    .offset(pixel_offset as isize)
-                    .cast::<u32>()
-                    .write(color);
-            }
-        }
-    }
-    get_writer().row_position = 0;
-    get_writer().column_position = 0;
-    if clear_buffer {
-        get_writer().buffer_content.clear();
+        FRAMEBUFFER.get().unwrap().pitch()
     }
 }
 
 
-pub fn init_writer() {
-    #[allow(static_mut_refs)]
-    unsafe { WRITER = Some(Writer::new(0xE2E3E4)); }
+
+pub fn convert_color(color: u32) -> [u8; 4] {
+    let rgba: [u8; 4] = [
+        ((color >> 16) & 0xFF) as u8, // Red
+        ((color >> 8) & 0xFF) as u8,  // Green
+        (color & 0xFF) as u8,         // Blue
+        255,                          // Alpha (fully opaque)
+    ];
+
+    rgba
 }
 
-pub fn get_writer() -> &'static mut Writer {
-    #[allow(static_mut_refs)]
-    unsafe { WRITER.as_mut().expect("Writer not initialized") }
-}
+
 
 
 pub fn get_framebuffer() -> &'static TwilightFrameBuffer {
     #[allow(static_mut_refs)]
     unsafe { FRAMEBUFFER.get().unwrap() }
-}
-
-
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => ($crate::framebuffer::_print(format_args!($($arg)*)));
-}
-
-#[macro_export]
-macro_rules! println {
-    () => ($crate::framebuffer::_print("\n"));
-    ($($arg:tt)*) => (print!("{}\n", format_args!($($arg)*)));
-}
-
-#[doc(hidden)]
-pub fn _print(args: fmt::Arguments) {
-    use core::fmt::Write;
-    use x86_64::instructions::interrupts;
-
-    interrupts::without_interrupts(|| {
-        get_writer().write_fmt(args).unwrap();
-    });
 }
