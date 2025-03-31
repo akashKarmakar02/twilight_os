@@ -36,9 +36,12 @@ run-x86_64-uefi: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_N
 
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
+	qemu-img create -f raw hdd.img 32M
 	qemu-system-$(KARCH) \
-		-m 9 \
+		-m 4 \
+		-drive file=hdd.img,format=raw,if=ide \
 		-cdrom $(IMAGE_NAME).iso \
+		-serial stdio
 
 .PHONY: run-hdd-x86_64
 run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd

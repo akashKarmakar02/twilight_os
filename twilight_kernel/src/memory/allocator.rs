@@ -1,10 +1,11 @@
+use limine::response::MemoryMapResponse;
 use linked_list_allocator::LockedHeap;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::VirtAddr;
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 300 * 1024;
+static HEAP_SIZE: u64 = 1*1024*1024;
 
 #[global_allocator]
 pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -12,10 +13,12 @@ pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 pub fn init_heap(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    _memory_map_response: &'static MemoryMapResponse,
 ) -> Result<(), MapToError<Size4KiB>> {
+
     let page_range = {
         let heap_start = VirtAddr::new(HEAP_START as u64);
-        let head_end = heap_start + HEAP_SIZE as u64 - 1u64;
+        let head_end = heap_start + HEAP_SIZE - 1u64;
         let heap_start_page = Page::containing_address(heap_start);
         let heap_end_page = Page::containing_address(head_end);
         Page::range_inclusive(heap_start_page, heap_end_page)
@@ -32,7 +35,7 @@ pub fn init_heap(
     }
 
     unsafe {
-        ALLOCATOR.lock().init(HEAP_START, HEAP_SIZE);
+        ALLOCATOR.lock().init(HEAP_START, HEAP_SIZE as usize);
     };
 
     Ok(())
