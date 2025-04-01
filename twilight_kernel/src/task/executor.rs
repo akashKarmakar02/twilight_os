@@ -14,6 +14,13 @@ pub fn init_executor() {
     }).unwrap()
 }
 
+pub fn sleep(duration: f64) {
+    let start = crate::driver::timer::pit::uptime();
+    while crate::driver::timer::pit::uptime() - start < duration {
+        x86_64::instructions::hlt();
+    }
+}
+
 pub struct Executor {
     tasks: BTreeMap<TaskId, Task>,
     task_queue: Arc<ArrayQueue<TaskId>>,

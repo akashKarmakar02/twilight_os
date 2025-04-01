@@ -75,6 +75,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "uptime" => {
             println!("{:.6} seconds", crate::driver::timer::pit::uptime());
         }
+        "shutdown" => crate::kernel_utils::shutdown::main(),
         "date" => crate::kernel_utils::date::main(),
         "meminfo" => crate::kernel_utils::meminfo::main(),
         "uname" => {
