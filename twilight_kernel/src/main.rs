@@ -64,13 +64,8 @@ unsafe extern "C" fn kmain() -> ! {
     };
 
     ata.detect();
+    
 
-    if ata.sector_count > 0 {
-        println!("ATA device found!\n");
-        println!("Total Sectors: {}", ata.sector_count);
-    } else {
-        println!("No ATA device detected.\n");
-    }
 
     twilight_kernel::console::start_kernel_console();
 

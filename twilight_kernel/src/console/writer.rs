@@ -11,7 +11,7 @@ pub fn init_writer() {
     apply_console_bg();
 
     #[allow(static_mut_refs)]
-    unsafe { WRITER = Some(Writer::new(0xE2E3E4)); }
+    unsafe { WRITER = Some(Writer::new(0xBFBFBF)); }
 }
 
 pub fn get_writer() -> &'static mut Writer {
@@ -28,7 +28,7 @@ fn apply_console_bg() {
         let total_pixels = width * height;
 
         let mut buf = vec![0u8; total_pixels / 2];
-        let color = convert_color(0x282C34u32);
+        let color = convert_color(0x101010u32);
 
         for g in 0..8usize {
             for i in 0..(total_pixels / 8) {
@@ -61,7 +61,7 @@ pub fn print(x: usize, y: usize, color: u32, ascii: u8) {
     if let Ok(inode) = fs.open("/dev/fb0") {
         if let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32) {
             let color_bytes = convert_color(color);
-            let background_color = convert_color(0x282C34u32);
+            let background_color = convert_color(0x101010u32);
 
             for (row, &bitmap) in font_bitmap.iter().enumerate() {
                 let mut row_buf = vec![0u8; 8 * 4]; // 8 pixels per row, 4 bytes per pixel
@@ -130,7 +130,7 @@ impl Writer {
         match c {
             '\n' => self.new_line(),
             '\x08' => {
-                clear_char( self.column_position * 8, self.row_position * 16, 0x282C34u32);
+                clear_char( self.column_position * 8, self.row_position * 16, 0x101010u32);
                 if self.column_position > 0 {
                     self.column_position -= 1;
                 }
@@ -188,7 +188,7 @@ impl Writer {
     }
 
     pub fn clear_line(&mut self) {
-        let clear_color = 0x282C34u32;
+        let clear_color = 0x101010u32;
 
         for i in 0..self.screen_width / 8 {
             clear_char( (i as usize + 1) * 8, self.row_position *  16, clear_color);
