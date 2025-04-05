@@ -39,6 +39,7 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 	qemu-img create -f raw hdd.img 32M
 	qemu-system-$(KARCH) \
 		-m 4 \
+		-device rtl8139 \
 		-drive file=hdd.img,format=raw,if=ide \
 		-cdrom $(IMAGE_NAME).iso \
 		-serial stdio

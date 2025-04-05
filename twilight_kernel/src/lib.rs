@@ -40,6 +40,7 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     init_writer();
 
     driver::pci::init();
+    driver::cpu::init();
 }
 
 
