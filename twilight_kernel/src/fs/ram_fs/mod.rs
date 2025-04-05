@@ -64,12 +64,10 @@ impl RamFS {
 }
 
 impl Vfs for RamFS {
-    fn read(&self, inode: u64, offset: u64, buffer: &mut [u8]) -> Result<usize, VfsError> {
+    fn read(&self, inode: u64, offset: u64) -> Result<&[u8], VfsError> {
         match self.inodes.get(&inode) {
             Some(RamFSNode::File { data,  .. }) => {
-                let len = buffer.len().min(data.len() - offset as usize);
-                buffer[..len].copy_from_slice(&data[offset as usize..len+ offset as usize]);
-                Ok(len)
+                Ok(&data[offset as usize..])
             }
             _ => Err(VfsError::NotFound),
         }

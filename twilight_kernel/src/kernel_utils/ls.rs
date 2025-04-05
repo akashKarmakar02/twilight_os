@@ -1,15 +1,21 @@
-use crate::fs::Vfs;
-use crate::{println, print};
+use alloc::string::String;
+use alloc::vec::Vec;
 
-pub fn main(_args: &[&str], ctx: &str) {
-    let fs = crate::fs::FS.get().unwrap().lock();
+use crate::{fs, print, println};
 
-    if let Ok(id) = fs.open(ctx) {
-        let res = fs.readdir(id).ok().unwrap();
+pub fn main(_args: &[&str], _ctx: &str) {
+    let files = get_files("/");
 
-        for file in res {
-            println!("{}", file);
-        }
+    for file in files {
+        println!("{}", file);
+    }
+}
+
+fn get_files(ctx: &str) -> Vec<String> {
+    if let Some(files) = fs::readdir(ctx) {
+        files
+    } else {
+        Vec::new()
     }
 
 }
