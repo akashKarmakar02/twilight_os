@@ -38,6 +38,8 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     executor::init_executor();
     fs::init_fs();
     init_writer();
+
+    driver::pci::init();
 }
 
 
