@@ -1,8 +1,8 @@
-use lazy_static::lazy_static;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use crate::{println, print};
 use crate::arch::x86_64::gdt;
+use crate::println;
+use lazy_static::lazy_static;
 use pic8259::ChainedPics;
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 
 // Translate IRQ into system interrupt

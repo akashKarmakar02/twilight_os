@@ -1,7 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{fs, print, println};
+use crate::{fs, println};
 
 pub fn main(_args: &[&str], _ctx: &str) {
     let files = get_files("/");

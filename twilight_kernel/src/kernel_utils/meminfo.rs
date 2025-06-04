@@ -1,4 +1,4 @@
-use crate::{println, print};
+use crate::println;
 
 pub fn main() {
     let total_mem = crate::memory::allocator::get_total_heap_size();

@@ -1,4 +1,4 @@
-use crate::{driver::timer::cmos::CMOS, print, println};
+use crate::{driver::timer::cmos::CMOS, println};
 
 pub fn main() {
     let mut rtc = CMOS::new();

@@ -1,11 +1,11 @@
+use crate::println;
+use conquer_once::spin::OnceCell;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
-use futures_util::{Stream, StreamExt};
 use futures_util::task::AtomicWaker;
+use futures_util::{Stream, StreamExt};
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
-use crate::{println, print};
 
 pub mod ps2;
 

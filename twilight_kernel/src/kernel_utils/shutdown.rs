@@ -1,4 +1,4 @@
-use crate::{println, print};
+use crate::println;
 
 pub fn main() {
     println!("Twilight OS will shutdown now...");
