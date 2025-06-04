@@ -1,10 +1,18 @@
-use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 use crate::driver::disk::BlockDevice;
+use alloc::string::{String, ToString};
+use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 
 pub struct Ata {
     pub base_port: u16,
     pub sector_count: u64,
     pub sector_size: usize,
+    pub model: Option<String>,
+}
+
+enum Command {
+    Read = 0x20,
+    Write = 0x30,
+    Identify = 0xEC,
 }
 
 #[allow(dead_code)]
@@ -24,59 +32,89 @@ impl Ata {
         unsafe { port.read() }
     }
 
+    fn outw(port: u16, data: u16) {
+        let mut port = PortWriteOnly::new(port);
+        unsafe { port.write(data) };
+    }
+
     pub fn detect(&mut self) -> bool {
-        let mut port_cmd = Port::new(self.base_port + 7);
-        let mut port_data = Port::new(self.base_port);
+        let mut port_data = Port::<u16>::new(self.base_port);
+        let mut port_status = Port::<u8>::new(self.base_port + 7);
+        let mut port_drive = Port::<u8>::new(self.base_port + 6);
 
-        // Select Master drive
-        let mut port_drive_select = Port::<u8>::new(self.base_port + 6);
-        unsafe { port_drive_select.write(0xA0) };
+        unsafe { port_drive.write(0xA0) }; // Master drive
+        unsafe { port_status.write(Command::Identify as u8) };
 
-        // Send IDENTIFY command
-        unsafe { port_cmd.write(0xEC) };
-
-        // Check if the device exists
-        if unsafe { port_cmd.read() } == 0u8 {
-            return false; // No device
+        if unsafe { port_status.read() } == 0 {
+            return false;
         }
 
-        // Wait for the drive to be ready (BSY clear, DRQ set)
-        while unsafe { port_cmd.read() } & 0x80 != 0u8 {} // Wait for BSY to clear
-        if unsafe { port_cmd.read() } & 0x08 == 0u8 {
-            return false; // DRQ not set, invalid device
+        if let Err(_) = self.wait_ready() {
+            return false;
         }
 
-        // Read IDENTIFY data (256 words)
         let mut identify_data = [0u16; 256];
-        for i in 0..256 {
-            identify_data[i] = unsafe { port_data.read() };
+        for word in identify_data.iter_mut() {
+            *word = unsafe { port_data.read() };
         }
 
-        // Standard sector size
         self.sector_size = 512;
+        self.sector_count = ((identify_data[61] as u64) << 16) | (identify_data[60] as u64);
 
-        // Fetch sector count from words 60–61
-        self.sector_count =
-            ((identify_data[61] as u64) << 16) | (identify_data[60] as u64);
+        // Extract model name
+        let mut model_bytes = [0u8; 40];
+        for i in 0..20 {
+            let word = identify_data[27 + i];
+            model_bytes[i * 2] = (word >> 8) as u8;
+            model_bytes[i * 2 + 1] = word as u8;
+        }
+        self.model = String::from_utf8(model_bytes.to_vec())
+            .ok()
+            .map(|s| s.trim().to_string());
 
         true
     }
 
-    pub fn get_model_name(&self) -> [u8; 40] {
-        let mut model = [0u8; 40];
-
-        let mut identify_data = [0u16; 256];
-        for i in 0..256 {
-            identify_data[i] = Self::inw(self.base_port);
+    pub fn get_ata_model_name(&self) -> Result<String, &'static str> {
+        match &self.model {
+            Some(s) => Ok(s.clone()),
+            None => Err("ATA model not detected yet"),
         }
-
-        for i in 0..20 {
-            model[i * 2] = (identify_data[27 + i] >> 8) as u8;
-            model[i * 2 + 1] = identify_data[27 + i] as u8;
-        }
-
-        model
     }
+
+    fn wait_ready(&self) -> Result<(), &'static str> {
+        for _ in 0..1000000 {
+            let status = Self::inb(self.base_port + 7);
+            let bsy = status & (1 << Status::BSY as u8);
+            let drq = status & (1 << Status::DRQ as u8);
+            if bsy == 0 && drq != 0 {
+                return Ok(());
+            }
+        }
+        Err("Device not ready (BSY or DRQ timeout)")
+    }
+}
+
+#[allow(dead_code)]
+enum IdentifyResponse {
+    Ata([u16; 256]),
+    Atapi,
+    Sata,
+    None
+}
+
+#[allow(dead_code)]
+#[repr(usize)]
+#[derive(Debug, Clone, Copy)]
+enum Status {
+    ERR  = 0, // Error
+    IDX  = 1, // (obsolete)
+    CORR = 2, // (obsolete)
+    DRQ  = 3, // Data Request
+    DSC  = 4, // (command dependant)
+    DF   = 5, // (command dependant)
+    DRDY = 6, // Device Ready
+    BSY  = 7, // Busy
 }
 
 impl BlockDevice for Ata {
@@ -90,10 +128,14 @@ impl BlockDevice for Ata {
         Self::outb(self.base_port + 3, lba as u8);
         Self::outb(self.base_port + 4, (lba >> 8) as u8);
         Self::outb(self.base_port + 5, (lba >> 16) as u8);
-        Self::outb(self.base_port + 7, 0x20);
+        Self::outb(self.base_port + 7, Command::Read as u8);
 
-        for i in 0..self.sector_count as usize {
-            buffer[i] = Self::inb(self.base_port);
+        self.wait_ready()?;
+
+        for i in 0..(self.sector_size / 2) {
+            let word = Self::inw(self.base_port);
+            buffer[i * 2] = (word & 0xFF) as u8;
+            buffer[i * 2 + 1] = (word >> 8) as u8;
         }
 
         Ok(())
@@ -109,11 +151,18 @@ impl BlockDevice for Ata {
         Self::outb(self.base_port + 3, lba as u8);
         Self::outb(self.base_port + 4, (lba >> 8) as u8);
         Self::outb(self.base_port + 5, (lba >> 16) as u8);
-        Self::outb(self.base_port + 7, 0x30);
+        Self::outb(self.base_port + 7, Command::Write as u8);
 
-        for &byte in buffer.iter() {
-            Self::outb(self.base_port, byte);
+        self.wait_ready()?;
+
+        for i in 0..(self.sector_size / 2) {
+            let lo = buffer[i * 2] as u16;
+            let hi = buffer[i * 2 + 1] as u16;
+            Self::outw(self.base_port, (hi << 8) | lo);
         }
+
+        // Flush
+        Self::outb(self.base_port + 7, 0xE7);
 
         Ok(())
     }
