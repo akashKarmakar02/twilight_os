@@ -5,7 +5,7 @@ use x86_64::structures::paging::mapper::MapToError;
 use x86_64::VirtAddr;
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-static HEAP_SIZE: u64 = 1*1024*1024;
+static HEAP_SIZE: u64 = 16*1024*1024;
 
 #[global_allocator]
 pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
