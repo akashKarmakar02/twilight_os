@@ -7,8 +7,6 @@ use limine::framebuffer::Framebuffer;
 use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest};
 use limine::response::{HhdmResponse, MemoryMapResponse};
 use limine::BaseRevision;
-use twilight_kernel::driver::disk::ata::Ata;
-use twilight_kernel::driver::disk::BlockDevice;
 use twilight_kernel::driver::keyboard::keyboard_interrupt;
 use twilight_kernel::task::executor::EXECUTOR;
 use twilight_kernel::task::Task;
@@ -56,7 +54,7 @@ unsafe extern "C" fn kmain() -> ! {
 
 
     twilight_kernel::console::init_console();
-
+    
     twilight_kernel::console::start_kernel_console();
 
     let mut executor = EXECUTOR.get().unwrap().lock();

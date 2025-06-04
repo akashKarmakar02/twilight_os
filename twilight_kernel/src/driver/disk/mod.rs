@@ -1,7 +1,7 @@
-use alloc::boxed::Box;
-use spin::Once;
 use crate::driver::disk::ata::Ata;
 use crate::println;
+use alloc::boxed::Box;
+use spin::Once;
 
 pub mod ata;
 
@@ -36,7 +36,7 @@ pub fn init() {
             ata.base_port,
             ata.get_ata_model_name().unwrap()
         );
-
+        
         let static_ata: &'static mut Ata = Box::leak(Box::new(ata));
 
         #[allow(static_mut_refs)]
@@ -48,13 +48,14 @@ pub fn init() {
         
         #[allow(static_mut_refs)]
         let d = unsafe { DISK.get_mut().unwrap() };
-        
-        let mut buf = [0u8; 1024];
-        d.read_block(0, &mut buf).unwrap();
-        d.read_block(0, &mut buf).unwrap();
-        d.read_block(0, &mut buf).unwrap();
-        d.read_block(0, &mut buf).unwrap();
-        d.read_block(0, &mut buf).unwrap();
-        println!("{}", core::str::from_utf8(buf.as_slice()).unwrap());
+
+        match crate::fs::minixfs::read_superblock(*d) {
+            Ok(_) => {
+                println!("Minix FS found on disk");
+            }
+            Err(_) => {
+                println!("Not FS found on disk");
+            }
+        };
     }
 }
