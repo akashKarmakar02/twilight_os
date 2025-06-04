@@ -3,16 +3,16 @@
 extern crate alloc;
 
 use core::arch::asm;
-
-use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
 use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest};
 use limine::response::{HhdmResponse, MemoryMapResponse};
-use twilight_kernel::{print, println};
+use limine::BaseRevision;
 use twilight_kernel::driver::disk::ata::Ata;
+use twilight_kernel::driver::disk::BlockDevice;
 use twilight_kernel::driver::keyboard::keyboard_interrupt;
-use twilight_kernel::task::executor::{EXECUTOR};
+use twilight_kernel::task::executor::EXECUTOR;
 use twilight_kernel::task::Task;
+use twilight_kernel::{println, print};
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -56,16 +56,6 @@ unsafe extern "C" fn kmain() -> ! {
 
 
     twilight_kernel::console::init_console();
-
-    let mut ata = Ata {
-        base_port: 0x1F0,
-        sector_size: 512,
-        sector_count: 0,
-    };
-
-    ata.detect();
-    
-
 
     twilight_kernel::console::start_kernel_console();
 
