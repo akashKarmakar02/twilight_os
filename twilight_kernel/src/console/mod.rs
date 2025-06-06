@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use futures_util::StreamExt;
 use spin::Mutex;
 use crate::buffer::stdin::StdinStream;
-use crate::console::writer::clear_screen;
+use crate::console::writer::{clear_screen, print};
 use crate::task::executor::EXECUTOR;
 use crate::task::Task;
 

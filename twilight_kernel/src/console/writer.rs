@@ -23,8 +23,8 @@ fn apply_console_bg() {
     let mut fs = crate::fs::FS.get().unwrap().lock();
 
     if let Ok(inode) = fs.open("/dev/fb0") {
-        let width = 1600;
-        let height = 900;
+        let width = 1280;
+        let height = 720;
         let total_pixels = width * height;
 
         let mut buf = vec![0u8; total_pixels / 2];
@@ -56,7 +56,7 @@ pub fn clear_screen(clear_buffer: bool) {
 
 pub fn print(x: usize, y: usize, color: u32, ascii: u8) {
     let mut fs = crate::fs::FS.get().unwrap().lock();
-    let pitch = 1600; // Width of the framebuffer in pixels
+    let pitch = 1280; // Width of the framebuffer in pixels
 
     if let Ok(inode) = fs.open("/dev/fb0") {
         if let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32) {
@@ -84,7 +84,7 @@ pub fn print(x: usize, y: usize, color: u32, ascii: u8) {
 
 pub fn clear_char(x: usize, y: usize, color: u32) {
     let mut fs = crate::fs::FS.get().unwrap().lock();
-    let pitch = 1600;
+    let pitch = 1280;
     let char_width = 8;
     let char_height = 16;
 
@@ -108,6 +108,8 @@ pub struct Writer {
     color: u32,
     screen_height: u64,
     screen_width: u64,
+    cursor_visible: bool,
+    cursor_timer: usize,
 }
 
 impl Writer {
@@ -118,8 +120,10 @@ impl Writer {
             row_position: 0,
             buffer: Vec::new(),
             color,
-            screen_width: 1600,
-            screen_height: 900,
+            screen_width: 1280,
+            screen_height: 720,
+            cursor_visible: true,
+            cursor_timer: 0,
         }
     }
 
@@ -131,6 +135,7 @@ impl Writer {
             '\n' => self.new_line(),
             '\x08' => {
                 clear_char( self.column_position * 8, self.row_position * 16, 0x101010u32);
+                self.clear_cursor();
                 if self.column_position > 0 {
                     self.column_position -= 1;
                 }
@@ -158,9 +163,14 @@ impl Writer {
                 }
             }
         }
+
+        self.cursor_visible = true;
+        self.cursor_timer = 0;
+        self.draw_cursor();
     }
 
     fn new_line(&mut self) {
+        self.clear_cursor();
         self.column_position = 0;
         self.row_position += 1;
 
@@ -183,6 +193,68 @@ impl Writer {
         for (row_idx, line) in self.buffer_content.iter().enumerate() {
             for (col_idx, c) in line.iter().enumerate() {
                 print(col_idx * 8, row_idx * 16, self.color, *c as u8);
+            }
+        }
+    }
+    fn draw_cursor(&mut self) {
+        if self.cursor_visible {
+            let x = self.column_position * 8;
+            let y = self.row_position * 16;
+            let color = 0xFFFFFFu32; // Cursor color (white)
+            let color_bytes = convert_color(color);
+
+            let mut fs = crate::fs::FS.get().unwrap().lock();
+            if let Ok(inode) = fs.open("/dev/fb0") {
+                let pitch = 1280; // Framebuffer width in pixels
+                let char_width = 8;
+                let char_height = 16;
+
+                // Create a buffer for one row (8 pixels wide)
+                let row_buf = vec![color_bytes; char_width].concat();
+
+                for row in 0..char_height {
+                    let pixel_offset = ((y + row) * pitch) + x;
+                    fs.write(inode, pixel_offset as u64, &row_buf).unwrap();
+                }
+            }
+        }
+    }
+
+
+    pub fn tick(&mut self) {
+        self.cursor_timer += 1;
+        if self.cursor_timer >= 30 { // tune blink speed
+            self.cursor_timer = 0;
+
+            // Toggle visibility
+            if self.cursor_visible {
+                self.clear_cursor();
+            } else {
+                self.draw_cursor();
+            }
+
+            self.cursor_visible = !self.cursor_visible;
+        }
+    }
+
+    fn clear_cursor(&mut self) {
+        let x = self.column_position * 8;
+        let y = self.row_position * 16;
+        let color = 0x101010u32; // Cursor color (white)
+        let color_bytes = convert_color(color);
+
+        let mut fs = crate::fs::FS.get().unwrap().lock();
+        if let Ok(inode) = fs.open("/dev/fb0") {
+            let pitch = 1280; // Framebuffer width in pixels
+            let char_width = 8;
+            let char_height = 16;
+
+            // Create a buffer for one row (8 pixels wide)
+            let row_buf = vec![color_bytes; char_width].concat();
+
+            for row in 0..char_height {
+                let pixel_offset = ((y + row) * pitch) + x;
+                fs.write(inode, pixel_offset as u64, &row_buf).unwrap();
             }
         }
     }
