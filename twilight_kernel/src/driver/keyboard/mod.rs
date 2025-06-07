@@ -5,7 +5,7 @@ use core::task::{Context, Poll};
 use crossbeam_queue::ArrayQueue;
 use futures_util::task::AtomicWaker;
 use futures_util::{Stream, StreamExt};
-use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
 
 pub mod ps2;
 
@@ -26,21 +26,44 @@ pub(crate) fn add_scancode(scancode: u8) {
 
 pub async fn keyboard_interrupt() {
     let mut scancodes = ScancodeStream::new();
-    let mut keyboard = Keyboard::new(ScancodeSet1::new(),
-                                     layouts::Us104Key, HandleControl::Ignore);
-
+    let mut keyboard = Keyboard::new(
+        ScancodeSet1::new(),
+        layouts::Us104Key,
+        HandleControl::Ignore,
+    );
 
     while let Some(scancode) = scancodes.next().await {
         if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
             if let Some(key) = keyboard.process_keyevent(key_event) {
                 match key {
-                    DecodedKey::Unicode(character) => send_char(character),
-                    DecodedKey::RawKey(_key) => {},
+                    DecodedKey::Unicode(character) => {
+                        send_char(character);
+                    }
+                    DecodedKey::RawKey(key) => {
+                        match key {
+                            KeyCode::ArrowUp => {
+                                // handle up arrow
+                                crate::buffer::stdin::send_special("up");
+                            }
+                            KeyCode::ArrowDown => {
+                                // handle down arrow
+                                crate::buffer::stdin::send_special("down");
+                            }
+                            KeyCode::ArrowLeft => {
+                                crate::buffer::stdin::send_special("left");
+                            }
+                            KeyCode::ArrowRight => {
+                                crate::buffer::stdin::send_special("right");
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
     }
 }
+
 
 fn send_char(c: char) {
     // get_stdio_keypress(c);

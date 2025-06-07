@@ -14,6 +14,19 @@ pub fn send_char(c: char) {
     STDIN_WAKER.wake();
 }
 
+pub fn send_special(key: &str) {
+    let mut stdin = STDIN.lock();
+    match key {
+        "up" => stdin.push_back('\u{F700}'),
+        "down" => stdin.push_back('\u{F701}'),
+        "left" => stdin.push_back('\u{F702}'),
+        "right" => stdin.push_back('\u{F703}'),
+        _ => return,
+    }
+    STDIN_WAKER.wake();
+}
+
+
 pub fn stdin_available() -> bool {
     !STDIN.lock().is_empty()
 }
