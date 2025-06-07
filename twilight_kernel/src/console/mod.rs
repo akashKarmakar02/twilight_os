@@ -1,20 +1,23 @@
 extern crate alloc;
 
+use crate::buffer::stdin::StdinStream;
+use crate::console::writer::clear_screen;
+use crate::task::executor::EXECUTOR;
+use crate::task::Task;
 use crate::{print, println};
 use alloc::string::String;
 use alloc::vec::Vec;
 use futures_util::StreamExt;
 use spin::Mutex;
-use crate::buffer::stdin::StdinStream;
-use crate::console::writer::{clear_screen, print};
-use crate::task::executor::EXECUTOR;
-use crate::task::Task;
 
 pub mod writer;
 pub mod font;
 
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
 pub static CURSOR_POSITION: Mutex<usize> = Mutex::new(0);
+
+static mut CONSOLE_HISTORY: Vec<String> = Vec::new();
+static mut CONSOLE_HISTORY_INDEX: Mutex<usize> = Mutex::new(0);
 
 async fn handle_input() {
     while let Some(c) = StdinStream::new().next().await {
@@ -37,6 +40,10 @@ fn handle_console_key(c: char) {
         '\n' => {
             print!("\n");
             let mut cmd_line = STDIO.lock();
+            unsafe {
+                #[allow(static_mut_refs)]
+                CONSOLE_HISTORY.push(cmd_line.clone());
+            }
             let args: Vec<&str> = cmd_line.split_whitespace().collect();
 
             if args.len() > 1 {
@@ -46,6 +53,11 @@ fn handle_console_key(c: char) {
             }
             cmd_line.clear();
             start_kernel_console();
+
+            // reset history index
+            #[allow(static_mut_refs)]
+            let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+            *idx = 0;
         }
         '\x08' => {
             if *CURSOR_POSITION.lock() > 2 {
@@ -57,6 +69,51 @@ fn handle_console_key(c: char) {
                 *CURSOR_POSITION.lock() -= 1;
             }
         }
+        '\u{F700}' => {
+            print!("\r");
+            start_kernel_console();
+            #[allow(static_mut_refs)]
+            let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+            #[allow(static_mut_refs)]
+            let len = unsafe { CONSOLE_HISTORY.len() };
+            if len != 0 && len - 1 > *idx {
+                #[allow(static_mut_refs)]
+                let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
+
+                let mut stdio = STDIO.lock();
+                stdio.clear();
+                stdio.push_str(cmd);
+
+                print!("{}", cmd);
+                *idx += 1;
+            }
+        }
+        '\u{F701}' => {
+            print!("\r");
+            start_kernel_console();
+            #[allow(static_mut_refs)]
+            let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+            
+            #[allow(static_mut_refs)]
+            let len = unsafe { CONSOLE_HISTORY.len() };
+            if len != 0 && len >= *idx && *idx > 0 {
+                #[allow(static_mut_refs)]
+                let cmd = unsafe { CONSOLE_HISTORY.get(len - *idx + 1) };
+                
+                let mut stdio = STDIO.lock();
+                stdio.clear();
+                
+                if let Some(cmd) = cmd {
+                    stdio.push_str(cmd);
+
+                    print!("{}", cmd);
+                }
+
+                *idx -= 1;
+            }
+        }
+        '\u{F702}' => {}
+        '\u{F703}' => {}
         _ => {
             print!("{}", c);
             STDIO.lock().push(c);

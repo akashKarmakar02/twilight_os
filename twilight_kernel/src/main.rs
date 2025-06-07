@@ -65,7 +65,8 @@ unsafe extern "C" fn kmain() -> ! {
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    println!("{}", info);
+    print!("\r");
+    println!("[PANIC]: {}", info);
     hcf();
 }
 

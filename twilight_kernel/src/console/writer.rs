@@ -140,6 +140,10 @@ impl Writer {
                     self.column_position -= 1;
                 }
             },
+            '\r' => {
+                self.clear_line();
+                self.column_position = 0;
+            }
             '\t' => {
                 self.column_position += 4;
                 if self.column_position >= (self.screen_width / 8) as usize{
