@@ -36,7 +36,10 @@ run-x86_64-uefi: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_N
 
 .PHONY: run-x86_64
 run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
-	qemu-img create -f raw hdd.img 16M
+	@if [ ! -f hdd.img ]; then \
+		echo "Creating hdd.img..."; \
+		qemu-img create -f raw hdd.img 16M; \
+	fi
 	qemu-system-$(KARCH) \
 		-m 20 \
 		-device rtl8139 \
