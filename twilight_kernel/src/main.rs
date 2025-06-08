@@ -10,7 +10,7 @@ use limine::BaseRevision;
 use twilight_kernel::driver::keyboard::keyboard_interrupt;
 use twilight_kernel::task::executor::EXECUTOR;
 use twilight_kernel::task::Task;
-use twilight_kernel::{println, print};
+use twilight_kernel::{serial_print, serial_prtinln};
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -65,8 +65,7 @@ unsafe extern "C" fn kmain() -> ! {
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    print!("\r");
-    println!("[PANIC]: {}", info);
+    serial_prtinln!("[PANIC]: {}", info);
     hcf();
 }
 

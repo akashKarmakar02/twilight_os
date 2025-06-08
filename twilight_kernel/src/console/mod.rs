@@ -4,7 +4,7 @@ use crate::buffer::stdin::StdinStream;
 use crate::console::writer::clear_screen;
 use crate::task::executor::EXECUTOR;
 use crate::task::Task;
-use crate::{print, println};
+use crate::{print, println, serial_prtinln};
 use alloc::string::String;
 use alloc::vec::Vec;
 use futures_util::StreamExt;
@@ -85,6 +85,8 @@ fn handle_console_key(c: char) {
                 #[allow(static_mut_refs)]
                 let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
                 
+                serial_prtinln!("{}", *idx);
+                
                 let mut stdio = STDIO.lock();
                 stdio.clear();
                 stdio.push_str(cmd);
@@ -153,6 +155,8 @@ fn exec(cmd: &str, args: &[&str]) {
         "uname" => {
             println!("TwilightOS Twilight-Kernel 0.1 DevBuild (23/03/25)")
         },
+        "dealloc" => crate::kernel_utils::dealloc::main(args),
+        "allocate" => crate::kernel_utils::allocate::main(),
         "mkfs" => crate::kernel_utils::mkfs::main(args),
         "cat" => crate::kernel_utils::cat::main(args),
         "ls" => crate::kernel_utils::ls::main(args, "/"),

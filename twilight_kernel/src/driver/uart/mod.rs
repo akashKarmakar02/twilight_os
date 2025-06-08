@@ -93,15 +93,18 @@ pub fn init() {
 
 #[macro_export]
 macro_rules! serial_print {
-    ($($arg:tt)*) => {
-        unsafe {
-            #[allow(static_mut_refs)]
-            if let Some(uart) = &crate::driver::uart::UART {
-                use core::fmt::Write;
-                let _ = write!(crate::driver::uart::SerialWriter(uart), $($arg)*);
-            }
+    ($($arg:tt)*) => ($crate::driver::uart::_print(format_args!($($arg)*)));
+}
+
+#[doc(hidden)]
+pub fn _print(args: fmt::Arguments) {
+    unsafe {
+        #[allow(static_mut_refs)]
+        if let Some(uart) = &UART {
+            use core::fmt::Write;
+            let _ = SerialWriter(uart).write_fmt(args);
         }
-    };
+    }
 }
 
 #[macro_export]
