@@ -69,33 +69,45 @@ fn handle_console_key(c: char) {
                 *CURSOR_POSITION.lock() -= 1;
             }
         }
+        // up arrow key
         '\u{F700}' => {
             print!("\r");
             start_kernel_console();
-            #[allow(static_mut_refs)]
-            let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
-            #[allow(static_mut_refs)]
-            let len = unsafe { CONSOLE_HISTORY.len() };
-            if len != 0 && len - 1 > *idx {
-                #[allow(static_mut_refs)]
-                let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
-
-                let mut stdio = STDIO.lock();
-                stdio.clear();
-                stdio.push_str(cmd);
-
-                print!("{}", cmd);
-                *idx += 1;
-            }
-        }
-        '\u{F701}' => {
-            print!("\r");
-            start_kernel_console();
+            
             #[allow(static_mut_refs)]
             let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
             
             #[allow(static_mut_refs)]
             let len = unsafe { CONSOLE_HISTORY.len() };
+            
+            // there must be some history to go back to & the index must be less than the length of the history
+            if len != 0 && len - 1 > *idx {
+                #[allow(static_mut_refs)]
+                let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
+                
+                let mut stdio = STDIO.lock();
+                stdio.clear();
+                stdio.push_str(cmd);
+
+                print!("{}", cmd);
+                
+                // incrementing the history index
+                *idx += 1;
+                // changing the cursor position so backspace works
+                *CURSOR_POSITION.lock() = 2 + cmd.len();
+            }
+        }
+        // down arrow key
+        '\u{F701}' => {
+            print!("\r");
+            start_kernel_console();
+            
+            #[allow(static_mut_refs)]
+            let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+            
+            #[allow(static_mut_refs)]
+            let len = unsafe { CONSOLE_HISTORY.len() };
+            
             if len != 0 && len >= *idx && *idx > 0 {
                 #[allow(static_mut_refs)]
                 let cmd = unsafe { CONSOLE_HISTORY.get(len - *idx + 1) };
@@ -107,9 +119,12 @@ fn handle_console_key(c: char) {
                     stdio.push_str(cmd);
 
                     print!("{}", cmd);
+                    
+                    // changing the cursor position so backspace works
+                    *CURSOR_POSITION.lock() = 2 + cmd.len();
+                    
+                    *idx -= 1;
                 }
-
-                *idx -= 1;
             }
         }
         '\u{F702}' => {}
@@ -143,7 +158,8 @@ fn exec(cmd: &str, args: &[&str]) {
         "ls" => crate::kernel_utils::ls::main(args, "/"),
         "pitch" => {
             println!("{}", crate::framebuffer::get_pitch());
-        }
+        },
+        "df" => crate::kernel_utils::df::main(args),
         _ => {
             println!("{}: not a command", cmd);
         }
