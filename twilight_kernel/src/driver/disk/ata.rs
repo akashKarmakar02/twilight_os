@@ -58,7 +58,6 @@ impl Ata {
             *word = unsafe { port_data.read() };
         }
 
-        self.sector_size = 512;
         self.sector_count = ((identify_data[61] as u64) << 16) | (identify_data[60] as u64);
 
         // Extract model name

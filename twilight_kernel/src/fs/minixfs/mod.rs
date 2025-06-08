@@ -90,8 +90,7 @@ pub fn format_superblock(
 
 pub fn read_superblock(device: &mut dyn BlockDevice) -> Result<Superblock, &'static str> {
     let mut buf = [0u8; 1024]; // Assuming block size is 1KiB
-    device.read_block(0, &mut buf[0..512])?; // Superblock is usually at block 1
-    device.read_block(1, &mut buf[512..1024])?;
+    device.read_block(0, &mut buf[0..1024])?; // Superblock is usually at block 1
     let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
 
     if sb.magic != 0x137F && sb.magic != 0x138F {
