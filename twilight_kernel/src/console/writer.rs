@@ -27,18 +27,15 @@ fn apply_console_bg() {
         let height = 720;
         let total_pixels = width * height;
 
-        let mut buf = vec![0u8; total_pixels / 2];
+        let mut buf = vec![0u8; total_pixels*4];
         let color = convert_color(0x101010u32);
 
-        for g in 0..8usize {
-            for i in 0..(total_pixels / 8) {
-                let start_index = i * 4;
-                let end_index = start_index + 4;
-                buf[start_index..end_index].clone_from_slice(&color);
-            }
-            fs.write(inode, g as u64 * (total_pixels / 8) as u64, buf.as_slice()).unwrap();
+        for i in 0..total_pixels {
+            let start_index = i * 4;
+            let end_index = start_index + 4;
+            buf[start_index..end_index].clone_from_slice(&color);
         }
-
+        fs.write(inode, 0, buf.as_slice()).unwrap();
     }
 
 }
