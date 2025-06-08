@@ -6,3 +6,5 @@ pub mod ls;
 pub mod shutdown;
 pub mod mkfs;
 pub mod df;
+pub mod allocate;
+pub mod dealloc;

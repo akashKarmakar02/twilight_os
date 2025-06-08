@@ -21,7 +21,7 @@ pub fn main(args: &[&str]) {
 
     if let Some(disk) = disk {
         let disk_size = disk.sector_size() * disk.sector_count();
-        let inode = disk_size / (disk.sector_size() * 4);
+        let inode = disk_size / (disk.sector_size() * 16);
         let block_size = disk.sector_size();
 
         crate::fs::minixfs::format_superblock(*disk, disk_size as usize, inode as u16, block_size as u16).expect("Unable to initialize minixfs");

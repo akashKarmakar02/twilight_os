@@ -1,6 +1,7 @@
 #![no_std]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
+#![feature(core_float_math)]
 
 pub mod framebuffer;
 pub mod arch;

@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
 
-pub(crate) static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
+pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
 
 #[derive(Debug)]
 pub enum VfsError {
