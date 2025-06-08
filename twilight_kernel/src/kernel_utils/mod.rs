@@ -5,3 +5,4 @@ pub mod cat;
 pub mod ls;
 pub mod shutdown;
 pub mod mkfs;
+pub mod df;
