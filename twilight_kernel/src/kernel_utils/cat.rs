@@ -2,12 +2,12 @@ use alloc::string::String;
 use crate::{fs, print, println};
 
 pub fn main(args: &[&str]) {
-    if args.len() == 0 {
+    if args.is_empty() {
         return;
     }
 
     if args[0] == ">" && args.len() == 2 {
-        if let Some(_) = fs::create(args[1]) {
+        if fs::create(args[1]).is_some() {
 
         } else {
             println!("Error: Could not open fs file");

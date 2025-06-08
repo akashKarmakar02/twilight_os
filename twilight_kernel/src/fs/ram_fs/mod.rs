@@ -22,6 +22,12 @@ pub enum RamFSNode {
     VfsNode { inode: u64, dev: Arc<Mutex<dyn super::VfsNode + Send + Sync>> },
 }
 
+impl Default for RamFS {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RamFS {
     pub fn new() -> Self {
         let mut inodes = BTreeMap::new();
@@ -111,11 +117,8 @@ impl Vfs for RamFS {
         let node = RamFSNode::File { inode, data: Vec::new() };
         self.inodes.insert(inode, RamFSNode::File { inode, data: Vec::new() });
         if path.split("/").filter(|x| !x.is_empty()).count() == 1 || !path.starts_with("/") {
-            match self.inodes.get_mut(&root_inode) {
-                Some(RamFSNode::Directory { children, .. }) => {
-                    children.insert(String::from(path), node);
-                }
-                _ => {}
+            if let Some(RamFSNode::Directory { children, .. }) = self.inodes.get_mut(&root_inode) {
+                children.insert(String::from(path), node);
             }
         }
         self.paths.insert(path.to_string(), inode);

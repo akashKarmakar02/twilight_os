@@ -1,7 +1,7 @@
 use crate::println;
 
 pub fn main(args: &[&str]) {
-    if args.iter().count() == 0 {
+    if args.len() == 0 {
         println!("Echo: no arguments supplied");
         return;
     }

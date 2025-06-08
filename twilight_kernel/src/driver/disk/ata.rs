@@ -49,7 +49,7 @@ impl Ata {
             return false;
         }
 
-        if let Err(_) = self.wait_ready() {
+        if self.wait_ready().is_err() {
             return false;
         }
 

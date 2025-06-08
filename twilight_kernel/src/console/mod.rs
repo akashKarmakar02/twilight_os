@@ -63,7 +63,7 @@ fn handle_console_key(c: char) {
             if *CURSOR_POSITION.lock() > 2 {
                 print!("{}", c);
                 let mut cmd_line = STDIO.lock();
-                if cmd_line.trim().len() > 0 {
+                if !cmd_line.trim().is_empty() {
                     cmd_line.pop();
                 }
                 *CURSOR_POSITION.lock() -= 1;

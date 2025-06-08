@@ -38,7 +38,7 @@ pub struct DirEntry {
 
 
 fn ceil_div(a: usize, b: usize) -> usize {
-    (a + b - 1) / b
+    a.div_ceil(b)
 }
 
 fn calculate_superblock(

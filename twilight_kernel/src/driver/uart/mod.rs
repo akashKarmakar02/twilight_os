@@ -25,7 +25,7 @@ impl Uart {
             port.write(0x80u8); // Enable DLAB (set baud rate divisor)
         }
 
-        let mut port: Port<u8> = Port::new(self.port + 0);
+        let mut port: Port<u8> = Port::new(self.port);
 
         unsafe {
             port.write(0x03u8); // Set divisor to 3 (lo byte) 38400 baud
@@ -110,7 +110,7 @@ pub fn _print(args: fmt::Arguments) {
 #[macro_export]
 macro_rules! serial_prtinln {
     ($($arg:tt)*) => {
-        crate::serial_print!($($arg)*);
+        $crate::serial_print!($($arg)*);
         crate::serial_print!("\n");
     };
 }

@@ -14,7 +14,7 @@ static WAKER: AtomicWaker = AtomicWaker::new();
 
 pub(crate) fn add_scancode(scancode: u8) {
     if let Ok(queue) = SCANCODE_QUEUE.try_get() {
-        if let Err(_) = queue.push(scancode) {
+        if queue.push(scancode).is_err() {
             println!("WARNING: scancode queue full; dropping keyboard input");
         } else {
             WAKER.wake();
@@ -33,8 +33,8 @@ pub async fn keyboard_interrupt() {
     );
 
     while let Some(scancode) = scancodes.next().await {
-        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-            if let Some(key) = keyboard.process_keyevent(key_event) {
+        if let Ok(Some(key_event)) = keyboard.add_byte(scancode)
+            && let Some(key) = keyboard.process_keyevent(key_event) {
                 match key {
                     DecodedKey::Unicode(character) => {
                         send_char(character);
@@ -60,7 +60,6 @@ pub async fn keyboard_interrupt() {
                     }
                 }
             }
-        }
     }
 }
 

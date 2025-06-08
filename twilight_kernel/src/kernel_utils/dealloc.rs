@@ -2,7 +2,7 @@ use crate::driver::disk::DISK_FS;
 use crate::println;
 
 pub fn main(args: &[&str]) {
-    if args.len() < 1 {
+    if args.is_empty() {
         println!("Usage: dealloc <zone>");
         return;
     }

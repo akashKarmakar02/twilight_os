@@ -21,7 +21,6 @@ fn check_device(bus: u8, device: u8) {
 
     let vendor_id = vendor_id(bus, device, function);
     if vendor_id == 0xFFFF {
-        return;
     }
 }
 

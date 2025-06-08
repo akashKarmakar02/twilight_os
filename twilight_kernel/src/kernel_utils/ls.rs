@@ -12,10 +12,6 @@ pub fn main(_args: &[&str], _ctx: &str) {
 }
 
 fn get_files(ctx: &str) -> Vec<String> {
-    if let Some(files) = fs::readdir(ctx) {
-        files
-    } else {
-        Vec::new()
-    }
+    fs::readdir(ctx).unwrap_or_default()
 
 }

@@ -63,11 +63,7 @@ pub fn write(path: &str, offset: u64, buffer: &[u8]) -> Option<usize> {
     let mut fs = FS.try_get().unwrap().lock();
 
     if let Ok(inode) = fs.open(path) {
-        if let Ok(bytes) = fs.write(inode, offset, buffer) {
-            Some(bytes)
-        } else {
-            None
-        }
+        fs.write(inode, offset, buffer).ok()
     } else {
         None
     }
@@ -76,11 +72,7 @@ pub fn write(path: &str, offset: u64, buffer: &[u8]) -> Option<usize> {
 pub fn create(path: &str) -> Option<u64> {
     let mut fs = FS.try_get().unwrap().lock();
 
-    if let Ok(inode) = fs.create(path) {
-        Some(inode)
-    } else {
-        None
-    }
+    fs.create(path).ok()
 }
 
 pub fn delete(path: &str) -> Option<()> {
@@ -97,11 +89,7 @@ pub fn readdir(path: &str) -> Option<Vec<String>> {
     let fs = FS.try_get().unwrap().lock();
 
     if let Ok(inode) = fs.open(path) {
-        if let Ok(files) = fs.readdir(inode) {
-            Some(files)
-        } else {
-            None
-        }
+        fs.readdir(inode).ok()
     } else {
         None
     }

@@ -55,8 +55,8 @@ pub fn print(x: usize, y: usize, color: u32, ascii: u8) {
     let mut fs = crate::fs::FS.get().unwrap().lock();
     let pitch = 1280; // Width of the framebuffer in pixels
 
-    if let Ok(inode) = fs.open("/dev/fb0") {
-        if let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32) {
+    if let Ok(inode) = fs.open("/dev/fb0")
+        && let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32) {
             let color_bytes = convert_color(color);
             let background_color = convert_color(0x101010u32);
 
@@ -74,7 +74,6 @@ pub fn print(x: usize, y: usize, color: u32, ascii: u8) {
                 fs.write(inode, pixel_offset as u64, row_buf.as_slice()).unwrap();
             }
         }
-    }
 }
 
 
@@ -293,7 +292,7 @@ macro_rules! print {
 #[macro_export]
 macro_rules! println {
     () => ($crate::framebuffer::_print("\n"));
-    ($($arg:tt)*) => (crate::print!("{}\n", format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
 #[doc(hidden)]

@@ -35,6 +35,12 @@ pub struct StdinStream {
     _private: (),
 }
 
+impl Default for StdinStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StdinStream {
     pub fn new() -> Self {
         Self { _private: () }

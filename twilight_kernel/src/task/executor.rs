@@ -60,6 +60,12 @@ impl Wake for TaskWaker {
     }
 }
 
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Executor {
     pub fn new() -> Executor {
         Executor {
