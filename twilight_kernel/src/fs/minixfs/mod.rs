@@ -241,4 +241,65 @@ impl MinixFs {
         Ok(())
     }
 
+    pub fn write_inode(&mut self, inode_num: u16, inode: &Inode) -> Result<(), &'static str> {
+        if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
+            return Err("Invalid inode number");
+        }
+
+        let inode_index = (inode_num - 1) as usize;
+        let inode_size = size_of::<Inode>();
+        let block_size = self.superblock.block_size as usize;
+        let inodes_per_block = block_size / inode_size;
+
+        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 2;
+        let block_offset = inode_index / inodes_per_block;
+        let byte_offset = (inode_index % inodes_per_block) * inode_size;
+        let block_num = inode_table_start + block_offset as u16;
+
+        let mut buffer = [0u8; 1024];
+        self.device.read_block(block_num as u64, &mut buffer)?;
+
+        let inode_bytes = unsafe {
+            core::slice::from_raw_parts(
+                inode as *const _ as *const u8,
+                size_of::<Inode>(),
+            )
+        };
+        buffer[byte_offset..byte_offset + inode_size].copy_from_slice(inode_bytes);
+        
+        self.device.write_block(block_num as u64, &buffer)?;
+        
+        Ok(())
+    }
+    
+    pub fn read_inode(&mut self, inode_num: u16) -> Result<Inode, &'static str> {
+        if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
+            return Err("Invalid inode number");
+        }
+
+
+        let inode_index = (inode_num - 1) as usize;
+        let inode_size = size_of::<Inode>();
+        let block_size = self.superblock.block_size as usize;
+        let inodes_per_block = block_size / inode_size;
+
+        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 2;
+        let block_offset = inode_index / inodes_per_block;
+        let byte_offset = (inode_index % inodes_per_block) * inode_size;
+        let block_num = inode_table_start + block_offset as u16;
+
+        let mut buffer = [0u8; 1024];
+        self.device.read_block(block_num as u64, &mut buffer)?;
+
+        let inode_bytes = unsafe {
+            core::slice::from_raw_parts(
+                buffer[byte_offset..byte_offset + inode_size].as_ptr() as *const _,
+                size_of::<Inode>(),
+            )
+        };
+        let inode: Inode = unsafe { core::ptr::read(inode_bytes.as_ptr() as *const _) };
+        
+        Ok(inode)
+    }
+
 }
