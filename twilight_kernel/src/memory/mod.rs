@@ -6,14 +6,31 @@ use limine::memory_map::{Entry, EntryType};
 
 pub struct BootInfoFrameAllocator {
     memory_map: &'static [&'static Entry],
-    next: usize,
+    region_index: usize,
+    current_addr: u64,
 }
 
 impl BootInfoFrameAllocator {
     pub unsafe fn init(memory_map: &'static [&Entry]) -> Self {
-        BootInfoFrameAllocator {
-            next: 0,
+        let mut allocator = Self {
             memory_map,
+            region_index: 0,
+            current_addr: 0,
+        };
+
+        // Skip to first usable region
+        allocator.skip_to_next_usable_region();
+        allocator
+    }
+
+    fn skip_to_next_usable_region(&mut self) {
+        while self.region_index < self.memory_map.len() {
+            let region = self.memory_map[self.region_index];
+            if region.entry_type == EntryType::USABLE {
+                self.current_addr = region.base;
+                return;
+            }
+            self.region_index += 1;
         }
     }
 
@@ -34,9 +51,26 @@ impl BootInfoFrameAllocator {
 
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+        while self.region_index < self.memory_map.len() {
+            let region = self.memory_map[self.region_index];
+
+            if region.entry_type != EntryType::USABLE {
+                self.region_index += 1;
+                continue;
+            }
+
+            let end = region.base + region.length;
+            if self.current_addr < end {
+                let frame = PhysFrame::containing_address(PhysAddr::new(self.current_addr));
+                self.current_addr += 4096;
+                return Some(frame);
+            } else {
+                self.region_index += 1;
+                self.skip_to_next_usable_region();
+            }
+        }
+
+        None
     }
 }
 

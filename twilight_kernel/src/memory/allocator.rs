@@ -1,11 +1,11 @@
 use limine::response::MemoryMapResponse;
 use linked_list_allocator::LockedHeap;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
-use x86_64::structures::paging::mapper::MapToError;
 use x86_64::VirtAddr;
+use x86_64::structures::paging::mapper::MapToError;
+use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-static HEAP_SIZE: u64 = 16*1024*1024;
+static HEAP_SIZE: u64 = 32 * 1024 * 1024;
 
 #[global_allocator]
 pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -15,7 +15,6 @@ pub fn init_heap(
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     _memory_map_response: &'static MemoryMapResponse,
 ) -> Result<(), MapToError<Size4KiB>> {
-
     let page_range = {
         let heap_start = VirtAddr::new(HEAP_START as u64);
         let head_end = heap_start + HEAP_SIZE - 1u64;
@@ -29,9 +28,7 @@ pub fn init_heap(
             .allocate_frame()
             .ok_or(MapToError::FrameAllocationFailed)?;
         let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-        unsafe {
-            mapper.map_to(page, frame, flags, frame_allocator)?.flush()
-        };
+        unsafe { mapper.map_to(page, frame, flags, frame_allocator)?.flush() };
     }
 
     unsafe {
