@@ -16,13 +16,26 @@ pub mod fs;
 extern crate alloc;
 
 use limine::framebuffer::Framebuffer;
-use limine::response::{HhdmResponse, MemoryMapResponse};
+use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
 use x86_64::VirtAddr;
 use crate::console::writer::init_writer;
 use crate::framebuffer::{init_framebuffer};
 use crate::task::executor;
 
-pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static MemoryMapResponse) {
+
+pub fn init_smp(mp_response: &'static MpResponse) {
+    let smp = mp_response;
+
+    for i in 0..smp.cpus().len() {
+        let cpu = smp.cpus().get(i).unwrap();
+        println!(
+            "CPU {}: APIC ID {}, EXTRA: {}",
+            i, cpu.lapic_id, cpu.extra
+        );
+    }
+}
+
+pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static MemoryMapResponse, mp_response: &'static MpResponse) {
     init_framebuffer(fb);
     arch::x86_64::gdt::init();
     arch::x86_64::idt::init();
@@ -44,6 +57,7 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     driver::pci::init();
     driver::cpu::init();
     driver::disk::init();
+    init_smp(mp_response);
 }
 
 
