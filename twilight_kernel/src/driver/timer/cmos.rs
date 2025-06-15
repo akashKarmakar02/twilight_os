@@ -41,6 +41,46 @@ impl CMOS {
         }
     }
 
+    pub fn unix_time(&mut self) -> u64 {
+        let rtc = self.read();
+
+        // Convert the year to full 4-digit form (assumes 20xx)
+        let year = 2000 + rtc.year as u64;
+        let month = rtc.month as u64;
+        let day = rtc.day as u64;
+        let hour = rtc.hour as u64;
+        let minute = rtc.minute as u64;
+        let second = rtc.second as u64;
+
+        // Days in months, not accounting for leap years yet
+        let days_in_month = [31, 28, 31, 30, 31, 30, 31,
+            31, 30, 31, 30, 31];
+
+        // Calculate number of days since Unix epoch
+        let mut days = 0;
+
+        // Add days for all previous years
+        for y in 1970..year {
+            days += if is_leap_year(y) { 366 } else { 365 };
+        }
+
+        // Add days for all previous months in the current year
+        for m in 0..(month - 1) {
+            days += days_in_month[m as usize];
+            if m == 1 && is_leap_year(year) {
+                days += 1; // February in a leap year
+            }
+        }
+
+        // Add days in current month
+        days += day - 1;
+
+        // Convert everything to seconds
+        let total_seconds = days * 86400 + hour * 3600 + minute * 60 + second;
+
+        total_seconds
+    }
+
     pub fn read(&mut self) -> RTC {
         while self.is_updating() {
             print!("");
@@ -87,4 +127,8 @@ impl CMOS {
             self.data.read()
         }
     }
+}
+
+fn is_leap_year(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
