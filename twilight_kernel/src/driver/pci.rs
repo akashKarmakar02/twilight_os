@@ -70,7 +70,7 @@ fn vendor_id(bus: u8, device: u8, function: u8) -> u16 {
     if vendor_id != 0xFFFF {
         let device_id = read_config(bus, device, function, 2);
         let name = lookup_device_name(vendor_id, device_id);
-        print!("[{:.6}] PCI {:04}:{:02}:{:02} [{:04x}:{:04x}] {}\n", crate::driver::timer::pit::uptime(), bus, device, function, vendor_id, device_id, name);
+        print!("\x1b[93m[{:.6}]\x1b[0m PCI {:04}:{:02}:{:02} [{:04x}:{:04x}] {}\n", crate::driver::timer::pit::uptime(), bus, device, function, vendor_id, device_id, name);
     }
 
     vendor_id

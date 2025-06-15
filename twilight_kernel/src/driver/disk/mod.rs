@@ -33,10 +33,13 @@ pub fn init() {
         model: None,
     };
 
+    let time = crate::driver::timer::pit::uptime();
+
     if ata.detect() {
         println!(
-            "ATA: {} {}",
-            ata.base_port,
+            "\x1b[93m[{:.6}]\x1b[0m ATA: {} bytes {}",
+            time,
+            ata.sector_size * ata.sector_count as usize,
             ata.get_ata_model_name().unwrap()
         );
         

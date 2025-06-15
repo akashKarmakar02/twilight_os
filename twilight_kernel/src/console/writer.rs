@@ -1,4 +1,5 @@
 use alloc::{vec, vec::Vec};
+use alloc::string::String;
 use crate::console::font::PSF_FONTS;
 use crate::framebuffer::convert_color;
 use core::fmt;
@@ -7,6 +8,7 @@ use crate::fs::Vfs;
 
 static mut WRITER: Option<Writer> = None;
 
+// Initialize the kernel shell
 pub fn init_writer() {
     apply_console_bg();
 
@@ -14,15 +16,18 @@ pub fn init_writer() {
     unsafe { WRITER = Some(Writer::new(0xBFBFBF)); }
 }
 
+// global function to get the writer in a safe mode
 pub fn get_writer() -> &'static mut Writer {
     #[allow(static_mut_refs)]
     unsafe { WRITER.as_mut().expect("Writer not initialized") }
 }
 
+// apply background color to the kernel shell using framebuffer
 fn apply_console_bg() {
     let mut fs = crate::fs::FS.get().unwrap().lock();
 
     if let Ok(inode) = fs.open("/dev/fb0") {
+        // using fixed size (because we don't have ioctl)
         let width = 1280;
         let height = 720;
         let total_pixels = width * height;
@@ -267,8 +272,62 @@ impl Writer {
         }
     }
 
+    fn parse_ansi_code(&mut self, code: &str) {
+        let parts: Vec<u8> = code
+            .split(';')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+
+        for code in parts {
+            match code {
+                0 => self.color = 0xBFBFBF,               // Reset
+                30 => self.color = 0x000000, // Black
+                31 => self.color = 0xAA0000, // Red
+                32 => self.color = 0x00AA00, // Green
+                33 => self.color = 0xAA5500, // Yellow
+                34 => self.color = 0x0000AA, // Blue
+                35 => self.color = 0xAA00AA, // Magenta
+                36 => self.color = 0x00AAAA, // Cyan
+                37 => self.color = 0xAAAAAA, // White (gray)
+
+                // Bright foreground colors (90–97)
+                90 => self.color = 0x555555, // Bright Black (Dark Gray)
+                91 => self.color = 0xFF5555, // Bright Red
+                92 => self.color = 0x55FF55, // Bright Green
+                93 => self.color = 0xFFFF55, // Bright Yellow
+                94 => self.color = 0x5555FF, // Bright Blue
+                95 => self.color = 0xFF55FF, // Bright Magenta
+                96 => self.color = 0x55FFFF, // Bright Cyan
+                97 => self.color = 0xFFFFFF, // Bright White
+                _ => {}
+            }
+        }
+    }
+
     pub fn write_string(&mut self, s: &str) {
-        for c in s.chars() {
+        let mut chars = s.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Try to parse escape sequence: \x1b[31m
+                if chars.peek() == Some(&'[') {
+                    chars.next(); // skip '['
+
+                    let mut code = String::new();
+                    while let Some(&next_c) = chars.peek() {
+                        if next_c == 'm' {
+                            chars.next(); // consume 'm'
+                            break;
+                        }
+                        code.push(next_c);
+                        chars.next();
+                    }
+
+                    self.parse_ansi_code(&code);
+                    continue;
+                }
+            }
+
             self.write_char(c);
         }
     }

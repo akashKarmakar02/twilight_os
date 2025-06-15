@@ -66,7 +66,7 @@ unsafe extern "C" fn kmain() -> ! {
         mp_response.unwrap(),
     );
     
-    println!("                                                     ,,    ,,    ,,            ,,                                        ");
+    println!("\x1b[96m                                                     ,,    ,,    ,,            ,,                                        ");
     println!("                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd ");
     println!("                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y ");
     println!("                                MM `7M'    ,A    `MF'`7MM    MM  `7MM  .P\"Ybmmm  MMpMMMb.mmMMmm     dM'      `MM `MMb.     ");
@@ -75,7 +75,7 @@ unsafe extern "C" fn kmain() -> ! {
     println!("                                MM     VVV    VVV      MM    MM    MM  8M         MM    MM  MM       `Mb.    ,dP' Mb     dM ");
     println!("                              .JMML.    W      W     .JMML..JMML..JMML.YMMMMMb .JMML  JMML.`Mbmo      `\"bmmd\"'   P\"Ybmmd\"  ");
     println!("                                                                       6'     dP                                             ");
-    println!("                                                                       Ybmmmd'                                               ");
+    println!("                                                                       Ybmmmd'                                               \x1b[0m");
 
     twilight_kernel::console::init_console();
     

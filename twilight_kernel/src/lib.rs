@@ -38,17 +38,18 @@ pub fn init_smp(mp_response: &'static MpResponse) {
     let smp = mp_response;
     let bsp_id = mp_response.bsp_lapic_id();
 
+    let time = driver::timer::pit::uptime();
+
     for i in 0..smp.cpus().len() {
         let cpu = smp.cpus().get(i).unwrap();
         let apic_id = cpu.lapic_id;
 
         if apic_id == bsp_id {
-            println!("BSP (CPU {}) is APIC ID {}", i, apic_id);
+            println!("\x1b[93m[{:.6}]\x1b[0m BSP Core {}: APIC ID {}", time, i, apic_id, );
         } else {
-            println!("AP Core {}: APIC ID {}", i, apic_id);
+            println!("\x1b[93m[{:.6}]\x1b[0m AP Core {}: APIC ID {}", time, i, apic_id);
+            
             cpu.goto_address.write(ap_main);
-            // Send AP startup/trampoline here (if not auto-started)    
-            // You can also store their APIC IDs in a list for task assignment
         }
     }
 }

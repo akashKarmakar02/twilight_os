@@ -25,7 +25,7 @@ pub fn init() {
         .unwrap_or(0);
 
     crate::print!(
-        "[{:.6}] CPU [{:04x}:{:04x}] {}\n",
+        "\x1b[93m[{:.6}]\x1b[0m CPU [{:04x}:{:04x}] {}\n",
         time,
         vendor_id,
         device_id,
