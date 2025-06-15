@@ -98,7 +98,7 @@ impl Bus {
     }
 
     fn wait(&mut self, ns: u64) {
-        crate::task::executor::sleep(ns as f64 / 1000000000.0);
+        crate::driver::timer::wait(ns);
     }
 
     fn clear_interrupt(&mut self) -> u8 {
@@ -163,7 +163,7 @@ impl Bus {
             // Bit 7 => 1
             self.drive_register.write(0xA0 | (drive << 4))
         }
-        crate::task::executor::sleep(0.0000004); // Wait at least 400 ns
+        crate::driver::timer::wait(400); // Wait at least 400 ns
         self.poll(Status::BSY, false)?;
         self.poll(Status::DRQ, false)?;
         Ok(())

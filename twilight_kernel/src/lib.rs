@@ -61,6 +61,7 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     arch::x86_64::idt::init_pics();
     driver::uart::init();
     x86_64::instructions::interrupts::enable();
+    driver::timer::init();
 
     let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
