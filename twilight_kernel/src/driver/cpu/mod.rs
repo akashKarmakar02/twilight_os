@@ -1,7 +1,41 @@
 use alloc::string::String;
+use limine::response::MpResponse;
 use raw_cpuid::CpuId;
+use crate::{driver, println};
 
-pub fn init() {
+unsafe extern "C" fn ap_main(_cpu: &limine::mp::Cpu) -> ! {
+    use x86_64::instructions::{hlt, interrupts};
+
+    interrupts::enable();
+
+    loop {
+        hlt();
+    }
+}
+
+
+
+pub fn init_smp(mp_response: &'static MpResponse) {
+    let smp = mp_response;
+    let bsp_id = mp_response.bsp_lapic_id();
+
+    let time = driver::timer::pit::uptime();
+
+    for i in 0..smp.cpus().len() {
+        let cpu = smp.cpus().get(i).unwrap();
+        let apic_id = cpu.lapic_id;
+
+        if apic_id == bsp_id {
+            println!("\x1b[93m[{:.6}]\x1b[0m BSP Core {}: APIC ID {}", time, i, apic_id, );
+        } else {
+            println!("\x1b[93m[{:.6}]\x1b[0m AP Core {}: APIC ID {}", time, i, apic_id);
+
+            cpu.goto_address.write(ap_main);
+        }
+    }
+}
+
+pub fn init(mp_response: &'static MpResponse) {
     let cpuid = CpuId::new();
     let time = crate::driver::timer::pit::uptime();
 
@@ -31,4 +65,5 @@ pub fn init() {
         device_id,
         name
     );
+    init_smp(mp_response);
 }
