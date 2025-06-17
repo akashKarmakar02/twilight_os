@@ -43,17 +43,17 @@ pub async fn keyboard_interrupt() {
                         match key {
                             KeyCode::ArrowUp => {
                                 // handle up arrow
-                                crate::buffer::stdin::send_special("up");
+                                crate::sys::buffer::stdin::send_special("up");
                             }
                             KeyCode::ArrowDown => {
                                 // handle down arrow
-                                crate::buffer::stdin::send_special("down");
+                                crate::sys::buffer::stdin::send_special("down");
                             }
                             KeyCode::ArrowLeft => {
-                                crate::buffer::stdin::send_special("left");
+                                crate::sys::buffer::stdin::send_special("left");
                             }
                             KeyCode::ArrowRight => {
-                                crate::buffer::stdin::send_special("right");
+                                crate::sys::buffer::stdin::send_special("right");
                             }
                             _ => {}
                         }
@@ -66,7 +66,7 @@ pub async fn keyboard_interrupt() {
 
 fn send_char(c: char) {
     // get_stdio_keypress(c);
-    crate::buffer::stdin::send_char(c);
+    crate::sys::buffer::stdin::send_char(c);
 }
 
 pub struct ScancodeStream {

@@ -1,25 +1,23 @@
 #![no_std]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
-#![feature(core_float_math)]
+#![feature(let_chains)]
+//#![feature(core_float_math)]
 
-pub mod framebuffer;
 pub mod arch;
-pub mod memory;
-pub mod console;
 pub mod driver;
 pub mod kernel_utils;
 pub mod task;
-pub mod buffer;
-pub mod fs;
+pub mod sys;
 
 extern crate alloc;
 
 use limine::framebuffer::Framebuffer;
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
 use x86_64::VirtAddr;
-use crate::console::writer::init_writer;
-use crate::framebuffer::{init_framebuffer};
+use sys::{fs, memory};
+use crate::sys::console::writer::init_writer;
+use sys::framebuffer::init_framebuffer;
 use crate::task::executor;
 
 

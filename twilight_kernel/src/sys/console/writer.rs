@@ -1,10 +1,10 @@
 use alloc::{vec, vec::Vec};
 use alloc::string::String;
-use crate::console::font::PSF_FONTS;
-use crate::framebuffer::convert_color;
+use crate::sys::framebuffer::convert_color;
 use core::fmt;
 use core::fmt::Write;
-use crate::fs::Vfs;
+use crate::sys::fs::Vfs;
+use crate::sys::console::font::PSF_FONTS;
 
 static mut WRITER: Option<Writer> = None;
 
@@ -345,12 +345,12 @@ impl Write for Writer {
 
 #[macro_export]
 macro_rules! print {
-    ($($arg:tt)*) => ($crate::console::writer::_print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::sys::console::writer::_print(format_args!($($arg)*)));
 }
 
 #[macro_export]
 macro_rules! println {
-    () => ($crate::framebuffer::_print("\n"));
+    () => ($crate::sys::framebuffer::_print("\n"));
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 

@@ -5,8 +5,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
-use crate::framebuffer::{get_framebuffer};
-use crate::fs::{Vfs, VfsError};
+use crate::sys::framebuffer::{get_framebuffer};
+use crate::sys::fs::{Vfs, VfsError};
 
 static NEXT_INODE: AtomicU64 = AtomicU64::new(2);
 

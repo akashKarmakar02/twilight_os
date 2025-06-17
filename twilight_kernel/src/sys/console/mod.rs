@@ -1,7 +1,7 @@
 extern crate alloc;
 
-use crate::buffer::stdin::StdinStream;
-use crate::console::writer::clear_screen;
+use crate::sys::buffer::stdin::StdinStream;
+use crate::sys::console::writer::clear_screen;
 use crate::task::executor::EXECUTOR;
 use crate::task::Task;
 use crate::{print, println, serial_prtinln};
@@ -161,7 +161,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "cat" => crate::kernel_utils::cat::main(args),
         "ls" => crate::kernel_utils::ls::main(args, "/"),
         "pitch" => {
-            println!("{}", crate::framebuffer::get_pitch());
+            println!("{}", crate::sys::framebuffer::get_pitch());
         },
         "df" => crate::kernel_utils::df::main(args),
         _ => {

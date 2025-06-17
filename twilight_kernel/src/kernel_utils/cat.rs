@@ -1,5 +1,6 @@
 use alloc::string::String;
-use crate::{fs, print, println};
+use crate::{print, println};
+use crate::sys::fs;
 
 pub fn main(args: &[&str]) {
     if args.is_empty() {

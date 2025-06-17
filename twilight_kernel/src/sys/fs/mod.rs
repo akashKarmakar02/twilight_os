@@ -1,7 +1,7 @@
 pub mod ram_fs;
 pub mod minixfs;
 
-use crate::fs::ram_fs::RamFS;
+use crate::sys::fs::ram_fs::RamFS;
 use alloc::string::String;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;

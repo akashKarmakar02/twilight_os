@@ -1,6 +1,6 @@
 use limine::framebuffer::Framebuffer;
 use spin::Once;
-use crate::fs::{VfsError, VfsNode};
+use crate::sys::fs::{VfsError, VfsNode};
 
 #[allow(static_mut_refs)]
 pub static mut FRAMEBUFFER: Once<TwilightFrameBuffer> = Once::new();

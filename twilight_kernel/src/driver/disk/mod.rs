@@ -1,4 +1,4 @@
-use crate::fs::minixfs::MinixFs;
+use crate::sys::fs::minixfs::MinixFs;
 use spin::Once;
 
 pub mod ata;

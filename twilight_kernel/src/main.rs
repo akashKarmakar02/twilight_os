@@ -77,9 +77,9 @@ unsafe extern "C" fn kmain() -> ! {
     println!("                                                                       6'     dP                                             ");
     println!("                                                                       Ybmmmd'                                               \x1b[0m");
 
-    twilight_kernel::console::init_console();
+    twilight_kernel::sys::console::init_console();
     
-    twilight_kernel::console::start_kernel_console();
+    twilight_kernel::sys::console::start_kernel_console();
 
     let mut executor = EXECUTOR.get().unwrap().lock();
     executor.spawn(Task::new(keyboard_interrupt()));
