@@ -6,6 +6,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
+use crate::println;
+use crate::sys::fs::minixfs::{MinixFs};
 
 pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
 
@@ -20,6 +22,20 @@ pub enum VfsError {
 pub fn init_fs() {
     FS.try_init_once(|| Mutex::new(RamFS::new())).unwrap()
 }
+
+pub fn init() {
+    let uptime = crate::driver::timer::pit::uptime();
+    for bus in 0..2 {
+        for dsk in 0..2 {
+            if MinixFs::check_ata(bus, dsk) {
+                println!("\x1b[93m[{:.6}]\x1b[0m MinixFS Superblock found in ATA {}:{}", uptime, bus, dsk);
+                return;
+            }
+        }
+    }
+    println!("\x1b[93m[{:.6}]\x1b[0m No MinixFS Superblock found", uptime);
+}
+
 
 pub trait VfsNode {
     fn read(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, VfsError>;

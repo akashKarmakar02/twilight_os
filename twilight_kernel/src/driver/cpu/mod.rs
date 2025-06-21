@@ -13,8 +13,6 @@ unsafe extern "C" fn ap_main(_cpu: &limine::mp::Cpu) -> ! {
     }
 }
 
-
-
 pub fn init_smp(mp_response: &'static MpResponse) {
     let smp = mp_response;
     let bsp_id = mp_response.bsp_lapic_id();
@@ -37,7 +35,7 @@ pub fn init_smp(mp_response: &'static MpResponse) {
 
 pub fn init(mp_response: &'static MpResponse) {
     let cpuid = CpuId::new();
-    let time = crate::driver::timer::pit::uptime();
+    let time = driver::timer::pit::uptime();
 
     let name = if let Some(cpu) = cpuid.get_processor_brand_string() {
         String::from(cpu.as_str())

@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use crate::driver::disk::BlockDevice;
 use core::mem::size_of;
 
@@ -33,7 +34,7 @@ pub struct Inode {
 #[repr(C, packed)]
 pub struct DirEntry {
     pub inode: u16,
-    pub name: [u8; 14], // MINIX v1/v2 uses fixed 14-byte names
+    pub name: [u8; 60], // MINIX v1/v2 uses fixed 14-byte names
 }
 
 
@@ -129,6 +130,15 @@ pub struct MinixFs {
 }
 
 impl MinixFs {
+    pub fn check_ata(bus: u8, dsk: u8) -> bool {
+        let mut buf = [0u8; 1024];
+        if crate::driver::disk::ata::read(bus, dsk, 0, &mut buf).is_err() {
+            return false;
+        }
+        let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
+        sb.magic == 0x137F || sb.magic == 0x138F
+    }
+    
     pub fn allocate_zone(&mut self) -> Result<u32, &'static str> {
         let bits_per_block = self.superblock.block_size as usize * 8;
         let zmap_start = self.superblock.imap_blocks + 2;
@@ -300,6 +310,103 @@ impl MinixFs {
         let inode: Inode = unsafe { core::ptr::read(inode_bytes.as_ptr() as *const _) };
         
         Ok(inode)
+    }
+
+    pub fn create_dir_entry(
+        &mut self,
+        parent_inode_num: u16,
+        name: &str,
+        child_inode_num: u16,
+    ) -> Result<(), &'static str> {
+        let mut parent_inode = self.read_inode(parent_inode_num)?;
+
+        let dir_entry_size = size_of::<DirEntry>();
+        let entries_per_block = self.superblock.block_size as usize / dir_entry_size;
+
+        let mut entry_added = false;
+        let name_bytes = {
+            let mut name_buf = [0u8; 60];
+            let name_bytes = name.as_bytes();
+            let len = name_bytes.len().min(60);
+            name_buf[..len].copy_from_slice(&name_bytes[..len]);
+            name_buf
+        };
+
+        let entry = DirEntry {
+            inode: child_inode_num,
+            name: name_bytes,
+        };
+        
+        let zones = parent_inode.zones;
+
+        for i in 0..zones.len() {
+            if parent_inode.zones[i] == 0 {
+                let zone = self.allocate_zone()?;
+                parent_inode.zones[i] = zone as u16;
+                self.write_inode(parent_inode_num, &parent_inode)?;
+            }
+
+            let block = parent_inode.zones[i];
+            let mut buf = [0u8; 1024];
+            self.device.read_block(block.into(), &mut buf)?;
+
+            for j in 0..entries_per_block {
+                let offset = j * dir_entry_size;
+                let inode_field = u16::from_le_bytes([buf[offset], buf[offset + 1]]);
+                if inode_field == 0 {
+                    // Found empty slot
+                    let entry_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            &entry as *const _ as *const u8,
+                            dir_entry_size,
+                        )
+                    };
+                    buf[offset..offset + dir_entry_size].copy_from_slice(entry_bytes);
+                    self.device.write_block(block.into(), &buf)?;
+                    entry_added = true;
+                    break;
+                }
+            }
+
+            if entry_added {
+                return Ok(());
+            }
+        }
+
+        Err("Directory is full")
+    }
+
+    pub fn read_dir_entries(&mut self, inode: &Inode) -> Result<Vec<DirEntry>, &'static str> {
+        let dir_entry_size = size_of::<DirEntry>();
+        let entries_per_block = self.superblock.block_size as usize / dir_entry_size;
+        let mut entries = Vec::new();
+
+        let mut buf = [0u8; 1024];
+        
+        let zones = inode.zones;
+
+        for &zone in zones.iter() {
+            if zone == 0 {
+                continue;
+            }
+
+            self.device.read_block(zone.into(), &mut buf)?;
+            for i in 0..entries_per_block {
+                let offset = i * dir_entry_size;
+                let raw = &buf[offset..offset + dir_entry_size];
+                let inode = u16::from_le_bytes([raw[0], raw[1]]);
+                if inode == 0 {
+                    continue;
+                }
+
+                let mut name = [0u8; 60];
+                name.copy_from_slice(&raw[2..62]);
+
+                entries.push(DirEntry { inode, name });
+            }
+        }
+
+        Ok(entries)
     }
 
 }
