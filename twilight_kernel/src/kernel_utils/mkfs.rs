@@ -55,8 +55,8 @@ pub fn main(args: &[&str]) {
                 fs.write_inode(root_inode_num + 1, &root_inode).expect("TODO: panic message");
 
                 // Add '.' and '..'
-                fs.create_dir_entry(root_inode_num + 1, ".", root_inode_num).expect("TODO: panic message");
-                fs.create_dir_entry(root_inode_num + 1, "..", root_inode_num).expect("TODO: panic message");
+                fs.create_dir_entry(root_inode_num + 1, ".", root_inode_num + 1).expect("TODO: panic message");
+                fs.create_dir_entry(root_inode_num + 1, "..", root_inode_num + 1).expect("TODO: panic message");
                 
                 init(false);
             }

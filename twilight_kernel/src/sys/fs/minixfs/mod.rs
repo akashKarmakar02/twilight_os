@@ -544,7 +544,7 @@ impl MinixFs {
                 .unwrap_or("")
                 .trim_end_matches('\0');
 
-            let child_inode = self.read_inode(entry.inode+1)?;
+            let child_inode = self.read_inode(entry.inode)?;
             let file_type = match child_inode.mode & 0xF000 {
                 0x4000 => "dir",
                 0x8000 => "file",
