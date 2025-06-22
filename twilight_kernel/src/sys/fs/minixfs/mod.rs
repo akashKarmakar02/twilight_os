@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::vec::Vec;
 use crate::driver::disk::{BlockDevice, BlockDeviceIO};
 use core::mem::size_of;
@@ -521,6 +522,7 @@ impl MinixFs {
 
         // Allocate inode and zone
         let new_inode_num = self.allocate_inode().unwrap();
+        println!("new_inode_num: {}", new_inode_num + 1);
         let new_zone = self.allocate_zone().unwrap();
 
         // Initialize inode
@@ -535,10 +537,10 @@ impl MinixFs {
         };
         inode.zones[0] = new_zone as u16;
 
-        self.write_inode(new_inode_num, &inode).unwrap();
+        self.write_inode(new_inode_num + 1, &inode).unwrap();
 
         // Add to the parent directory
-        self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
+        self.create_dir_entry(parent_inode_num, name, new_inode_num + 1).unwrap();
 
         Ok(new_inode_num)
     }
@@ -564,7 +566,6 @@ impl MinixFs {
             let name = core::str::from_utf8(&entry.name)
                 .unwrap_or("")
                 .trim_end_matches('\0');
-
             let child_inode = self.read_inode(entry.inode)?;
             let file_type = match child_inode.mode & 0xF000 {
                 0x4000 => "dir",
@@ -605,8 +606,8 @@ impl MinixFs {
         }
 
         // Allocate inode and zone for the new directory
-        let new_inode_num = self.allocate_inode().unwrap();
-        println!("{}", new_inode_num);
+        let new_inode_num = self.allocate_inode().unwrap() + 1;
+        println!("new_inode_num: {}", new_inode_num);
         let new_zone = self.allocate_zone().unwrap();
 
         // Create the new directory inode
@@ -748,6 +749,78 @@ impl MinixFs {
         }
 
         Ok(content)
+    }
+    pub fn remove_entry(&mut self, path: &str) -> Result<(), FsError> {
+        let mut components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        if components.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+
+        let target_name = components.pop().unwrap();
+        let parent_path = format!("/{}", components.join("/"));
+        let parent_inode_num = if components.is_empty() {
+            1 // root
+        } else {
+            self.resolve_path(&parent_path)?
+        };
+
+        let mut parent_inode = self.read_inode(parent_inode_num).unwrap();
+        let dir_entry_size = core::mem::size_of::<DirEntry>();
+        let entries_per_block = self.superblock.block_size as usize / dir_entry_size;
+        
+        let zones = parent_inode.zones;
+
+        for &zone in zones.iter() {
+            if zone == 0 {
+                continue;
+            }
+
+            let mut buf = [0u8; 1024];
+            if self.device.read(zone as u32, &mut buf).is_err() {
+                return Err(InvalidInode);
+            }
+
+            for i in 0..entries_per_block {
+                let offset = i * dir_entry_size;
+                let entry = unsafe {
+                    core::ptr::read(buf[offset..].as_ptr() as *const DirEntry)
+                };
+
+                let entry_name = core::str::from_utf8(&entry.name)
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+
+                if entry.inode != 0 && entry_name == target_name {
+                    let inode_num = entry.inode;
+                    let inode = self.read_inode(inode_num).unwrap();
+                    
+                    let i_zones = inode.zones;
+                    
+                    // Free all zones
+                    for &z in i_zones.iter() {
+                        if z != 0 {
+                            self.free_zone(z as u32).unwrap();
+                        }
+                    }
+
+                    // Free inode
+                    self.free_inode(inode_num).unwrap();
+
+                    buf[offset..offset + dir_entry_size].fill(0);
+                    self.device.write(zone as u32, &buf).unwrap();
+
+                    // Update parent inode size if large enough
+                    if parent_inode.size >= dir_entry_size as u32 {
+                        parent_inode.size -= dir_entry_size as u32;
+                    }
+                    self.write_inode(parent_inode_num, &parent_inode).unwrap();
+
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(FileNotFound)
     }
 
 }

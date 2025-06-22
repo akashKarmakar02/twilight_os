@@ -174,6 +174,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "touch" => crate::kernel_utils::touch::main(args),
         "mkdir" => crate::kernel_utils::mkdir::main(args),
         "cd" => crate::kernel_utils::cd::main(args),
+        "rm" => crate::kernel_utils::rm::main(args),
         _ => {
             println!("{}: not a command", cmd);
         }

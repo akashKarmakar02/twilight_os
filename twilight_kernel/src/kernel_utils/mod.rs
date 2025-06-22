@@ -11,3 +11,4 @@ pub mod dealloc;
 pub mod touch;
 pub mod mkdir;
 pub mod cd;
+pub mod rm;

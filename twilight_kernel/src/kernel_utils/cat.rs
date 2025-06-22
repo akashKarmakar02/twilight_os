@@ -11,13 +11,12 @@ pub fn main(args: &[&str]) {
     let mut fs = unsafe { fs::MFS.get_unchecked().lock() };
     #[allow(static_mut_refs)]
     let pwd = unsafe { DIR.as_str() };
-    let inode = if pwd == "/" { 1 } else { fs.find_dir_entry(1, &pwd[1..]).unwrap().unwrap() };
-
+    let inode = if pwd == "/" { 1 } else { fs.resolve_path(pwd).unwrap() };
 
     if args[0] == ">" {
         let inode = match fs.find_dir_entry(inode, args[1]).unwrap() {
             Some(inode) => inode,
-            None => fs.create_file(1, args[1]).unwrap(),
+            None => fs.create_file(inode, args[1]).unwrap(),
         };
 
         if args.len() > 2 {
