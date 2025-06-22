@@ -66,7 +66,7 @@ fn calculate_superblock(
     let imap_blocks = ceil_div(ninodes, bits_per_block);
     let inode_blocks = ceil_div(ninodes * inode_size, block_size);
 
-    // Start with a rough estimate
+    // Start with an estimate
     let reserved_fixed = 1; // superblock (no boot block)
     let mut zmap_blocks = 1;
 
@@ -341,7 +341,7 @@ impl MinixFs {
         Ok(())
     }
     
-    pub fn read_inode(&mut self, inode_num: u16) -> Result<Inode, &'static str> {
+    pub fn read_inode(&mut self, inode_num: u16) -> Result<Inode, &'static str> {        
         if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
             return Err("Invalid inode number");
         }
@@ -543,8 +543,21 @@ impl MinixFs {
             let name = core::str::from_utf8(&entry.name)
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            println!("{}", name);
 
+            let child_inode = self.read_inode(entry.inode+1)?;
+            let file_type = match child_inode.mode & 0xF000 {
+                0x4000 => "dir",
+                0x8000 => "file",
+                _ => "unknown",
+            };
+
+            if file_type == "dir" {
+                println!("\x1b[94m{}\x1b[0m", name);    
+            } else {
+                println!("{}", name);    
+            }
+            
+            
             offset += size_of::<DirEntry>();
         }
 
@@ -572,6 +585,7 @@ impl MinixFs {
 
         // Allocate inode and zone for the new directory
         let new_inode_num = self.allocate_inode().unwrap();
+        println!("{}", new_inode_num);
         let new_zone = self.allocate_zone().unwrap();
 
         // Create the new directory inode

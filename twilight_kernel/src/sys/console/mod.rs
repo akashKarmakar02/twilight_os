@@ -5,7 +5,7 @@ use crate::sys::console::writer::clear_screen;
 use crate::task::executor::EXECUTOR;
 use crate::task::Task;
 use crate::{print, println, serial_prtinln};
-use alloc::string::{String};
+use alloc::string::String;
 use alloc::vec::Vec;
 use futures_util::StreamExt;
 use spin::Mutex;
@@ -35,7 +35,9 @@ pub fn init_console() {
 }
 
 pub fn start_kernel_console() {
-    print!("twilight > ");
+    #[allow(static_mut_refs)]
+    let dir = unsafe { DIR.as_str() };
+    print!("twilight:{} > ", dir);
     let mut cur_pos = CURSOR_POSITION.lock();
     *cur_pos = 2;
 }
@@ -86,7 +88,7 @@ fn handle_console_key(c: char) {
             let len = unsafe { CONSOLE_HISTORY.len() };
             
             // there must be some history to go back to & the index must be less than the length of the history
-            if len != 0 && len - 1 > *idx {
+            if len != 0 && len > *idx {
                 #[allow(static_mut_refs)]
                 let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
                 
@@ -117,7 +119,7 @@ fn handle_console_key(c: char) {
             
             if len != 0 && len >= *idx && *idx > 0 {
                 #[allow(static_mut_refs)]
-                let cmd = unsafe { CONSOLE_HISTORY.get(len - *idx + 1) };
+                let cmd = unsafe { CONSOLE_HISTORY.get(len - *idx) };
                 
                 let mut stdio = STDIO.lock();
                 stdio.clear();
@@ -171,6 +173,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "df" => crate::kernel_utils::df::main(args),
         "touch" => crate::kernel_utils::touch::main(args),
         "mkdir" => crate::kernel_utils::mkdir::main(args),
+        "cd" => crate::kernel_utils::cd::main(args),
         _ => {
             println!("{}: not a command", cmd);
         }

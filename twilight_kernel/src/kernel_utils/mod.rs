@@ -10,3 +10,4 @@ pub mod allocate;
 pub mod dealloc;
 pub mod touch;
 pub mod mkdir;
+pub mod cd;
