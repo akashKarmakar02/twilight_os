@@ -8,3 +8,5 @@ pub mod mkfs;
 pub mod df;
 pub mod allocate;
 pub mod dealloc;
+pub mod touch;
+pub mod mkdir;

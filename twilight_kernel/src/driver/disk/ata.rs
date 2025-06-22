@@ -315,7 +315,7 @@ pub fn init() {
     
     let time = crate::driver::timer::pit::uptime();
     let drives = list();
-    
+
     for drive in drives {
         println!("\x1b[93m[{:.6}]\x1b[0m ATA {}:{} {}", time, drive.bus, drive.dsk, drive);
         mount_ata(drive.bus, drive.dsk);
@@ -349,7 +349,7 @@ impl Drive {
                 buf[120..124].try_into().unwrap()
             ).rotate_left(16);
             let block_index = 0;
-        
+
             Some(Self {
                 bus,
                 dsk,

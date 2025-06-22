@@ -1,5 +1,6 @@
 use crate::driver::disk::BlockDeviceIO;
 use crate::println;
+use crate::sys::fs::init;
 use crate::sys::fs::minixfs::{Inode};
 
 pub fn main(args: &[&str]) {
@@ -29,7 +30,7 @@ pub fn main(args: &[&str]) {
             disk_size = disk.block_size() * disk.block_count();
             inode = disk_size / (disk.block_size() * 16);
             block_size = disk.block_size();
-            
+
             if let Ok(_sb) = crate::fs::minixfs::read_superblock(disk) {
                 println!("disk already formatted");
                 return;
@@ -52,10 +53,12 @@ pub fn main(args: &[&str]) {
                 };
                 root_inode.zones[0] = root_zone as u16;
                 fs.write_inode(root_inode_num + 1, &root_inode).expect("TODO: panic message");
-                
+
                 // Add '.' and '..'
                 fs.create_dir_entry(root_inode_num + 1, ".", root_inode_num).expect("TODO: panic message");
                 fs.create_dir_entry(root_inode_num + 1, "..", root_inode_num).expect("TODO: panic message");
+                
+                init(false);
             }
         } else {
             println!("disk not found");

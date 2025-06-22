@@ -5,7 +5,7 @@ use crate::sys::console::writer::clear_screen;
 use crate::task::executor::EXECUTOR;
 use crate::task::Task;
 use crate::{print, println, serial_prtinln};
-use alloc::string::String;
+use alloc::string::{String};
 use alloc::vec::Vec;
 use futures_util::StreamExt;
 use spin::Mutex;
@@ -15,6 +15,8 @@ pub mod font;
 
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
 pub static CURSOR_POSITION: Mutex<usize> = Mutex::new(0);
+
+pub static mut DIR: String = String::new();
 
 static mut CONSOLE_HISTORY: Vec<String> = Vec::new();
 static mut CONSOLE_HISTORY_INDEX: Mutex<usize> = Mutex::new(0);
@@ -26,6 +28,9 @@ async fn handle_input() {
 }
 
 pub fn init_console() {
+    unsafe {
+        DIR = String::from("/");
+    }
     EXECUTOR.get().unwrap().lock().spawn(Task::new(handle_input()));
 }
 
@@ -164,6 +169,8 @@ fn exec(cmd: &str, args: &[&str]) {
             println!("{}", crate::sys::framebuffer::get_pitch());
         },
         "df" => crate::kernel_utils::df::main(args),
+        "touch" => crate::kernel_utils::touch::main(args),
+        "mkdir" => crate::kernel_utils::mkdir::main(args),
         _ => {
             println!("{}: not a command", cmd);
         }
