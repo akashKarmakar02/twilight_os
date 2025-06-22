@@ -11,7 +11,7 @@ pub fn main(args: &[&str]) {
     let mut fs = unsafe { crate::sys::fs::MFS.get_unchecked().lock() };
 
     if pwd != "/" {
-        inode = fs.find_dir_entry(inode, pwd).unwrap().unwrap();
+        inode = fs.resolve_path(pwd).unwrap();
     }
     if let Err(e) = fs.create_file(inode, args[0]) {
         match e {

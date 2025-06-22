@@ -2,8 +2,6 @@
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
 #![feature(let_chains)]
-#![feature(core_float_math)]
-
 pub mod arch;
 pub mod driver;
 pub mod kernel_utils;

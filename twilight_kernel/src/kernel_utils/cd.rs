@@ -3,6 +3,7 @@ use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs::MFS;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 pub fn main(args: &[&str]) {
     if args.is_empty() {
@@ -16,7 +17,7 @@ pub fn main(args: &[&str]) {
     let cur = unsafe { DIR.as_str() };
 
     let parent_inode = if cur != "/" {
-        fs.find_dir_entry(1, &cur[1..]).unwrap().unwrap()
+        fs.resolve_path(cur).unwrap()
     } else {
         1
     };
@@ -32,9 +33,24 @@ pub fn main(args: &[&str]) {
             };
             return;
         }
+        if args[0] == "." {
+            return;
+        }
+        if args[0] == ".." {
+            let mut cur: Vec<&str> = cur.split("/").collect();
+            cur.pop();
+            unsafe  {
+                DIR = cur.join("/");
+            }
+            return;
+        }
     }
 
     unsafe {
-        DIR = format!("{}{}", cur, args[0]);
+        if cur == "/" {
+            DIR = format!("{}{}", cur, args[0]);
+        } else {
+            DIR = format!("{}/{}", cur, args[0]);
+        }
     };
 }

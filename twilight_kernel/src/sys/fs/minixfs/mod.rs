@@ -147,6 +147,27 @@ pub struct MinixFs {
 }
 
 impl MinixFs {
+    pub fn resolve_path(&mut self, path: &str) -> Result<u16, FsError> {
+        if path.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+
+        // Start from root inode (assumed to be inode number 1)
+        let mut current_inode = 1;
+
+        // Skip empty and root path
+        let path_parts = path.split('/').filter(|s| !s.is_empty());
+
+        for part in path_parts {
+            match self.find_dir_entry(current_inode, part).unwrap() {
+                Some(inode) => current_inode = inode,
+                None => return Err(FileNotFound),
+            }
+        }
+
+        Ok(current_inode)
+    }
+    
     pub fn check_ata(bus: u8, dsk: u8) -> Result<MinixFs, &'static str> {
         let mut buf = [0u8; 1024];
 
