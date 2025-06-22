@@ -1,6 +1,7 @@
 use alloc::vec::Vec;
-use crate::driver::disk::BlockDevice;
+use crate::driver::disk::{BlockDevice, BlockDeviceIO};
 use core::mem::size_of;
+use crate::println;
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
@@ -92,11 +93,11 @@ fn calculate_superblock(
     }
 }
 pub fn format_superblock(
-    block_device: &mut dyn BlockDevice,
+    block_device: &'static mut BlockDevice,
     disk_size: usize,
     ninodes: u16,
     block_size: u16,
-) -> Result<(), &'static str> {
+) -> Result<MinixFs, &'static str> {
     let sb = calculate_superblock(disk_size, block_size as usize, ninodes as usize);
 
     let mut buffer = [0u8; 1024];
@@ -108,14 +109,18 @@ pub fn format_superblock(
     };
     buffer[..sb_bytes.len()].copy_from_slice(sb_bytes);
 
-    block_device.write_block(0, &buffer)?;
-    Ok(())
+    if block_device.write(0, &buffer).is_err() {
+        println!("ERROR: write failed while formatting supperblock");
+    }
+    Ok(MinixFs{superblock: sb, device: block_device})
 }
 
 
-pub fn read_superblock(device: &mut dyn BlockDevice) -> Result<Superblock, &'static str> {
+pub fn read_superblock(device: &mut BlockDevice) -> Result<Superblock, &'static str> {
     let mut buf = [0u8; 1024];
-    device.read_block(0, &mut buf[0..1024])?; // Superblock is usually at block 0
+    if device.read(0, &mut buf[0..1024]).is_err() {
+        
+    } // Superblock is usually at block 0
     let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
 
     if sb.magic != 0x137F && sb.magic != 0x138F {
@@ -126,7 +131,7 @@ pub fn read_superblock(device: &mut dyn BlockDevice) -> Result<Superblock, &'sta
 
 pub struct MinixFs {
     pub superblock: Superblock,
-    pub device: &'static mut dyn BlockDevice,
+    pub device: &'static mut BlockDevice,
 }
 
 impl MinixFs {
@@ -145,14 +150,18 @@ impl MinixFs {
 
         let mut buf = [0u8; 1024];
         for i in 0..self.superblock.zmap_blocks {
-            self.device.read_block((zmap_start + i) as u64, &mut buf)?;
+            if self.device.read((zmap_start + i) as u32, &mut buf).is_err() {
+                return Err("Failed to read zone bitmap");
+            }
 
             for byte_idx in 0..buf.len() {
                 if buf[byte_idx] != 0xFF {
                     for bit in 0..8 {
                         if buf[byte_idx] & (1 << bit) == 0 {
                             buf[byte_idx] |= 1 << bit;
-                            self.device.write_block((zmap_start + i) as u64, &buf)?;
+                            if self.device.write((zmap_start + i) as u32, &buf).is_err() {
+                                return Err("Failed to write zone bitmap");
+                            }
 
                             let zone = i as u32 * bits_per_block as u32 + (byte_idx * 8 + bit) as u32;
                             return Ok(zone + self.superblock.first_data_zone as u32);
@@ -170,9 +179,11 @@ impl MinixFs {
         let total_inodes = self.superblock.ninodes as usize;
 
         for block_idx in 0..self.superblock.imap_blocks {
-            let imap_block_lba = 1 + block_idx as u64;
+            let imap_block_lba = 1 + block_idx;
             let mut buf = [0u8; 1024];
-            self.device.read_block(imap_block_lba, &mut buf)?;
+            if self.device.read(imap_block_lba as u32, &mut buf).is_err() {
+                return Err("Failed to read inode bitmap");
+            }
 
             for byte_idx in 0..self.superblock.block_size as usize {
                 let byte = buf[byte_idx];
@@ -186,7 +197,9 @@ impl MinixFs {
                             }
                             
                             buf[byte_idx] |= 1 << bit;
-                            self.device.write_block(imap_block_lba, &buf)?;
+                            if self.device.write(imap_block_lba as u32, &buf).is_err() {
+                                return Err("Failed to write inode bitmap");
+                            }
                             return Ok(inode_idx as u16);
                         }
                     }
@@ -215,15 +228,19 @@ impl MinixFs {
             return Err("Zone bitmap block index out of bounds");
         }
 
-        let zmap_start = 2 + self.superblock.imap_blocks as u64;
-        let zmap_block = zmap_start + block_index as u64;
+        let zmap_start = 2 + self.superblock.imap_blocks as u32;
+        let zmap_block = zmap_start + block_index as u32;
 
         let mut buf = [0u8; 1024];
-        self.device.read_block(zmap_block, &mut buf)?;
+        if self.device.read(zmap_block, &mut buf).is_err() {
+            return Err("Failed to read zone bitmap");
+        }
 
         buf[byte_index] &= !(1 << bit);
 
-        self.device.write_block(zmap_block, &buf)?;
+        if self.device.write(zmap_block, &buf).is_err() {
+            return Err("Failed to write zone bitmap");
+        }
 
         Ok(())
     }
@@ -241,13 +258,18 @@ impl MinixFs {
         let byte_index = bit_index / 8;
         let bit_in_byte = bit_index % 8;
 
-        let imap_block_lba = 1 + block_index as u64;
+        let imap_block_lba = 1 + block_index as u32;
         let mut buffer = [0u8; 1024];
-        self.device.read_block(imap_block_lba, &mut buffer)?;
+        if self.device.read(imap_block_lba, &mut buffer).is_err() {
+            return Err("Failed to read inode bitmap");
+        }
 
         buffer[byte_index] &= !(1 << bit_in_byte); // clear the bit
 
-        self.device.write_block(imap_block_lba, &buffer)?;
+        if self.device.write(imap_block_lba, &buffer).is_err() {
+            return Err("Failed to write inode bitmap");
+        }
+        
         Ok(())
     }
 
@@ -267,7 +289,9 @@ impl MinixFs {
         let block_num = inode_table_start + block_offset as u16;
 
         let mut buffer = [0u8; 1024];
-        self.device.read_block(block_num as u64, &mut buffer)?;
+        if self.device.read(block_num as u32, &mut buffer).is_err() {
+            return Err("Failed to read inode block");
+        }
 
         let inode_bytes = unsafe {
             core::slice::from_raw_parts(
@@ -277,7 +301,9 @@ impl MinixFs {
         };
         buffer[byte_offset..byte_offset + inode_size].copy_from_slice(inode_bytes);
         
-        self.device.write_block(block_num as u64, &buffer)?;
+        if self.device.write(block_num as u32, &buffer).is_err() {
+            return Err("Failed to write inode block");
+        }
         
         Ok(())
     }
@@ -299,7 +325,9 @@ impl MinixFs {
         let block_num = inode_table_start + block_offset as u16;
 
         let mut buffer = [0u8; 1024];
-        self.device.read_block(block_num as u64, &mut buffer)?;
+        if self.device.read(block_num as u32, &mut buffer).is_err() {
+            return Err("Failed to read inode block"); 
+        }
 
         let inode_bytes = unsafe {
             core::slice::from_raw_parts(
@@ -348,7 +376,9 @@ impl MinixFs {
 
             let block = parent_inode.zones[i];
             let mut buf = [0u8; 1024];
-            self.device.read_block(block.into(), &mut buf)?;
+            if self.device.read(block.into(), &mut buf).is_err() {
+                return Err("Failed to read block"); 
+            }
 
             for j in 0..entries_per_block {
                 let offset = j * dir_entry_size;
@@ -362,7 +392,9 @@ impl MinixFs {
                         )
                     };
                     buf[offset..offset + dir_entry_size].copy_from_slice(entry_bytes);
-                    self.device.write_block(block.into(), &buf)?;
+                    if self.device.write(block.into(), &buf).is_err() {
+                        return Err("Failed to write block"); 
+                    }
                     entry_added = true;
                     break;
                 }
@@ -390,7 +422,9 @@ impl MinixFs {
                 continue;
             }
 
-            self.device.read_block(zone.into(), &mut buf)?;
+            if self.device.read(zone.into(), &mut buf).is_err() {
+                return Err("Failed to read block");
+            }
             for i in 0..entries_per_block {
                 let offset = i * dir_entry_size;
                 let raw = &buf[offset..offset + dir_entry_size];

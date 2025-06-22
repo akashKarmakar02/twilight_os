@@ -36,7 +36,7 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame, err: u64) -> ! {
-    panic!("EXCEPTION: DOUBLE FAULT\n{:#?}\nERROR CODE: {:#?}", stack_frame.instruction_pointer.as_u64(), err);
+    panic!("EXCEPTION: DOUBLE FAULT\n{:#?}\nERROR CODE: {:#?}", stack_frame.instruction_pointer, err);
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
