@@ -27,7 +27,7 @@ pub fn main(args: &[&str]) {
         return;
     }
 
-    if let Some(inode) = fs.find_dir_entry(inode+1, args[0]).unwrap() {
+    if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
         let content_buf = fs.read_file(inode + 1);
 
         println!(
