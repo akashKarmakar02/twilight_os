@@ -66,6 +66,15 @@ fn handle_console_key(c: char) {
             let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
             *idx = 0;
         }
+        '\t' => {
+            print!("{}", c);
+            STDIO.lock().push(' ');
+            STDIO.lock().push(' ');
+            STDIO.lock().push(' ');
+            STDIO.lock().push(' ');
+            let mut cur_pos = CURSOR_POSITION.lock();
+            *cur_pos += 4;
+        }
         '\x08' => {
             if *CURSOR_POSITION.lock() > 2 {
                 print!("{}", c);
