@@ -521,8 +521,7 @@ impl MinixFs {
         }
 
         // Allocate inode and zone
-        let new_inode_num = self.allocate_inode().unwrap();
-        println!("new_inode_num: {}", new_inode_num + 1);
+        let new_inode_num = self.allocate_inode().unwrap() + 1;
         let new_zone = self.allocate_zone().unwrap();
 
         // Initialize inode
@@ -537,10 +536,10 @@ impl MinixFs {
         };
         inode.zones[0] = new_zone as u16;
 
-        self.write_inode(new_inode_num + 1, &inode).unwrap();
+        self.write_inode(new_inode_num, &inode).unwrap();
 
         // Add to the parent directory
-        self.create_dir_entry(parent_inode_num, name, new_inode_num + 1).unwrap();
+        self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
 
         Ok(new_inode_num)
     }
@@ -607,7 +606,6 @@ impl MinixFs {
 
         // Allocate inode and zone for the new directory
         let new_inode_num = self.allocate_inode().unwrap() + 1;
-        println!("new_inode_num: {}", new_inode_num);
         let new_zone = self.allocate_zone().unwrap();
 
         // Create the new directory inode

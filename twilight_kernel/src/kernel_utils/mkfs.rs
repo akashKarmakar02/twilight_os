@@ -1,7 +1,14 @@
+use alloc::vec::Vec;
 use crate::driver::disk::BlockDeviceIO;
 use crate::println;
 use crate::sys::fs::init;
 use crate::sys::fs::minixfs::{Inode};
+
+macro_rules! copy_file {
+    ($path:expr, $verbose:expr) => {{
+        copy_file($path, include_bytes!(concat!("../../../rootfs", $path)), $verbose);
+    }};
+}
 
 pub fn main(args: &[&str]) {
     if args.len() < 2 {
@@ -22,6 +29,7 @@ pub fn main(args: &[&str]) {
     let disk_size;
     let inode;
     let block_size;
+    let mut need_copy = false;
 
     #[allow(static_mut_refs)]
     {
@@ -59,10 +67,80 @@ pub fn main(args: &[&str]) {
                 fs.create_dir_entry(root_inode_num + 1, "..", root_inode_num + 1).expect("TODO: panic message");
                 
                 init(false);
+                
+                fs.create_dir(root_inode_num + 1, "bin").unwrap();
+                fs.create_dir(root_inode_num + 1, "dev").unwrap();
+                fs.create_dir(root_inode_num + 1, "init").unwrap();
+                fs.create_dir(root_inode_num + 1, "home").unwrap();
+                need_copy = true;
             }
         } else {
             println!("disk not found");
             return;
+        }
+    }
+    
+    if need_copy {
+        copy_file!("/init/script", true)
+    }
+}
+
+fn copy_file(path: &str, data: &[u8], verbose: bool) {
+    use crate::sys::fs::minixfs::FsError;
+    
+    let mut fs = unsafe {
+        crate::fs::MFS.get_unchecked().lock()
+    };
+
+    let components: Vec<&str> = path
+        .split('/')
+        .filter(|c| !c.is_empty())
+        .collect();
+
+    if components.is_empty() {
+        println!("Invalid file path: {}", path);
+        return;
+    }
+
+    // Traverse or create parent directories
+    let mut cur_inode = 1; // root
+    for &part in &components[..components.len() - 1] {
+        match fs.find_dir_entry(cur_inode, part) {
+            Ok(Some(inode)) => cur_inode = inode,
+            Ok(None) => {
+                match fs.create_dir(cur_inode, part) {
+                    Ok(new_inode) => cur_inode = new_inode,
+                    Err(e) => {
+                        println!("Failed to create dir '{}': {:?}", part, e);
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Failed to lookup '{}': {:?}", part, e);
+                return;
+            }
+        }
+    }
+
+    let file_name = components.last().unwrap();
+
+    // Create and write file
+    match fs.create_file(cur_inode, file_name) {
+        Ok(file_inode) => {
+            if let Err(e) = fs.write_file(file_inode + 1, data) {
+                println!("Failed to write to '{}': {:?}", path, e);
+            } else if verbose {
+                println!("\x1b[93m[DEBUG] \x1b[0mcopied: {}", path);
+            }
+        }
+        Err(FsError::FileAlreadyExists) => {
+            if verbose {
+                println!("Skipped (exists) {}", path);
+            }
+        }
+        Err(e) => {
+            println!("Failed to create file '{}': {:?}", path, e);
         }
     }
 }
