@@ -1,10 +1,10 @@
+use crate::serial_prtinln;
 use limine::memory_map::EntryType;
 use limine::response::MemoryMapResponse;
 use linked_list_allocator::LockedHeap;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
-use crate::{serial_prtinln};
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 
@@ -17,7 +17,7 @@ pub fn init_heap(
     memory_map_response: &'static MemoryMapResponse,
 ) -> Result<(), MapToError<Size4KiB>> {
     let heap_size = get_total_usable_memory(memory_map_response);
-    
+
     let page_range = {
         let heap_start = VirtAddr::new(HEAP_START as u64);
         let head_end = heap_start + heap_size - 1u64;
@@ -25,10 +25,7 @@ pub fn init_heap(
         let heap_end_page = Page::containing_address(head_end);
         Page::range_inclusive(heap_start_page, heap_end_page)
     };
-    serial_prtinln!(
-        "Total usable memory: {} mb",
-        heap_size / (1024 * 1024)
-    );
+    serial_prtinln!("Total usable memory: {} mb", heap_size / (1024 * 1024));
 
     for page in page_range {
         let frame = frame_allocator
@@ -51,7 +48,11 @@ pub fn get_total_usable_memory(memory_map_response: &'static MemoryMapResponse) 
         .iter()
         .filter(|entry| entry.entry_type == EntryType::USABLE)
         .map(|entry| entry.length)
-        .sum::<u64>() >> 20) - 1) * 1024 * 1024
+        .sum::<u64>()
+        >> 20)
+        - 1)
+        * 1024
+        * 1024
 }
 
 pub fn get_total_heap_size() -> usize {
