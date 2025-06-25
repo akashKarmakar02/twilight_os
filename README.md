@@ -2,7 +2,7 @@
 
 ## Overview
 
-Twilight OS is a lightweight operating system designed for general-purpose computing & embedded systems. It is written in Rust programming language.
+Twilight OS is a lightweight operating system designed for general-purpose computing, embedded systems & learning purpose. It is written in Rust programming language.
 It currently supports x86_64 architecture. future plans include support for ARM/RISC-V architecture.
 
 ![screenshot](docs/screenshots/img.png)
@@ -13,7 +13,7 @@ It currently supports x86_64 architecture. future plans include support for ARM/
 - Terminal support (kernel built-in)
 - RTC
 - ACPI - power off
-- VFS & RamFS
+- VFS, MinixFS V2
 - basic unix commands (kernel built-in)
 - asynchronous I/O
 - memory management
