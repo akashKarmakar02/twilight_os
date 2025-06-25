@@ -81,7 +81,7 @@ pub fn main(args: &[&str]) {
     }
     
     if need_copy {
-        copy_file!("/init/script", true)
+        copy_file!("/init/logo", true)
     }
 }
 

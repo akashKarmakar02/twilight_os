@@ -1,16 +1,18 @@
-pub mod ram_fs;
 pub mod minixfs;
+pub mod ram_fs;
 
+use crate::println;
+use crate::sys::fs::minixfs::MinixFs;
 use crate::sys::fs::ram_fs::RamFS;
 use alloc::string::String;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
-use crate::println;
-use crate::sys::fs::minixfs::{MinixFs};
 
 pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
 pub static MFS: OnceCell<Mutex<MinixFs>> = OnceCell::uninit();
+
+pub const FS_PADDING: usize = 2097152;
 
 #[derive(Debug)]
 pub enum VfsError {
@@ -28,10 +30,13 @@ pub fn init(show_log: bool) {
     let uptime = crate::driver::timer::pit::uptime();
     for bus in 0..2 {
         for dsk in 0..2 {
-            if let Ok(mfs) =  MinixFs::check_ata(bus, dsk) {
+            if let Ok(mfs) = MinixFs::check_ata(bus, dsk) {
                 MFS.try_init_once(|| Mutex::new(mfs)).unwrap();
                 if show_log {
-                    println!("\x1b[93m[{:.6}]\x1b[0m MinixFS Superblock found in ATA {}:{}", uptime, bus, dsk);
+                    println!(
+                        "\x1b[93m[{:.6}]\x1b[0m MinixFS Superblock found in ATA {}:{}",
+                        uptime, bus, dsk
+                    );
                 }
                 return;
             }
@@ -39,7 +44,6 @@ pub fn init(show_log: bool) {
     }
     println!("\x1b[93m[{:.6}]\x1b[0m No MinixFS Superblock found", uptime);
 }
-
 
 pub trait VfsNode {
     fn read(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, VfsError>;
@@ -63,7 +67,6 @@ pub trait Vfs: Send {
     fn unmount(&mut self, path: &str) -> Result<(), VfsError>;
 }
 
-
 pub fn read(path: &str, offset: u64) -> Option<Vec<u8>> {
     let fs = FS.try_get().unwrap().lock();
 
@@ -77,7 +80,6 @@ pub fn read(path: &str, offset: u64) -> Option<Vec<u8>> {
         None
     }
 }
-
 
 pub fn write(path: &str, offset: u64, buffer: &[u8]) -> Option<usize> {
     let mut fs = FS.try_get().unwrap().lock();
