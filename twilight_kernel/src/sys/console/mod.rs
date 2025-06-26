@@ -184,6 +184,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "mkdir" => crate::kernel_utils::mkdir::main(args),
         "cd" => crate::kernel_utils::cd::main(args),
         "rm" => crate::kernel_utils::rm::main(args),
+        "readelf" => crate::kernel_utils::readelf::main(args),
         _ => {
             println!("{}: not a command", cmd);
         }
