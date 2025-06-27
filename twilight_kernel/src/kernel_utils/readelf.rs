@@ -1,4 +1,3 @@
-use goblin::elf64::Note;
 use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;

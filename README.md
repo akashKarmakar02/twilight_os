@@ -33,6 +33,96 @@ It currently supports x86_64 architecture. future plans include support for ARM/
 - [ ] Network Stack
 - [ ] Userspace utilities
 
+## Build Instructions
+
+### ✅ Requirements
+
+Twilight OS builds require:
+
+* **Rust** (nightly, with `x86_64-unknown-none` target)
+* `llvm-tools-preview` component
+* `cargo build` with build-std
+* `nasm` (for assembly boot code)
+* `ld` (GNU binutils linker)
+* `xorriso` (for ISO creation)
+* `qemu` (for virtualization)
+
+---
+
+### ✅ Installing dependencies
+
+#### **Linux**
+
+* *Debian / Ubuntu*
+
+```bash
+sudo apt update
+sudo apt install build-essential nasm qemu-system-x86 xorriso
+rustup target add x86_64-unknown-none
+rustup component add llvm-tools-preview
+```
+
+* *Fedora*
+
+```bash
+sudo dnf install make nasm qemu-system-x86 xorriso
+rustup target add x86_64-unknown-none
+rustup component add llvm-tools-preview
+```
+
+* *Arch Linux*
+
+```bash
+sudo pacman -S base-devel nasm qemu xorriso
+rustup target add x86_64-unknown-none
+rustup component add llvm-tools-preview
+```
+
+---
+
+#### **macOS**
+
+You can use **Homebrew**:
+
+```bash
+brew install nasm qemu xorriso
+rustup target add x86_64-unknown-none
+rustup component add llvm-tools-preview
+```
+
+---
+
+#### **Windows**
+
+We recommend using **WSL2** with Ubuntu/Fedora:
+
+1. Install WSL2 following Microsoft’s guide
+2. Inside WSL, follow the same instructions as Linux above
+
+---
+
+## ✅ Building & Run
+
+In the workspace directory, run:
+
+```bash
+make run
+```
+
+---
+
+---
+
+## ✅ First Boot
+
+On first boot, you **must** initialize the filesystem:
+
+```bash
+mkfs -t minixfs /dev/ata0
+```
+
+inside the VM shell to format your disk.
+
 ## Documentation
 
 Twilight OS documentation is available at [https://twilight-os.vercel.app](https://twilight-os.vercel.app).
