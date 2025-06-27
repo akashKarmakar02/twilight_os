@@ -13,7 +13,7 @@ pub fn init_writer() {
     apply_console_bg();
 
     #[allow(static_mut_refs)]
-    unsafe { WRITER = Some(Writer::new(0xBFBFBF)); }
+    unsafe { WRITER = Some(Writer::new(0x141A21)); }
 }
 
 // global function to get the writer in a safe mode

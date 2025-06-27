@@ -187,8 +187,13 @@ limine/limine:
 	$(MAKE) -C limine
 
 .PHONY: kernel
-kernel:
+kernel: userspace
 	$(MAKE) -C twilight_kernel
+
+.PHONY: userspace
+userspace:
+	cd userspace && \
+	cargo build --release
 
 $(IMAGE_NAME).iso: limine/limine kernel
 	rm -rf iso_root

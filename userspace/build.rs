@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-changed=.");
     let nasm_dir = Path::new("nasm");
     let obj_out_dir = Path::new("target/nasm");
     let bin_out_dir = Path::new("../rootfs/bin");
