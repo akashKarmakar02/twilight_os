@@ -1,3 +1,5 @@
+mod rtl8139;
+
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64};
@@ -11,7 +13,7 @@ use crate::sys::pci::DeviceConfig;
 pub static NET: Mutex<Option<(Interface, EthernetDevice)>> = Mutex::new(None);
 
 pub enum EthernetDevice {
-    
+    RTL8139,
 } 
 
 pub trait EthernetDeviceIO {
