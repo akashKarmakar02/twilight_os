@@ -10,7 +10,7 @@ use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
 use twilight_kernel::driver::keyboard::keyboard_interrupt;
 use twilight_kernel::task::Task;
 use twilight_kernel::task::executor::EXECUTOR;
-use twilight_kernel::{serial_prtinln, serial_print, println};
+use twilight_kernel::{println, serial_print, serial_prtinln};
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -65,27 +65,33 @@ unsafe extern "C" fn kmain() -> ! {
         memory_map_response.unwrap(),
         mp_response.unwrap(),
     );
-    
-    println!("\x1b[96m                                                     ,,    ,,    ,,            ,,                                        ");
-    println!("                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd ");
-    println!("                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y ");
-    println!("                                MM `7M'    ,A    `MF'`7MM    MM  `7MM  .P\"Ybmmm  MMpMMMb.mmMMmm     dM'      `MM `MMb.     ");
-    println!("                                MM   VA   ,VAA   ,V    MM    MM    MM :MI  I8    MM    MM  MM       MM        MM   `YMMNq. ");
-    println!("                                MM    VA ,V  VA ,V     MM    MM    MM  WmmmP\"    MM    MM  MM       MM.      ,MP .     `MM ");
-    println!("                                MM     VVV    VVV      MM    MM    MM  8M         MM    MM  MM       `Mb.    ,dP' Mb     dM ");
-    println!("                              .JMML.    W      W     .JMML..JMML..JMML.YMMMMMb .JMML  JMML.`Mbmo      `\"bmmd\"'   P\"Ybmmd\"  ");
-    println!("                                                                       6'     dP                                             ");
-    println!("                                                                       Ybmmmd'                                               \x1b[0m");
+
+    // println!("\x1b[96m                                                     ,,    ,,    ,,            ,,                                        ");
+    // println!("                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd ");
+    // println!("                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y ");
+    // println!("                                MM `7M'    ,A    `MF'`7MM    MM  `7MM  .P\"Ybmmm  MMpMMMb.mmMMmm     dM'      `MM `MMb.     ");
+    // println!("                                MM   VA   ,VAA   ,V    MM    MM    MM :MI  I8    MM    MM  MM       MM        MM   `YMMNq. ");
+    // println!("                                MM    VA ,V  VA ,V     MM    MM    MM  WmmmP\"    MM    MM  MM       MM.      ,MP .     `MM ");
+    // println!("                                MM     VVV    VVV      MM    MM    MM  8M         MM    MM  MM       `Mb.    ,dP' Mb     dM ");
+    // println!("                              .JMML.    W      W     .JMML..JMML..JMML.YMMMMMb .JMML  JMML.`Mbmo      `\"bmmd\"'   P\"Ybmmd\"  ");
+    // println!("                                                                       6'     dP                                             ");
+    // println!("                                                                       Ybmmmd'                                               \x1b[0m");
+
+    println!(r"___________       .__.__  .__       .__     __    ________    _________ ");
+    println!(r"\__    ___/_  _  _|__|  | |__| ____ |  |___/  |_  \_____  \  /   _____/ ");
+    println!(r"  |    |  \ \/ \/ /  |  | |  |/ ___\|  |  \   __\  /   |   \ \_____  \  ");
+    println!(r"  |    |   \     /|  |  |_|  / /_/  |   Y  \  |   /    |    \/        \ ");
+    println!(r"  |____|    \/\_/ |__|____/__\___  /|___|  /__|   \_______  /_______  / ");
+    println!(r"                            /_____/      \/               \/        \/  ");
 
     twilight_kernel::sys::console::init_console();
-    
+
     twilight_kernel::sys::console::start_kernel_console();
 
     let mut executor = EXECUTOR.get().unwrap().lock();
     executor.spawn(Task::new(keyboard_interrupt()));
     executor.run();
 }
-
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
