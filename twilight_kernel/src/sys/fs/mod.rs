@@ -1,4 +1,3 @@
-pub mod antfs;
 pub mod minixfs;
 pub mod ram_fs;
 
@@ -11,6 +10,9 @@ use conquer_once::spin::OnceCell;
 use spin::Mutex;
 
 pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
+pub static MFS: OnceCell<Mutex<MinixFs>> = OnceCell::uninit();
+
+pub const FS_PADDING: usize = 2097152;
 
 #[derive(Debug)]
 pub enum VfsError {
@@ -21,18 +23,21 @@ pub enum VfsError {
 }
 
 pub fn init_fs() {
-    FS.try_init_once(|| Mutex::new(RamFS::new())).unwrap()
+    FS.try_init_once(|| Mutex::new(RamFS::new())).unwrap();
 }
 
-pub fn init() {
+pub fn init(show_log: bool) {
     let uptime = crate::driver::timer::pit::uptime();
     for bus in 0..2 {
         for dsk in 0..2 {
-            if MinixFs::check_ata(bus, dsk) {
-                println!(
-                    "\x1b[93m[{:.6}]\x1b[0m MinixFS Superblock found in ATA {}:{}",
-                    uptime, bus, dsk
-                );
+            if let Ok(mfs) = MinixFs::check_ata(bus, dsk) {
+                MFS.try_init_once(|| Mutex::new(mfs)).unwrap();
+                if show_log {
+                    println!(
+                        "\x1b[93m[{:.6}]\x1b[0m MinixFS Superblock found in ATA {}:{}",
+                        uptime, bus, dsk
+                    );
+                }
                 return;
             }
         }

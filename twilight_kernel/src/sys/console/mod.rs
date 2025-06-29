@@ -16,6 +16,8 @@ pub mod font;
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
 pub static CURSOR_POSITION: Mutex<usize> = Mutex::new(0);
 
+pub static mut DIR: String = String::new();
+
 static mut CONSOLE_HISTORY: Vec<String> = Vec::new();
 static mut CONSOLE_HISTORY_INDEX: Mutex<usize> = Mutex::new(0);
 
@@ -26,11 +28,16 @@ async fn handle_input() {
 }
 
 pub fn init_console() {
+    unsafe {
+        DIR = String::from("/");
+    }
     EXECUTOR.get().unwrap().lock().spawn(Task::new(handle_input()));
 }
 
 pub fn start_kernel_console() {
-    print!("twilight > ");
+    #[allow(static_mut_refs)]
+    let dir = unsafe { DIR.as_str() };
+    print!("twilight:{} > ", dir);
     let mut cur_pos = CURSOR_POSITION.lock();
     *cur_pos = 2;
 }
@@ -59,6 +66,15 @@ fn handle_console_key(c: char) {
             let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
             *idx = 0;
         }
+        '\t' => {
+            print!("{}", c);
+            STDIO.lock().push(' ');
+            STDIO.lock().push(' ');
+            STDIO.lock().push(' ');
+            STDIO.lock().push(' ');
+            let mut cur_pos = CURSOR_POSITION.lock();
+            *cur_pos += 4;
+        }
         '\x08' => {
             if *CURSOR_POSITION.lock() > 2 {
                 print!("{}", c);
@@ -81,7 +97,7 @@ fn handle_console_key(c: char) {
             let len = unsafe { CONSOLE_HISTORY.len() };
             
             // there must be some history to go back to & the index must be less than the length of the history
-            if len != 0 && len - 1 > *idx {
+            if len != 0 && len > *idx {
                 #[allow(static_mut_refs)]
                 let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
                 
@@ -112,7 +128,7 @@ fn handle_console_key(c: char) {
             
             if len != 0 && len >= *idx && *idx > 0 {
                 #[allow(static_mut_refs)]
-                let cmd = unsafe { CONSOLE_HISTORY.get(len - *idx + 1) };
+                let cmd = unsafe { CONSOLE_HISTORY.get(len - *idx) };
                 
                 let mut stdio = STDIO.lock();
                 stdio.clear();
@@ -164,6 +180,11 @@ fn exec(cmd: &str, args: &[&str]) {
             println!("{}", crate::sys::framebuffer::get_pitch());
         },
         "df" => crate::kernel_utils::df::main(args),
+        "touch" => crate::kernel_utils::touch::main(args),
+        "mkdir" => crate::kernel_utils::mkdir::main(args),
+        "cd" => crate::kernel_utils::cd::main(args),
+        "rm" => crate::kernel_utils::rm::main(args),
+        "readelf" => crate::kernel_utils::readelf::main(args),
         _ => {
             println!("{}: not a command", cmd);
         }

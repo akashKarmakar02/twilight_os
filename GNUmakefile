@@ -153,9 +153,13 @@ run-bios: $(IMAGE_NAME).iso
 .PHONY: run-hdd-bios
 run-hdd-bios: $(IMAGE_NAME).hdd
 	qemu-system-$(KARCH) \
-		-M q35 \
-		-hda $(IMAGE_NAME).hdd \
-		$(QEMUFLAGS)
+		-m 50 \
+		-device rtl8139 \
+		-enable-kvm \
+		-cpu host \
+		-smp 4 \
+		-serial stdio \
+		-hda $(IMAGE_NAME).hdd
 
 ovmf/ovmf-code-$(KARCH).fd:
 	mkdir -p ovmf
@@ -181,8 +185,13 @@ limine/limine:
 	$(MAKE) -C limine
 
 .PHONY: kernel
-kernel:
+kernel: userspace
 	$(MAKE) -C twilight_kernel
+
+.PHONY: userspace
+userspace:
+	cd userspace && \
+	cargo build --release
 
 $(IMAGE_NAME).iso: limine/limine kernel
 	rm -rf iso_root
@@ -237,7 +246,7 @@ ifeq ($(KARCH),x86_64)
 endif
 	mformat -i $(IMAGE_NAME).hdd@@1M
 	mmd -i $(IMAGE_NAME).hdd@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
-	mcopy -i $(IMAGE_NAME).hdd@@1M kernel/bin-$(KARCH)/kernel ::/boot
+	mcopy -i $(IMAGE_NAME).hdd@@1M twilight_kernel/kernel ::/boot
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine.conf ::/boot/limine
 ifeq ($(KARCH),x86_64)
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine/limine-bios.sys ::/boot/limine

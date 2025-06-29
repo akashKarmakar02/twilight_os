@@ -8,6 +8,7 @@ use core::hint::spin_loop;
 use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
+use crate::driver::disk::mount_ata;
 use crate::println;
 // Information Technology
 // AT Attachment with Packet Interface Extension (ATA/ATAPI-4)
@@ -313,9 +314,11 @@ pub fn init() {
     }
     
     let time = crate::driver::timer::pit::uptime();
+    let drives = list();
 
-    for drive in list() {
+    for drive in drives {
         println!("\x1b[93m[{:.6}]\x1b[0m ATA {}:{} {}", time, drive.bus, drive.dsk, drive);
+        mount_ata(drive.bus, drive.dsk);
     }
 }
 
@@ -340,8 +343,8 @@ impl Drive {
         
         if let Ok(IdentifyResponse::Ata(res)) = res {
             let buf = res.map(u16::to_be_bytes).concat();
-            let model = String::from_utf8_lossy(&buf[54..94]).trim().into();
-            let serial = String::from_utf8_lossy(&buf[20..40]).trim().into();
+            let model: String = String::from_utf8_lossy(&buf[54..94]).trim().into();
+            let serial: String = String::from_utf8_lossy(&buf[20..40]).trim().into();
             let block_count = u32::from_be_bytes(
                 buf[120..124].try_into().unwrap()
             ).rotate_left(16);

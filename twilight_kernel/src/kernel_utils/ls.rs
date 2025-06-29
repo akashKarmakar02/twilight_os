@@ -1,18 +1,18 @@
-use alloc::string::String;
-use alloc::vec::Vec;
-
 use crate::println;
-use crate::sys::fs;
+use crate::sys::{console, fs};
 
 pub fn main(_args: &[&str], _ctx: &str) {
-    let files = get_files("/");
-
-    for file in files {
-        println!("{}", file);
+    #[allow(static_mut_refs)]
+    let pwd = unsafe { console::DIR.as_str() };
+    let mut fs = unsafe { fs::MFS.get_unchecked().lock() };
+    
+    let mut inode = 1u16;
+    
+    if pwd != "/" {
+        inode = fs.resolve_path(pwd).unwrap_or_else(|_| 1)
     }
-}
 
-fn get_files(ctx: &str) -> Vec<String> {
-    fs::readdir(ctx).unwrap_or_default()
-
+    if let Err(e) = fs.list_dir(inode) {
+        println!("Error: {}", e);
+    }
 }
