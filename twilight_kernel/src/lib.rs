@@ -28,12 +28,12 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     driver::timer::init();
 
     let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator = unsafe {
         memory::BootInfoFrameAllocator::init(memory_map_response.entries())
     };
 
-    memory::allocator::init_heap(&mut mapper, &mut frame_allocator, memory_map_response).expect("Failed to initialize heap");
+    memory::allocator::init_heap(&mut frame_allocator, memory_map_response).expect("Failed to initialize heap");
     executor::init_executor();
     fs::init_fs();
     init_writer();
@@ -46,6 +46,13 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
 }
 
 
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => ({
+        let time = $crate::driver::timer::pit::uptime();
+        $crate::println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
+    });
+}
 
 
 #[alloc_error_handler]

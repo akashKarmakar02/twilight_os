@@ -1,27 +1,110 @@
+mod rtl8139;
+
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64};
 use smoltcp::iface::Interface;
+use smoltcp::phy::{DeviceCapabilities};
+use smoltcp::time::Instant;
 use smoltcp::wire::EthernetAddress;
 use spin::Mutex;
-use crate::{println, sys};
+use crate::{log, sys};
 use crate::driver::timer::pit::uptime;
 use crate::sys::pci::DeviceConfig;
 
 pub static NET: Mutex<Option<(Interface, EthernetDevice)>> = Mutex::new(None);
 
+#[derive(Clone)]
 pub enum EthernetDevice {
-    
-} 
+    RTL8139(rtl8139::Device),
+}
 
 pub trait EthernetDeviceIO {
     fn config(&self) -> Arc<Config>;
     fn stats(&self) -> Arc<Stats>;
-    fn receive_packet(&self) -> Option<Vec<u8>>;
+    fn receive_packet(&mut self) -> Option<Vec<u8>>;
     fn transmit_packet(&self, len: usize);
     fn next_tx_buffer(&mut self, len: usize) -> &mut [u8];
 }
 
+impl EthernetDeviceIO for EthernetDevice {
+    fn config(&self) -> Arc<Config> {
+        match self {
+            EthernetDevice::RTL8139(dev) => dev.config(),
+        }
+    }
+    fn stats(&self) -> Arc<Stats> {
+        match self {
+            EthernetDevice::RTL8139(dev) => dev.stats(),
+        }
+    }
+    fn receive_packet(&mut self) -> Option<Vec<u8>> {
+        match self {
+            EthernetDevice::RTL8139(dev) => dev.receive_packet(),
+        }
+    }
+    
+    fn transmit_packet(&self, len: usize) {
+        match self {
+            EthernetDevice::RTL8139(dev) => dev.transmit_packet(len),
+        }
+    }
+    
+    fn next_tx_buffer(&mut self, len: usize) -> &mut [u8] {
+        match self {
+            EthernetDevice::RTL8139(dev) => dev.next_tx_buffer(len),
+        }
+    }
+}
+
+
+impl<'a> smoltcp::phy::Device for EthernetDevice {
+    type RxToken<'b> = RxToken where Self: 'b;
+    type TxToken<'b> = TxToken where Self: 'b;
+
+    fn receive(
+        &mut self,
+        _instant: smoltcp::time::Instant,
+    ) -> Option<(Self::RxToken<'a>, Self::TxToken<'a>)> {
+        if let Some(buffer) = self.receive_packet() {
+            if self.config().is_debug_enabled() {
+                // debug!("NET Packet Received");
+                // usr::hex::print_hex(&buffer);
+            }
+            self.stats().rx_add(buffer.len() as u64);
+            let rx = RxToken { buffer };
+            let tx = TxToken {
+                device: self.clone(),
+            };
+            Some((rx, tx))
+        } else {
+            None
+        }
+    }
+
+    fn transmit(
+        &mut self,
+        _instant: Instant
+    ) -> Option<Self::TxToken<'a>> {
+        let tx = TxToken {
+            device: self.clone(),
+        };
+        Some(tx)
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut caps = DeviceCapabilities::default();
+        caps.max_transmission_unit = 1500;
+        caps.max_burst_size = Some(64);
+        caps
+    }
+}
+
+
+fn time() -> Instant {
+    Instant::from_micros((uptime() * 1000000.0) as i64)
+}
 
 /// Configuration for an Ethernet device.
 ///
@@ -147,7 +230,60 @@ fn find_device(device_id: u16, vendor_id: u16) -> Option<DeviceConfig> {
     None
 }
 
+
+#[doc(hidden)]
+pub struct RxToken {
+    buffer: Vec<u8>,
+}
+
+impl smoltcp::phy::RxToken for RxToken {
+    fn consume<R, F>(self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        f(&self.buffer)
+    }
+}
+
+#[doc(hidden)]
+pub struct TxToken {
+    device: EthernetDevice,
+}
+impl smoltcp::phy::TxToken for TxToken {
+    fn consume<R, F>(mut self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let config = self.device.config();
+        let buf = self.device.next_tx_buffer(len);
+        let res = f(buf);
+        if config.is_debug_enabled() {
+            // debug!("NET Packet Transmitted");
+            // usr::hex::print_hex(buf);
+        }
+        self.device.transmit_packet(len);
+        self.device.stats().tx_add(len as u64);
+        res
+    }
+}
+
 pub fn init() {
-    let uptime = uptime();
-    println!("\x1b[93m[{:.6}]\x1b[0m NET DEV INIT (unimplemented)", uptime);
+    let add = |mut device: EthernetDevice, name| {        
+        log!("NET DRV {}", name);
+        if let Some(mac) = device.config().mac() {
+            let addr = format!("{}", mac).to_uppercase();
+            log!("NET MAC {}", addr);
+
+            let config = smoltcp::iface::Config::new(mac.into());
+            let iface = Interface::new(config, &mut device, time());
+
+            *NET.lock() = Some((iface, device));
+        }
+    };
+
+    if let Some(dev) = find_device(0x10EC, 0x8139) {
+        let io = dev.io_base();
+        let nic = rtl8139::Device::new(io);
+        add(EthernetDevice::RTL8139(nic), "RTL8139");
+    }
 }

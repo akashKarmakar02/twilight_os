@@ -43,6 +43,7 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 	qemu-system-$(KARCH) \
 		-m 50 \
 		-device rtl8139 \
+		-netdev user,id=e0,hostfwd=tcp::8080-:80 \
 		-smp 4 \
 		-drive file=hdd.img,format=raw,if=ide \
 		-cdrom $(IMAGE_NAME).iso \
