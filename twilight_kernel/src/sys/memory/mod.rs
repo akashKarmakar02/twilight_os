@@ -1,8 +1,13 @@
 pub mod allocator;
+pub mod phys;
 
-use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB};
+use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB, Translate};
 use x86_64::{PhysAddr, VirtAddr};
 use limine::memory_map::{Entry, EntryType};
+use spin::Once;
+
+#[allow(static_mut_refs)]
+static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();
 
 pub struct BootInfoFrameAllocator {
     memory_map: &'static [&'static Entry],
@@ -61,9 +66,12 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
-pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
+pub unsafe fn init(physical_memory_offset: VirtAddr) {
     let level_4_table = active_level_4_table(physical_memory_offset);
-    OffsetPageTable::new(level_4_table, physical_memory_offset)
+    #[allow(static_mut_refs)]
+    MAPPER.call_once(|| {
+        OffsetPageTable::new(level_4_table, physical_memory_offset)    
+    });
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]
@@ -77,4 +85,14 @@ pub unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static
     let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
 
     &mut *page_table_ptr
+}
+
+
+pub fn mapper() -> &'static mut OffsetPageTable<'static> {
+    #[allow(static_mut_refs)]
+    unsafe { MAPPER.get_mut_unchecked() }
+}
+
+pub fn virt_to_phys(addr: VirtAddr) -> Option<PhysAddr> {
+    mapper().translate_addr(addr)
 }
