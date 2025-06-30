@@ -1,10 +1,10 @@
+use crate::driver::disk::{BlockDevice, BlockDeviceIO};
+use crate::sys::fs::minixfs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
+use crate::{driver, println};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
-use crate::driver::disk::{BlockDevice, BlockDeviceIO};
 use core::mem::size_of;
-use crate::{driver, println};
-use crate::sys::fs::minixfs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, FileSizeTooLarge, InvalidInode};
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
@@ -682,8 +682,8 @@ impl MinixFs {
             let mut indirect_block = [0u8; 1024];
             self.device.read(inode.indirect_zones as u32, &mut indirect_block).unwrap();
 
-            let zone_entries = 1024 / 2;
-            for i in 0..zone_entries {
+            let zone_entries = 1024 / 4;
+            for i in 0..(zone_entries-1) {
                 if remaining == 0 {
                     break;
                 }
