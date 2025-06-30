@@ -1,10 +1,10 @@
+use crate::driver::disk::{BlockDevice, BlockDeviceIO};
+use crate::sys::fs::minixfs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
+use crate::{driver, println};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
-use crate::driver::disk::{BlockDevice, BlockDeviceIO};
 use core::mem::size_of;
-use crate::{driver, println};
-use crate::sys::fs::minixfs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +34,7 @@ pub struct Inode {
     pub gid: u8,
     pub nlinks: u8,
     pub zones: [u16; 9],
+    pub indirect_zones: u16,
 }
 
 #[repr(C, packed)]
@@ -50,6 +51,7 @@ pub enum FsError {
     InvalidPath,
     InvalidInode,
     FileNameTooLong,
+    FileSizeTooLarge,
 }
 
 fn ceil_div(a: usize, b: usize) -> usize {
@@ -533,6 +535,7 @@ impl MinixFs {
             gid: 0,
             nlinks: 0,
             zones: [0; 9],
+            indirect_zones: 0,
         };
         inode.zones[0] = new_zone as u16;
 
@@ -617,6 +620,7 @@ impl MinixFs {
             gid: 0,
             nlinks: 2, // "." and ".."
             zones: [0; 9],
+            indirect_zones: 0,
         };
         inode.zones[0] = new_zone as u16;
         self.write_inode(new_inode_num, &inode).unwrap();
@@ -666,8 +670,49 @@ impl MinixFs {
             remaining -= copy_size;
         }
 
+        // if space in direct zones is filled use indirect nodes
         if remaining > 0 {
-            return Err(FileNameTooLong);
+            if inode.indirect_zones == 0 {
+                let zone = self.allocate_zone().unwrap();
+                inode.indirect_zones = zone as u16;
+                let zero_block = [0u8; 1024];
+                self.device.write(zone as u32, &zero_block).unwrap();
+            }
+
+            let mut indirect_block = [0u8; 1024];
+            self.device.read(inode.indirect_zones as u32, &mut indirect_block).unwrap();
+
+            let zone_entries = 1024 / 4;
+            for i in 0..(zone_entries-1) {
+                if remaining == 0 {
+                    break;
+                }
+
+                let entry = u16::from_le_bytes([
+                    indirect_block[i * 4],
+                    indirect_block[i * 4 + 1],
+                ]);
+
+                let zone = if entry == 0 {
+                    let new_zone = self.allocate_zone().unwrap();
+                    indirect_block[i * 4..i * 4 + 4].copy_from_slice(&new_zone.to_le_bytes());
+                    new_zone
+                } else {
+                    entry as u32
+                };
+
+                let mut buffer = [0u8; 1024];
+                let copy_size = core::cmp::min(block_size, remaining);
+
+                buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                self.device.write(zone, &buffer).unwrap();
+
+                bytes_written += copy_size;
+                remaining -= copy_size;
+            }
+
+            // store updated indirect block
+            self.device.write(inode.indirect_zones as u32, &indirect_block).unwrap();
         }
 
         inode.size = bytes_written as u32;
