@@ -4,7 +4,6 @@ use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
-
 // Translate IRQ into system interrupt
 fn interrupt_index(irq: u8) -> u8 {
     PIC_1_OFFSET + irq
@@ -15,7 +14,8 @@ lazy_static! {
         let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
-        idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
+        idt.general_protection_fault
+            .set_handler_fn(general_protection_fault_handler);
         unsafe {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
@@ -36,7 +36,10 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame, err: u64) -> ! {
-    panic!("EXCEPTION: DOUBLE FAULT\n{:#?}\nERROR CODE: {:#?}", stack_frame.instruction_pointer, err);
+    panic!(
+        "EXCEPTION: DOUBLE FAULT\n{:#?}\nERROR CODE: {:#?}",
+        stack_frame.instruction_pointer, err
+    );
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
@@ -50,7 +53,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     );
 }
 
-extern "x86-interrupt" fn page_fault_handler(_stack_frame: InterruptStackFrame, error_code: PageFaultErrorCode) {
+extern "x86-interrupt" fn page_fault_handler(
+    _stack_frame: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+) {
     println!("EXCEPTION: PAGE FAULT");
     println!("Accessed Address: {:?}", Cr2::read());
     println!("Error Code: {:?}", error_code);
@@ -63,9 +69,8 @@ use x86_64::registers::control::Cr2;
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
-pub static PICS: Mutex<ChainedPics> = Mutex::new(unsafe {
-    ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)
-});
+pub static PICS: Mutex<ChainedPics> =
+    Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 pub fn init_pics() {
     unsafe {
@@ -73,7 +78,6 @@ pub fn init_pics() {
         PICS.lock().write_masks(0b11111100, 0b11111111);
     }
 }
-
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::driver::timer::pit::tick();
