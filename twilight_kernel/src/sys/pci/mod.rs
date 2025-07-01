@@ -172,6 +172,7 @@ pub fn lookup_device_name(vendor: u16, device: u16) -> &'static str {
         (0x8086, 0x2415) => "Intel AC'97 Audio Controller",
         (0x8086, 0x7113) => "Intel 82371AB/EB/MB PIIX4 ACPI",
         (0x8086, 0x7010) => "Intel 82371SB PIIX3 IDE Controller",
+        (0x8086, 0x7020) => "82371SB PIIX3 USB [Natoma/Triton II]",
 
         // Realtek
         (0x10ec, 0x8139) => "Realtek RTL-8139",

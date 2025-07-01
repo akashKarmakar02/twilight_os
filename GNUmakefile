@@ -45,6 +45,8 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-device rtl8139 \
 		-netdev user,id=e0,hostfwd=tcp::8080-:80 \
 		-smp 4 \
+		-usb \
+		-device piix3-usb-uhci \
 		-drive file=hdd.img,format=raw,if=ide \
 		-cdrom $(IMAGE_NAME).iso \
 		-serial stdio
