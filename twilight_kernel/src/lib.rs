@@ -39,7 +39,10 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     init_writer();
 
     sys::pci::init();
+    // depends on pci initialization
     driver::nic::init();
+    driver::usb::init();
+    
     driver::cpu::init(mp_response);
     driver::disk::ata::init();
     fs::init(true);
