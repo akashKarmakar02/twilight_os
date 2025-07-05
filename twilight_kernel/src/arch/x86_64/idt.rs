@@ -1,8 +1,24 @@
+use core::arch::naked_asm;
 use crate::arch::x86_64::gdt;
 use crate::println;
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+
+#[repr(align(8), C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Registers {
+    // Saved scratch registers
+    pub r11: usize,
+    pub r10: usize,
+    pub r9: usize,
+    pub r8: usize,
+    pub rdi: usize,
+    pub rsi: usize,
+    pub rdx: usize,
+    pub rcx: usize,
+    pub rax: usize,
+}
 
 
 // Translate IRQ into system interrupt
@@ -20,6 +36,10 @@ lazy_static! {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+            
+            let f = syscall_wrapper as *mut fn();
+            idt[0x80].
+                set_handler_fn(core::mem::transmute(f));
         }
         idt[interrupt_index(0)].set_handler_fn(timer_interrupt_handler);
         idt[interrupt_index(1)].set_handler_fn(keyboard_interrupt_handler);
@@ -57,6 +77,52 @@ extern "x86-interrupt" fn page_fault_handler(_stack_frame: InterruptStackFrame, 
     println!("{:#?}", _stack_frame);
 }
 
+// Naked function wrapper saving all scratch registers to the stack
+// See: https://os.phil-opp.com/returning-from-exceptions/
+macro_rules! wrap {
+    ($fn: ident => $w:ident) => {
+        #[unsafe(naked)]
+        pub unsafe extern "sysv64" fn $w() {
+            naked_asm!(
+                "push rax",
+                "push rcx",
+                "push rdx",
+                "push rsi",
+                "push rdi",
+                "push r8",
+                "push r9",
+                "push r10",
+                "push r11",
+                "mov rsi, rsp", // Arg #2: register list
+                "mov rdi, rsp", // Arg #1: interupt frame
+                "add rdi, 9 * 8", // 9 registers * 8 bytes
+                "call {}",
+                "pop r11",
+                "pop r10",
+                "pop r9",
+                "pop r8",
+                "pop rdi",
+                "pop rsi",
+                "pop rdx",
+                "pop rcx",
+                "pop rax",
+                "iretq",
+                sym $fn
+            );
+        }
+    };
+}
+
+wrap!(syscall_handler => syscall_wrapper);
+
+extern "sysv64" fn syscall_handler(
+    _stack_frame: &mut InterruptStackFrame,
+    regs: &mut Registers
+) {
+    println!("SYSCALL: {}", regs.rax);
+}
+
+// device interrupt
 use spin::Mutex;
 use x86_64::registers::control::Cr2;
 
