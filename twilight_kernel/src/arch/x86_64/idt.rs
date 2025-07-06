@@ -119,6 +119,7 @@ wrap!(syscall_handler => syscall_wrapper);
 // device interrupt
 use spin::Mutex;
 use x86_64::registers::control::Cr2;
+use crate::driver::keyboard::keyboard_interrupt;
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -149,9 +150,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     let mut port = Port::<u8>::new(0x60);
 
     let scancode: u8 = unsafe { port.read() };
-
-    crate::driver::keyboard::add_scancode(scancode);
-
+    
+    keyboard_interrupt(scancode);
+    
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(1));
     }

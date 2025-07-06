@@ -1,14 +1,13 @@
 extern crate alloc;
 
-use crate::sys::buffer::stdin::StdinStream;
 use crate::sys::console::writer::clear_screen;
-use crate::task::executor::EXECUTOR;
-use crate::task::Task;
 use crate::{print, println, serial_prtinln};
 use alloc::string::String;
 use alloc::vec::Vec;
 use futures_util::StreamExt;
 use spin::Mutex;
+use crate::arch::x86_64::halt;
+use crate::sys::tty::read_char;
 
 pub mod writer;
 pub mod font;
@@ -21,17 +20,11 @@ pub static mut DIR: String = String::new();
 static mut CONSOLE_HISTORY: Vec<String> = Vec::new();
 static mut CONSOLE_HISTORY_INDEX: Mutex<usize> = Mutex::new(0);
 
-async fn handle_input() {
-    while let Some(c) = StdinStream::new().next().await {
-        handle_console_key(c);
-    }
-}
-
 pub fn init_console() {
     unsafe {
         DIR = String::from("/");
     }
-    EXECUTOR.get().unwrap().lock().spawn(Task::new(handle_input()));
+    handle_console_input();
 }
 
 pub fn start_kernel_console() {
@@ -42,118 +35,123 @@ pub fn start_kernel_console() {
     *cur_pos = 2;
 }
 
-fn handle_console_key(c: char) {
-    match c {
-        '\n' => {
-            print!("\n");
-            let mut cmd_line = STDIO.lock();
-            unsafe {
-                #[allow(static_mut_refs)]
-                CONSOLE_HISTORY.push(cmd_line.clone());
-            }
-            let args: Vec<&str> = cmd_line.split_whitespace().collect();
-
-            if args.len() > 1 {
-                exec(args[0], &args[1..]);
-            } else if !args.is_empty() {
-                exec(args[0], &[]);
-            }
-            cmd_line.clear();
-            start_kernel_console();
-
-            // reset history index
-            #[allow(static_mut_refs)]
-            let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
-            *idx = 0;
-        }
-        '\t' => {
-            print!("{}", c);
-            STDIO.lock().push(' ');
-            STDIO.lock().push(' ');
-            STDIO.lock().push(' ');
-            STDIO.lock().push(' ');
-            let mut cur_pos = CURSOR_POSITION.lock();
-            *cur_pos += 4;
-        }
-        '\x08' => {
-            if *CURSOR_POSITION.lock() > 2 {
-                print!("{}", c);
+fn handle_console_input() {
+    start_kernel_console();
+    loop {
+        halt();
+        let c = read_char();
+        match c {
+            '\n' => {
+                print!("\n");
                 let mut cmd_line = STDIO.lock();
-                if !cmd_line.trim().is_empty() {
-                    cmd_line.pop();
+                unsafe {
+                    #[allow(static_mut_refs)]
+                    CONSOLE_HISTORY.push(cmd_line.clone());
                 }
-                *CURSOR_POSITION.lock() -= 1;
-            }
-        }
-        // up arrow key
-        '\u{F700}' => {
-            print!("\r");
-            start_kernel_console();
-            
-            #[allow(static_mut_refs)]
-            let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
-            
-            #[allow(static_mut_refs)]
-            let len = unsafe { CONSOLE_HISTORY.len() };
-            
-            // there must be some history to go back to & the index must be less than the length of the history
-            if len != 0 && len > *idx {
-                #[allow(static_mut_refs)]
-                let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
-                
-                serial_prtinln!("{}", *idx);
-                
-                let mut stdio = STDIO.lock();
-                stdio.clear();
-                stdio.push_str(cmd);
+                let args: Vec<&str> = cmd_line.split_whitespace().collect();
 
-                print!("{}", cmd);
-                
-                // incrementing the history index
-                *idx += 1;
-                // changing the cursor position so backspace works
-                *CURSOR_POSITION.lock() = 2 + cmd.len();
-            }
-        }
-        // down arrow key
-        '\u{F701}' => {
-            print!("\r");
-            start_kernel_console();
-            
-            #[allow(static_mut_refs)]
-            let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
-            
-            #[allow(static_mut_refs)]
-            let len = unsafe { CONSOLE_HISTORY.len() };
-            
-            if len != 0 && len >= *idx && *idx > 0 {
+                if args.len() > 1 {
+                    exec(args[0], &args[1..]);
+                } else if !args.is_empty() {
+                    exec(args[0], &[]);
+                }
+                cmd_line.clear();
+                start_kernel_console();
+
+                // reset history index
                 #[allow(static_mut_refs)]
-                let cmd = unsafe { CONSOLE_HISTORY.get(len - *idx) };
-                
-                let mut stdio = STDIO.lock();
-                stdio.clear();
-                
-                if let Some(cmd) = cmd {
+                let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+                *idx = 0;
+            }
+            '\t' => {
+                print!("{}", c);
+                STDIO.lock().push(' ');
+                STDIO.lock().push(' ');
+                STDIO.lock().push(' ');
+                STDIO.lock().push(' ');
+                let mut cur_pos = CURSOR_POSITION.lock();
+                *cur_pos += 4;
+            }
+            '\x08' => {
+                if *CURSOR_POSITION.lock() > 2 {
+                    print!("{}", c);
+                    let mut cmd_line = STDIO.lock();
+                    if !cmd_line.trim().is_empty() {
+                        cmd_line.pop();
+                    }
+                    *CURSOR_POSITION.lock() -= 1;
+                }
+            }
+            // up arrow key
+            '\u{F700}' => {
+                print!("\r");
+                start_kernel_console();
+
+                #[allow(static_mut_refs)]
+                let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+
+                #[allow(static_mut_refs)]
+                let len = unsafe { CONSOLE_HISTORY.len() };
+
+                // there must be some history to go back to & the index must be less than the length of the history
+                if len != 0 && len > *idx {
+                    #[allow(static_mut_refs)]
+                    let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
+
+                    serial_prtinln!("{}", *idx);
+
+                    let mut stdio = STDIO.lock();
+                    stdio.clear();
                     stdio.push_str(cmd);
 
                     print!("{}", cmd);
-                    
+
+                    // incrementing the history index
+                    *idx += 1;
                     // changing the cursor position so backspace works
                     *CURSOR_POSITION.lock() = 2 + cmd.len();
-                    
-                    *idx -= 1;
                 }
             }
-        }
-        '\u{F702}' => {}
-        '\u{F703}' => {}
-        _ => {
-            print!("{}", c);
-            STDIO.lock().push(c);
-            let mut cur_pos = CURSOR_POSITION.lock();
-            *cur_pos += 1;
-        }
-    };
+            // down arrow key
+            '\u{F701}' => {
+                print!("\r");
+                start_kernel_console();
+
+                #[allow(static_mut_refs)]
+                let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+
+                #[allow(static_mut_refs)]
+                let len = unsafe { CONSOLE_HISTORY.len() };
+
+                if len != 0 && len >= *idx && *idx > 0 {
+                    #[allow(static_mut_refs)]
+                    let cmd = unsafe { CONSOLE_HISTORY.get(len - *idx) };
+
+                    let mut stdio = STDIO.lock();
+                    stdio.clear();
+
+                    if let Some(cmd) = cmd {
+                        stdio.push_str(cmd);
+
+                        print!("{}", cmd);
+
+                        // changing the cursor position so backspace works
+                        *CURSOR_POSITION.lock() = 2 + cmd.len();
+
+                        *idx -= 1;
+                    }
+                }
+            }
+            '\u{F702}' => {}
+            '\u{F703}' => {}
+            _ => {
+                print!("{}", c);
+                STDIO.lock().push(c);
+                let mut cur_pos = CURSOR_POSITION.lock();
+                *cur_pos += 1;
+            }
+        };
+    }
 }
 
 fn exec(cmd: &str, args: &[&str]) {

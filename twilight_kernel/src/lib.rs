@@ -45,8 +45,6 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     driver::cpu::init(mp_response);
     driver::disk::ata::init();
     fs::init(true);
-    
-    unsafe { syscall!(SYS_READ) };
 }
 
 

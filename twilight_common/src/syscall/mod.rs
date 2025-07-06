@@ -59,7 +59,20 @@ pub unsafe fn syscall4(n: usize, arg1: usize, arg2: usize, arg3: usize, arg4: us
         let res: usize;
         asm!(
         "int 0x80", in("rax") n,
-        in("rdi") arg1, in("rsi") arg2, in("rdx") arg3, in("r8") arg4,
+        in("rdi") arg1, in("rsi") arg2, in("rdx") arg3, in("r10") arg4,
+        lateout("rax") res
+        );
+        res
+    }
+}
+
+#[doc(hidden)]
+pub unsafe fn syscall5(n: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> usize {
+    unsafe {
+        let res: usize;
+        asm!(
+        "int 0x80", in("rax") n,
+        in("rdi") arg1, in("rsi") arg2, in("rdx") arg3, in("r10") arg4, in("r8") arg5,
         lateout("rax") res
         );
         res
@@ -78,7 +91,7 @@ macro_rules! syscall {
         $crate::syscall::syscall2($n as usize, $a1 as usize, $a2 as usize)
     };
     ($n:expr, $a1:expr, $a2:expr, $a3:expr) => {
-        $crate::syscall::syscall3($n as usize, $a1 as usize, $a2 as usize, $a3 as usize)
+            $crate::syscall::syscall3($n as usize, $a1 as usize, $a2 as usize, $a3 as usize)
     };
     ($n:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr) => {
         $crate::syscall::syscall4(
@@ -89,4 +102,14 @@ macro_rules! syscall {
             $a4 as usize,
         )
     };
+    ($n:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr) => {
+        $crate::syscall::syscall5(
+            $n as usize,
+            $a1 as usize,
+            $a2 as usize,
+            $a3 as usize,
+            $a4 as usize,
+            $a5 as usize,
+        )
+    }
 }
