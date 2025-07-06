@@ -16,6 +16,8 @@ use x86_64::VirtAddr;
 use sys::{fs, memory};
 use crate::sys::console::writer::init_writer;
 use sys::framebuffer::init_framebuffer;
+use twilight_common::syscall;
+use twilight_common::syscall::numbers::SYS_READ;
 use crate::task::executor;
 
 pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static MemoryMapResponse, mp_response: &'static MpResponse) {
@@ -43,6 +45,8 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     driver::cpu::init(mp_response);
     driver::disk::ata::init();
     fs::init(true);
+    
+    unsafe { syscall!(SYS_READ) };
 }
 
 

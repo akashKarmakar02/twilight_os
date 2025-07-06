@@ -3,6 +3,7 @@ use crate::arch::x86_64::gdt;
 use crate::println;
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
+use crate::sys::syscall::syscall_handler;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 #[repr(align(8), C)]
@@ -114,13 +115,6 @@ macro_rules! wrap {
 }
 
 wrap!(syscall_handler => syscall_wrapper);
-
-extern "sysv64" fn syscall_handler(
-    _stack_frame: &mut InterruptStackFrame,
-    regs: &mut Registers
-) {
-    println!("SYSCALL: {}", regs.rax);
-}
 
 // device interrupt
 use spin::Mutex;

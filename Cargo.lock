@@ -396,6 +396,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "twilight_common"
+version = "0.1.0"
+
+[[package]]
 name = "twilight_kernel"
 version = "0.1.0"
 dependencies = [
@@ -412,6 +416,7 @@ dependencies = [
  "raw-cpuid",
  "smoltcp",
  "spin",
+ "twilight_common",
  "x86_64",
 ]
 
