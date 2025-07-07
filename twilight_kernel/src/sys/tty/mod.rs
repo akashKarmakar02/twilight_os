@@ -5,6 +5,7 @@ use crate::driver::disk::ata::{FileIO, IO};
 use crate::println;
 use crate::sys::buffer::stdin::STDIN;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Tty;
 
@@ -29,7 +30,7 @@ impl FileIO for Tty {
 
     fn close(&mut self) {}
 
-    fn poll(&mut self, event: IO) -> bool {
+    fn poll(&mut self, _event: IO) -> bool {
         todo!()
     }
 }

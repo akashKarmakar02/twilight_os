@@ -1,35 +1,20 @@
-use crate::println;
-use conquer_once::spin::OnceCell;
-use core::pin::Pin;
-use core::task::{Context, Poll};
-use crossbeam_queue::ArrayQueue;
-use futures_util::task::AtomicWaker;
-use futures_util::{Stream, StreamExt};
+use lazy_static::lazy_static;
 use pc_keyboard::{DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1, layouts};
+use spin::Mutex;
 
 pub mod ps2;
 
-static SCANCODE_QUEUE: OnceCell<ArrayQueue<u8>> = OnceCell::uninit();
-static WAKER: AtomicWaker = AtomicWaker::new();
-
-pub(crate) fn add_scancode(scancode: u8) {
-    if let Ok(queue) = SCANCODE_QUEUE.try_get() {
-        if queue.push(scancode).is_err() {
-            println!("WARNING: scancode queue full; dropping keyboard input");
-        } else {
-            WAKER.wake();
-        }
-    } else {
-        println!("WARNING: scancode queue uninitialized");
-    }
+lazy_static! {
+    pub static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
+        Mutex::new(Keyboard::new(
+            ScancodeSet1::new(),
+            layouts::Us104Key,
+            HandleControl::Ignore
+        ));
 }
 
 pub fn keyboard_interrupt(scancode: u8) {
-    let mut keyboard = Keyboard::new(
-        ScancodeSet1::new(),
-        layouts::Us104Key,
-        HandleControl::Ignore,
-    );
+    let mut keyboard = KEYBOARD.lock();
 
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode)
         && let Some(key) = keyboard.process_keyevent(key_event)

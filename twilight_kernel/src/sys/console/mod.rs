@@ -4,7 +4,6 @@ use crate::sys::console::writer::clear_screen;
 use crate::{print, println, serial_prtinln};
 use alloc::string::String;
 use alloc::vec::Vec;
-use futures_util::StreamExt;
 use spin::Mutex;
 use crate::arch::x86_64::halt;
 use crate::sys::tty::read_char;
@@ -183,6 +182,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "cd" => crate::kernel_utils::cd::main(args),
         "rm" => crate::kernel_utils::rm::main(args),
         "readelf" => crate::kernel_utils::readelf::main(args),
+        "install" => crate::kernel_utils::install::main(),
         _ => {
             println!("{}: not a command", cmd);
         }
