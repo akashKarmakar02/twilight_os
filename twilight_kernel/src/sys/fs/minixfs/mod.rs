@@ -41,7 +41,7 @@ pub struct Inode {
 #[derive(Debug, Clone, Copy)]
 pub struct DirEntry {
     pub inode: u16,
-    pub name: [u8; 60], // MINIX v1/v2 uses fixed 14-byte names
+    pub name: [u8; 60], // MINIX v2 uses fixed 60-byte names
 }
 
 #[derive(Debug)]
@@ -539,9 +539,8 @@ impl MinixFs {
         };
         inode.zones[0] = new_zone as u16;
 
-        self.write_inode(new_inode_num, &inode).unwrap();
+        self.write_inode(new_inode_num + 1, &inode).unwrap();
 
-        // Add to the parent directory
         self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
 
         Ok(new_inode_num)
@@ -576,9 +575,9 @@ impl MinixFs {
             };
 
             if file_type == "dir" {
-                println!("\x1b[94m{}\x1b[0m", name);    
+                println!("\x1b[94m{}\x1b[0m", name);
             } else {
-                println!("{}", name);    
+                println!("{}", name);
             }
             
             

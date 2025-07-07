@@ -19,3 +19,5 @@ futures-util = { version = "0.3.31", default-features = false, features = ["allo
 raw-cpuid = { version = "11.5.0", default-features = false }
 goblin = { version = "0.10.0", features = ["elf64", "alloc", "elf32", "endian_fd", ], default-features = false }
 smoltcp = { version = "0.12.0", default-features = false, features = ["alloc", "medium-ethernet", "socket-tcp", "socket-udp", "socket-dhcpv4", "proto-ipv4", "proto-dhcpv4"] }
+
+twilight_common = { path = "../twilight_common" }
