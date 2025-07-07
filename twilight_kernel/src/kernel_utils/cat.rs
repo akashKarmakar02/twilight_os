@@ -16,7 +16,9 @@ pub fn main(args: &[&str]) {
     if args[0] == ">" {
         let inode = match fs.find_dir_entry(inode, args[1]).unwrap() {
             Some(inode) => inode,
-            None => fs.create_file(inode, args[1]).unwrap(),
+            None => {
+                fs.create_file(inode, args[1]).unwrap()
+            },
         };
 
         if args.len() > 2 {
