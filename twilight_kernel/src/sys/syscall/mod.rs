@@ -15,8 +15,9 @@ pub extern "sysv64" fn syscall_handler(
     let arg1 = regs.rdi;
     let arg2 = regs.rsi;
     let arg3 = regs.rdx;
-    let arg4 = regs.r10;
-    let arg5 = regs.r8;
+    // not in use
+    let _arg4 = regs.r10;
+    let _arg5 = regs.r8;
     // let arg6 = regs.r9;
     
     let res = match syscall_number {
