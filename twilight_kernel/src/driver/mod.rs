@@ -4,3 +4,4 @@ pub mod disk;
 pub mod cpu;
 pub mod uart;
 pub mod nic;
+pub mod usb;

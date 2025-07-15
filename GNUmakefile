@@ -28,14 +28,21 @@ run-hdd: run-hdd-$(KARCH)
 .PHONY: run-x86_64-uefi
 run-x86_64-uefi: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
 	qemu-system-$(KARCH) \
-		-M pc \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
+		-m 400 \
+		-device rtl8139 \
+		-netdev user,id=e0,hostfwd=tcp::8080-:80 \
+		-smp 4 \
+		-usb \
+		-device usb-mouse \
+		-device piix3-usb-uhci \
+		-drive file=hdd.img,format=raw,if=ide \
 		-cdrom $(IMAGE_NAME).iso \
-		$(QEMUFLAGS)
+		-serial stdio
 
 .PHONY: run-x86_64
-run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
+run-x86_64: $(IMAGE_NAME).iso
 	@if [ ! -f hdd.img ]; then \
 		echo "Creating hdd.img..."; \
 		qemu-img create -f raw hdd.img 16M; \
@@ -45,6 +52,9 @@ run-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).
 		-device rtl8139 \
 		-netdev user,id=e0,hostfwd=tcp::8080-:80 \
 		-smp 4 \
+		-usb \
+		-device usb-mouse \
+		-device piix3-usb-uhci \
 		-drive file=hdd.img,format=raw,if=ide \
 		-cdrom $(IMAGE_NAME).iso \
 		-serial stdio

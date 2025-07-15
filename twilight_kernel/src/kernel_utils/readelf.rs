@@ -16,8 +16,11 @@ pub fn main(args: &[&str]) {
     if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
         let content_buf = fs.read_file(inode + 1).unwrap();
         
-        let elf = goblin::elf::Elf::parse(content_buf.as_slice()).unwrap();
-        println!("{:#?}", elf.header);
+        if let Ok(elf) = object::File::parse(content_buf.as_slice()) {
+            println!("{:?}", elf);
+        } else {
+            println!("readelf: filed to parse file {}", args[0]);
+        }
     } else {
         println!("readelf: {}: No such file or directory", args[0]);
     }

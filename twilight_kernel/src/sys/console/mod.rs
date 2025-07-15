@@ -183,6 +183,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "rm" => crate::kernel_utils::rm::main(args),
         "readelf" => crate::kernel_utils::readelf::main(args),
         "install" => crate::kernel_utils::install::main(),
+        "exec" => crate::kernel_utils::exec::main(args),
         _ => {
             println!("{}: not a command", cmd);
         }

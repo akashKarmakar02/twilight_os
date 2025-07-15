@@ -1,10 +1,10 @@
-use alloc::{vec, vec::Vec};
+use crate::sys::console::font::PSF_FONTS;
+use crate::sys::framebuffer::{FRAMEBUFFER, convert_color};
+use crate::sys::fs::{Vfs, VfsNode};
 use alloc::string::String;
-use crate::sys::framebuffer::convert_color;
+use alloc::{vec, vec::Vec};
 use core::fmt;
 use core::fmt::Write;
-use crate::sys::fs::Vfs;
-use crate::sys::console::font::PSF_FONTS;
 
 static mut WRITER: Option<Writer> = None;
 
@@ -13,13 +13,17 @@ pub fn init_writer() {
     apply_console_bg();
 
     #[allow(static_mut_refs)]
-    unsafe { WRITER = Some(Writer::new(0x141A21)); }
+    unsafe {
+        WRITER = Some(Writer::new(0x141A21));
+    }
 }
 
 // global function to get the writer in a safe mode
 pub fn get_writer() -> &'static mut Writer {
     #[allow(static_mut_refs)]
-    unsafe { WRITER.as_mut().expect("Writer not initialized") }
+    unsafe {
+        WRITER.as_mut().expect("Writer not initialized")
+    }
 }
 
 // apply background color to the kernel shell using framebuffer
@@ -32,7 +36,7 @@ fn apply_console_bg() {
         let height = 720;
         let total_pixels = width * height;
 
-        let mut buf = vec![0u8; total_pixels*4];
+        let mut buf = vec![0u8; total_pixels * 4];
         let color = convert_color(0x101010u32);
 
         for i in 0..total_pixels {
@@ -40,11 +44,13 @@ fn apply_console_bg() {
             let end_index = start_index + 4;
             buf[start_index..end_index].clone_from_slice(&color);
         }
-        fs.write(inode, 0, buf.as_slice()).unwrap();
+        #[allow(static_mut_refs)]
+        unsafe {
+            let fb = FRAMEBUFFER.get_mut().unwrap();
+            fb.write(0, buf.as_slice()).unwrap();
+        }
     }
-
 }
-
 
 pub fn clear_screen(clear_buffer: bool) {
     apply_console_bg();
@@ -57,46 +63,49 @@ pub fn clear_screen(clear_buffer: bool) {
 }
 
 pub fn print(x: usize, y: usize, color: u32, ascii: u8) {
-    let mut fs = crate::fs::FS.get().unwrap().lock();
     let pitch = 1280; // Width of the framebuffer in pixels
 
-    if let Ok(inode) = fs.open("/dev/fb0")
-        && let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32) {
-            let color_bytes = convert_color(color);
-            let background_color = convert_color(0x101010u32);
+    if let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32)
+    {
+        let color_bytes = convert_color(color);
+        let background_color = convert_color(0x101010u32);
 
-            for (row, &bitmap) in font_bitmap.iter().enumerate() {
-                let mut row_buf = vec![0u8; 8 * 4]; // 8 pixels per row, 4 bytes per pixel
-                for col in 0..8 {
-                    if (bitmap & (1 << (7 - col))) != 0 {
-                        row_buf[col * 4..(col + 1) * 4].clone_from_slice(&color_bytes);
-                    } else {
-                        row_buf[col * 4..(col + 1) * 4].clone_from_slice(&background_color);
-                    }
+        for (row, &bitmap) in font_bitmap.iter().enumerate() {
+            let mut row_buf = vec![0u8; 8 * 4]; // 8 pixels per row, 4 bytes per pixel
+            for col in 0..8 {
+                if (bitmap & (1 << (7 - col))) != 0 {
+                    row_buf[col * 4..(col + 1) * 4].clone_from_slice(&color_bytes);
+                } else {
+                    row_buf[col * 4..(col + 1) * 4].clone_from_slice(&background_color);
                 }
+            }
 
-                let pixel_offset = ((y + row) * pitch) + x; // Offset in pixels
-                fs.write(inode, pixel_offset as u64, row_buf.as_slice()).unwrap();
+            let pixel_offset = ((y + row) * pitch) + x; // Offset in pixels
+
+            #[allow(static_mut_refs)]
+            unsafe {
+                let fb = FRAMEBUFFER.get_mut().unwrap();
+                fb.write(pixel_offset as u64, row_buf.as_slice()).unwrap();
             }
         }
+    }
 }
 
-
-
 pub fn clear_char(x: usize, y: usize, color: u32) {
-    let mut fs = crate::fs::FS.get().unwrap().lock();
     let pitch = 1280;
     let char_width = 8;
     let char_height = 16;
 
-    if let Ok(inode) = fs.open("/dev/fb0") {
-        let color_bytes = convert_color(color);
-        let row_buf = vec![color_bytes; char_width].concat();
+    let color_bytes = convert_color(color);
+    let row_buf = vec![color_bytes; char_width].concat();
 
+    for row in 0..char_height {
+        let pixel_offset = ((y + row) * pitch) + (x - 8); // Now in pixels
 
-        for row in 0..char_height {
-            let pixel_offset = ((y + row) * pitch) + (x - 8); // Now in pixels
-            fs.write(inode, pixel_offset as u64, row_buf.as_slice()).unwrap();
+        #[allow(static_mut_refs)]
+        unsafe {
+            let fb = FRAMEBUFFER.get_mut().unwrap();
+            fb.write(pixel_offset as u64, row_buf.as_slice()).unwrap();
         }
     }
 }
@@ -135,22 +144,26 @@ impl Writer {
         match c {
             '\n' => self.new_line(),
             '\x08' => {
-                clear_char( self.column_position * 8, self.row_position * 16, 0x101010u32);
+                clear_char(
+                    self.column_position * 8,
+                    self.row_position * 16,
+                    0x101010u32,
+                );
                 self.clear_cursor();
                 if self.column_position > 0 {
                     self.column_position -= 1;
                 }
-            },
+            }
             '\r' => {
                 self.clear_line();
                 self.column_position = 0;
             }
             '\t' => {
                 self.column_position += 4;
-                if self.column_position >= (self.screen_width / 8) as usize{
+                if self.column_position >= (self.screen_width / 8) as usize {
                     self.new_line();
                 }
-            },
+            }
             _ => {
                 if let Some(current_buffer) = self.buffer_content.get_mut(self.row_position) {
                     current_buffer.push(c);
@@ -160,8 +173,12 @@ impl Writer {
                     self.buffer_content.push(current_buffer);
                 }
 
-
-                print(self.column_position * 8, self.row_position * 16, self.color, c as u8);
+                print(
+                    self.column_position * 8,
+                    self.row_position * 16,
+                    self.color,
+                    c as u8,
+                );
                 self.column_position += 1;
                 if self.column_position >= (self.screen_width / 8) as usize {
                     self.new_line();
@@ -208,27 +225,29 @@ impl Writer {
             let color = 0xFFFFFFu32; // Cursor color (white)
             let color_bytes = convert_color(color);
 
-            let mut fs = crate::fs::FS.get().unwrap().lock();
-            if let Ok(inode) = fs.open("/dev/fb0") {
-                let pitch = 1280; // Framebuffer width in pixels
-                let char_width = 8;
-                let char_height = 16;
+            let pitch = 1280; // Framebuffer width in pixels
+            let char_width = 8;
+            let char_height = 16;
 
-                // Create a buffer for one row (8 pixels wide)
-                let row_buf = vec![color_bytes; char_width].concat();
+            // Create a buffer for one row (8 pixels wide)
+            let row_buf = vec![color_bytes; char_width].concat();
 
-                for row in 0..char_height {
-                    let pixel_offset = ((y + row) * pitch) + x;
-                    fs.write(inode, pixel_offset as u64, &row_buf).unwrap();
+            for row in 0..char_height {
+                let pixel_offset = ((y + row) * pitch) + x;
+
+                #[allow(static_mut_refs)]
+                unsafe {
+                    let fb = FRAMEBUFFER.get_mut().unwrap();
+                    fb.write(pixel_offset as u64, row_buf.as_slice()).unwrap();
                 }
             }
         }
     }
 
-
     pub fn tick(&mut self) {
         self.cursor_timer += 1;
-        if self.cursor_timer >= 30 { // tune blink speed
+        if self.cursor_timer >= 30 {
+            // tune blink speed
             self.cursor_timer = 0;
 
             // Toggle visibility
@@ -248,18 +267,20 @@ impl Writer {
         let color = 0x101010u32; // Cursor color (white)
         let color_bytes = convert_color(color);
 
-        let mut fs = crate::fs::FS.get().unwrap().lock();
-        if let Ok(inode) = fs.open("/dev/fb0") {
-            let pitch = 1280; // Framebuffer width in pixels
-            let char_width = 8;
-            let char_height = 16;
+        let pitch = 1280; // Framebuffer width in pixels
+        let char_width = 8;
+        let char_height = 16;
 
-            // Create a buffer for one row (8 pixels wide)
-            let row_buf = vec![color_bytes; char_width].concat();
+        // Create a buffer for one row (8 pixels wide)
+        let row_buf = vec![color_bytes; char_width].concat();
 
-            for row in 0..char_height {
-                let pixel_offset = ((y + row) * pitch) + x;
-                fs.write(inode, pixel_offset as u64, &row_buf).unwrap();
+        for row in 0..char_height {
+            let pixel_offset = ((y + row) * pitch) + x;
+
+            #[allow(static_mut_refs)]
+            unsafe {
+                let fb = FRAMEBUFFER.get_mut().unwrap();
+                fb.write(pixel_offset as u64, row_buf.as_slice()).unwrap();
             }
         }
     }
@@ -268,19 +289,16 @@ impl Writer {
         let clear_color = 0x101010u32;
 
         for i in 0..self.screen_width / 8 {
-            clear_char( (i as usize + 1) * 8, self.row_position *  16, clear_color);
+            clear_char((i as usize + 1) * 8, self.row_position * 16, clear_color);
         }
     }
 
     fn parse_ansi_code(&mut self, code: &str) {
-        let parts: Vec<u8> = code
-            .split(';')
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        let parts: Vec<u8> = code.split(';').filter_map(|s| s.parse().ok()).collect();
 
         for code in parts {
             match code {
-                0 => self.color = 0xBFBFBF,               // Reset
+                0 => self.color = 0xBFBFBF,  // Reset
                 30 => self.color = 0x000000, // Black
                 31 => self.color = 0xAA0000, // Red
                 32 => self.color = 0x00AA00, // Green
@@ -339,9 +357,6 @@ impl Write for Writer {
         Ok(())
     }
 }
-
-
-
 
 #[macro_export]
 macro_rules! print {
