@@ -8,7 +8,7 @@ use crate::sys::pci::find_device;
 mod uhci;
 
 lazy_static! {
-    static ref UCHI_DEVICES: Mutex<Vec<UHci>> = Mutex::new(Vec::new());  
+    static ref UCHI_DEVICES: Mutex<Vec<UHci>> = Mutex::new(Vec::new());
 }
 
 pub fn init() {
