@@ -19,33 +19,29 @@ use sys::framebuffer::init_framebuffer;
 use crate::task::executor;
 
 pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static MemoryMapResponse, mp_response: &'static MpResponse) {
-    init_framebuffer(fb);
+    driver::uart::init();
     arch::x86_64::gdt::init();
     arch::x86_64::idt::init();
     arch::x86_64::idt::init_pics();
-    driver::uart::init();
-    x86_64::instructions::interrupts::enable();
-    driver::timer::init();
+    init_framebuffer(fb);
 
     let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
-    unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe {
-        memory::BootInfoFrameAllocator::init(memory_map_response.entries())
-    };
 
-    memory::allocator::init_heap(&mut frame_allocator, memory_map_response).expect("Failed to initialize heap");
+    memory::init(phys_mem_offset, memory_map_response.entries());
     executor::init_executor();
     fs::init_fs();
-    init_writer();
 
+    init_writer();
     sys::pci::init();
+
     // depends on pci initialization
     driver::nic::init();
     driver::usb::init();
-    
     driver::cpu::init(mp_response);
     driver::disk::ata::init();
     fs::init(true);
+
+    x86_64::instructions::interrupts::enable();
 }
 
 

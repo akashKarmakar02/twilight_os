@@ -102,8 +102,6 @@ pub fn init_framebuffer(fb: &Framebuffer) {
     unsafe {
         FRAMEBUFFER.call_once(|| TwilightFrameBuffer::new(fb));
     }
-
-
 }
 
 pub fn get_pitch() -> u64 {
