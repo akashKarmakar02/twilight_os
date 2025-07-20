@@ -8,6 +8,12 @@ use core::fmt::Write;
 
 static mut WRITER: Option<Writer> = None;
 
+#[derive(Clone)]
+struct ScreenChar {
+    char: u8,
+    color: u32,
+}
+
 // Initialize the kernel shell
 pub fn init_writer() {
     apply_console_bg();
@@ -28,27 +34,23 @@ pub fn get_writer() -> &'static mut Writer {
 
 // apply background color to the kernel shell using framebuffer
 fn apply_console_bg() {
-    let mut fs = crate::fs::FS.get().unwrap().lock();
+    // using fixed size (because we don't have ioctl)
+    let width = 1280;
+    let height = 720;
+    let total_pixels = width * height;
 
-    if let Ok(inode) = fs.open("/dev/fb0") {
-        // using fixed size (because we don't have ioctl)
-        let width = 1280;
-        let height = 720;
-        let total_pixels = width * height;
+    let mut buf = vec![0u8; total_pixels * 4];
+    let color = convert_color(0x101010u32);
 
-        let mut buf = vec![0u8; total_pixels * 4];
-        let color = convert_color(0x101010u32);
-
-        for i in 0..total_pixels {
-            let start_index = i * 4;
-            let end_index = start_index + 4;
-            buf[start_index..end_index].clone_from_slice(&color);
-        }
-        #[allow(static_mut_refs)]
-        unsafe {
-            let fb = FRAMEBUFFER.get_mut().unwrap();
-            fb.write(0, buf.as_slice()).unwrap();
-        }
+    for i in 0..total_pixels {
+        let start_index = i * 4;
+        let end_index = start_index + 4;
+        buf[start_index..end_index].clone_from_slice(&color);
+    }
+    #[allow(static_mut_refs)]
+    unsafe {
+        let fb = FRAMEBUFFER.get_mut().unwrap();
+        fb.write(0, buf.as_slice()).unwrap();
     }
 }
 
@@ -62,11 +64,13 @@ pub fn clear_screen(clear_buffer: bool) {
     }
 }
 
-pub fn print(x: usize, y: usize, color: u32, ascii: u8) {
+pub fn print(x: usize, y: usize, screen_char: ScreenChar) {
     let pitch = 1280; // Width of the framebuffer in pixels
 
-    if let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32)
-    {
+    let color = screen_char.color;
+    let ascii = screen_char.char;
+
+    if let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32) {
         let color_bytes = convert_color(color);
         let background_color = convert_color(0x101010u32);
 
@@ -112,7 +116,7 @@ pub fn clear_char(x: usize, y: usize, color: u32) {
 
 pub struct Writer {
     buffer: Vec<u64>,
-    pub buffer_content: Vec<Vec<char>>,
+    pub buffer_content: Vec<Vec<ScreenChar>>,
     pub column_position: usize,
     pub row_position: usize,
     color: u32,
@@ -166,18 +170,28 @@ impl Writer {
             }
             _ => {
                 if let Some(current_buffer) = self.buffer_content.get_mut(self.row_position) {
-                    current_buffer.push(c);
+                    current_buffer.push(ScreenChar {
+                        char: c as u8,
+                        color: self.color,
+                    });
                 } else {
                     let mut current_buffer = Vec::new();
-                    current_buffer.push(c);
+                    current_buffer.push(ScreenChar {
+                        char: c as u8,
+                        color: self.color,
+                    });
                     self.buffer_content.push(current_buffer);
                 }
+
+                let screen_char = ScreenChar {
+                    char: c as u8,
+                    color: self.color,
+                };
 
                 print(
                     self.column_position * 8,
                     self.row_position * 16,
-                    self.color,
-                    c as u8,
+                    screen_char,
                 );
                 self.column_position += 1;
                 if self.column_position >= (self.screen_width / 8) as usize {
@@ -213,8 +227,8 @@ impl Writer {
         clear_screen(false);
 
         for (row_idx, line) in self.buffer_content.iter().enumerate() {
-            for (col_idx, c) in line.iter().enumerate() {
-                print(col_idx * 8, row_idx * 16, self.color, *c as u8);
+            for (col_idx, screen_char) in line.iter().enumerate() {
+                print(col_idx * 8, row_idx * 16, screen_char.clone());
             }
         }
     }
