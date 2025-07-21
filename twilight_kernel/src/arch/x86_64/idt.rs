@@ -1,9 +1,9 @@
-use core::arch::naked_asm;
 use crate::arch::x86_64::gdt;
 use crate::println;
+use crate::sys::syscall::syscall_handler;
+use core::arch::naked_asm;
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
-use crate::sys::syscall::syscall_handler;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 #[repr(align(8), C)]
@@ -21,7 +21,6 @@ pub struct Registers {
     pub rax: usize,
 }
 
-
 // Translate IRQ into system interrupt
 fn interrupt_index(irq: u8) -> u8 {
     PIC_1_OFFSET + irq
@@ -31,18 +30,24 @@ lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
-        idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
-        idt.segment_not_present.set_handler_fn(segment_not_present_handler);
+        idt.stack_segment_fault
+            .set_handler_fn(stack_segment_fault_handler);
+        idt.segment_not_present
+            .set_handler_fn(segment_not_present_handler);
         unsafe {
-            idt.page_fault.set_handler_fn(page_fault_handler).set_stack_index(gdt::PAGE_FAULT_IST);
-            idt.general_protection_fault.set_handler_fn(general_protection_fault_handler).set_stack_index(gdt::GENERAL_PROTECTION_FAULT_IST);
+            idt.page_fault
+                .set_handler_fn(page_fault_handler)
+                .set_stack_index(gdt::PAGE_FAULT_IST);
+            idt.general_protection_fault
+                .set_handler_fn(general_protection_fault_handler)
+                .set_stack_index(gdt::GENERAL_PROTECTION_FAULT_IST);
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
 
             let f = syscall_wrapper as *mut fn();
-            idt[0x80].
-                set_handler_fn(core::mem::transmute(f))
+            idt[0x80]
+                .set_handler_fn(core::mem::transmute(f))
                 .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
         }
         idt[interrupt_index(0)].set_handler_fn(timer_interrupt_handler);
@@ -60,7 +65,10 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame, err: u64) -> ! {
-    panic!("EXCEPTION: DOUBLE FAULT\n{:#?}\nERROR CODE: {:#?}", stack_frame.instruction_pointer, err);
+    panic!(
+        "EXCEPTION: DOUBLE FAULT\n{:#?}\nERROR CODE: {:#?}",
+        stack_frame.instruction_pointer, err
+    );
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
@@ -74,7 +82,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     );
 }
 
-extern "x86-interrupt" fn page_fault_handler(_stack_frame: InterruptStackFrame, error_code: PageFaultErrorCode) {
+extern "x86-interrupt" fn page_fault_handler(
+    _stack_frame: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+) {
     panic!("Error Code: {:?} \n{:#?}", error_code, _stack_frame);
 }
 
@@ -97,7 +108,6 @@ extern "x86-interrupt" fn segment_not_present_handler(
     println!("Error: {:?}", error_code);
     panic!();
 }
-
 
 // Naked function wrapper saving all scratch registers to the stack
 // See: https://os.phil-opp.com/returning-from-exceptions/
@@ -138,16 +148,14 @@ macro_rules! wrap {
 wrap!(syscall_handler => syscall_wrapper);
 
 // device interrupt
-use spin::Mutex;
-use x86_64::registers::control::Cr2;
 use crate::driver::keyboard::keyboard_interrupt;
+use spin::Mutex;
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
-pub static PICS: Mutex<ChainedPics> = Mutex::new(unsafe {
-    ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)
-});
+pub static PICS: Mutex<ChainedPics> =
+    Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 pub fn init_pics() {
     unsafe {
@@ -155,7 +163,6 @@ pub fn init_pics() {
         PICS.lock().write_masks(0b11111100, 0b11111111);
     }
 }
-
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::driver::timer::pit::tick();
@@ -171,9 +178,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     let mut port = Port::<u8>::new(0x60);
 
     let scancode: u8 = unsafe { port.read() };
-    
+
     keyboard_interrupt(scancode);
-    
+
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(1));
     }

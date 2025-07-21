@@ -1,12 +1,12 @@
-use core::arch::asm;
+use crate::arch::x86_64::gdt::GDT;
+use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;
-use crate::sys::memory::{alloc_pages, mapper, phys_mem_offset};
-use crate::println;
-use object::{Object, ObjectSegment, ReadRef};
-use x86_64::structures::paging::{FrameAllocator, OffsetPageTable};
+use crate::sys::memory::{alloc_pages, phys_mem_offset};
+use core::arch::asm;
+use object::{Object, ObjectSegment};
 use x86_64::VirtAddr;
-use crate::arch::x86_64::gdt::GDT;
+use x86_64::structures::paging::{FrameAllocator, OffsetPageTable};
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
@@ -19,23 +19,24 @@ pub fn main(args: &[&str]) {
     let mut fs = unsafe { fs::MFS.get_unchecked().lock() };
     #[allow(static_mut_refs)]
     let pwd = unsafe { DIR.as_str() };
-    let inode = if pwd == "/" { 1 } else { fs.resolve_path(pwd).unwrap() };
+    let inode = if pwd == "/" {
+        1
+    } else {
+        fs.resolve_path(pwd).unwrap()
+    };
 
     if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
         let content_buf = fs.read_file(inode + 1).unwrap();
 
-        let page_table_frame = crate::sys::memory::frame_allocator().allocate_frame().unwrap();
+        let page_table_frame = crate::sys::memory::frame_allocator()
+            .allocate_frame()
+            .unwrap();
 
-        let page_table = unsafe {
-            crate::sys::memory::create_page_table(page_table_frame)
-        };
-
-
+        let page_table = crate::sys::memory::create_page_table(page_table_frame);
 
         let mut entry_point_addr: u64 = 0;
-        let mut mapper = unsafe {
-            OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset()))
-        };
+        let mut mapper =
+            unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
         let code_addr = 0x_4444_4444_0000;
 
@@ -62,9 +63,20 @@ pub fn main(args: &[&str]) {
                 let user_stack_top = 0x4444_5555_0000u64;
                 let stack_size = 0x4000; // 16 KiB
 
-                alloc_pages(&mut mapper, user_stack_top - stack_size, stack_size as usize).unwrap();
+                alloc_pages(
+                    &mut mapper,
+                    user_stack_top - stack_size,
+                    stack_size as usize,
+                )
+                .unwrap();
 
-                jump_to_user(code_addr, entry_point_addr, user_stack_top, GDT.1.user_code_selector.0 as u64, GDT.1.user_data_selector.0 as u64);
+                jump_to_user(
+                    code_addr,
+                    entry_point_addr,
+                    user_stack_top,
+                    GDT.1.user_code_selector.0 as u64,
+                    GDT.1.user_data_selector.0 as u64,
+                );
             }
         }
     } else {
@@ -97,7 +109,6 @@ pub fn jump_to_user(code_addr: u64, entry_point: u64, stack_top: u64, user_cs: u
         );
     }
 }
-
 
 fn load_binary(
     mapper: &mut OffsetPageTable,
