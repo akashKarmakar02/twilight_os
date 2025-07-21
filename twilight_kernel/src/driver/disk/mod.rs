@@ -7,7 +7,7 @@ use spin::{Once};
 
 pub mod ata;
 
-pub const BLOCK_SIZE: usize = 1024;
+pub const BLOCK_SIZE: usize = 512;
 
 pub static mut BLOCK_DEVICE: Option<&'static mut BlockDevice> = None;
 
