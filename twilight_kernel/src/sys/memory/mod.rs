@@ -8,7 +8,7 @@ use limine::memory_map::{Entry, EntryType};
 use spin::Once;
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate};
 use x86_64::{PhysAddr, VirtAddr};
-use crate::log;
+use crate::{log, println, serial_prtinln};
 
 #[allow(static_mut_refs)]
 static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();
@@ -63,7 +63,7 @@ impl BootInfoFrameAllocator {
         while self.region_index < self.memory_map.len() {
             let region = self.memory_map[self.region_index];
             if region.entry_type == EntryType::USABLE {
-                self.current_addr = region.base;
+                self.current_addr = align_up(region.base, 4096);
                 return;
             }
             self.region_index += 1;
@@ -82,7 +82,7 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             }
 
             let end = region.base + region.length;
-            if self.current_addr < end {
+            if self.current_addr + 4096 <= end {
                 let frame = PhysFrame::containing_address(PhysAddr::new(self.current_addr));
                 self.current_addr += 4096;
                 return Some(frame);
@@ -114,6 +114,11 @@ pub fn mapper() -> &'static mut OffsetPageTable<'static> {
     #[allow(static_mut_refs)]
     unsafe { MAPPER.get_mut_unchecked() }
 }
+
+fn align_up(addr: u64, align: u64) -> u64 {
+    (addr + align - 1) & !(align - 1)
+}
+
 
 pub fn phys_mem_offset() -> u64 {
     #[allow(static_mut_refs)]
@@ -152,6 +157,8 @@ pub fn alloc_pages(
     let size = size.saturating_sub(1) as u64;
     let mut frame_allocator = frame_allocator();
 
+    serial_prtinln!("{:#X}", addr);
+    serial_prtinln!("{:#X}", addr + size);
     let pages = {
         let start_page: Page = Page::containing_address(VirtAddr::new(addr));
         let end_page = Page::containing_address(VirtAddr::new(addr + size));
@@ -165,7 +172,10 @@ pub fn alloc_pages(
     for page in pages {
         if let Some(frame) = frame_allocator.allocate_frame() {
 
+            println!("{:?} to {:?}", page, frame);
+
             let res = unsafe {
+                // TODO: map_to will fail this needs fixing
                 mapper.map_to(page, frame, flags, &mut frame_allocator)
             };
             if let Ok(mapping) = res {
@@ -176,7 +186,6 @@ pub fn alloc_pages(
                 if let Ok(old_frame) = mapper.translate_page(page) {
                     log!("Already mapped to {:?}", old_frame);
                 }
-                return Err(());
             }
         } else {
             log!("Could not allocate frame for {:?}", page);

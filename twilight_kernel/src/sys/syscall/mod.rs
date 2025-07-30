@@ -27,7 +27,7 @@ pub extern "sysv64" fn syscall_handler(
             let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
             read(arg1, buf, len)
         },
-        _ => { 
+        _ => {
             println!("Unknown syscall number: {}", syscall_number);
             0
         },

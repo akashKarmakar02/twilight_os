@@ -29,9 +29,9 @@ It currently supports x86_64 architecture. future plans include support for ARM/
 - [x] asynchronous I/O
 - [x] memory management
 - [x] PCI device detection
-- [ ] EXT2 Filesystem
-- [ ] Network Stack
-- [ ] Userspace utilities
+- [x] TFS Filesystem
+- [x] Network Stack
+- [ ] Userspace utilities (In progress)
 
 ## Build Instructions
 

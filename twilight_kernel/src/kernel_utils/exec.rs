@@ -5,6 +5,7 @@ use crate::sys::fs;
 use crate::sys::memory::{alloc_pages, phys_mem_offset};
 use core::arch::asm;
 use object::{Object, ObjectSegment};
+use x86_64::registers::control::Cr3;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{FrameAllocator, OffsetPageTable};
 
@@ -28,9 +29,7 @@ pub fn main(args: &[&str]) {
     if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
         let content_buf = fs.read_file(inode + 1).unwrap();
 
-        let page_table_frame = crate::sys::memory::frame_allocator()
-            .allocate_frame()
-            .unwrap();
+        let (page_table_frame, _) = Cr3::read();
 
         let page_table = crate::sys::memory::create_page_table(page_table_frame);
 
@@ -60,7 +59,7 @@ pub fn main(args: &[&str]) {
                     }
                 }
 
-                let user_stack_top = 0x4444_5555_0000u64;
+                let user_stack_top = 0x4444_4455_0000u64;
                 let stack_size = 0x4000; // 16 KiB
 
                 alloc_pages(
@@ -70,13 +69,13 @@ pub fn main(args: &[&str]) {
                 )
                 .unwrap();
 
-                jump_to_user(
-                    code_addr,
-                    entry_point_addr,
-                    user_stack_top,
-                    GDT.1.user_code_selector.0 as u64,
-                    GDT.1.user_data_selector.0 as u64,
-                );
+                // jump_to_user(
+                //     code_addr,
+                //     entry_point_addr,
+                //     user_stack_top,
+                //     GDT.1.user_code_selector.0 as u64,
+                //     GDT.1.user_data_selector.0 as u64,
+                // );
             }
         }
     } else {
