@@ -29,9 +29,11 @@ It currently supports x86_64 architecture. future plans include support for ARM/
 - [x] asynchronous I/O
 - [x] memory management
 - [x] PCI device detection
-- [x] TFS Filesystem
+- [x] TFS Filesystem (in heavy development)
 - [x] Network Stack
 - [ ] Userspace utilities (In progress)
+- [ ] Kernel Level NES Emulator
+- [ ] DOOM (because why not?)
 
 ## Build Instructions
 
@@ -118,7 +120,7 @@ make run
 On first boot, you **must** initialize the filesystem:
 
 ```bash
-mkfs -t minixfs /dev/ata0
+install
 ```
 
 inside the VM shell to format your disk.
