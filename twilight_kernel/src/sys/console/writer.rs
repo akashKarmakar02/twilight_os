@@ -325,7 +325,7 @@ impl Writer {
                 // Bright foreground colors (90–97)
                 90 => self.color = 0x555555, // Bright Black (Dark Gray)
                 91 => self.color = 0xFF5555, // Bright Red
-                92 => self.color = 0x55FF55, // Bright Green
+                92 => self.color = 0x68CB5F, // Bright Green
                 93 => self.color = 0xFFFF55, // Bright Yellow
                 94 => self.color = 0x5555FF, // Bright Blue
                 95 => self.color = 0xFF55FF, // Bright Magenta

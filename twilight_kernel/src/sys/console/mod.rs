@@ -29,7 +29,7 @@ pub fn init_console() {
 pub fn start_kernel_console() {
     #[allow(static_mut_refs)]
     let dir = unsafe { DIR.as_str() };
-    print!("twilight:{} > ", dir);
+    print!("\x1b[92mtwilight:{} $\x1b[0m ", dir);
     let mut cur_pos = CURSOR_POSITION.lock();
     *cur_pos = 2;
 }
