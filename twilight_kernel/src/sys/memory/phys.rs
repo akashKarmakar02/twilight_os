@@ -1,51 +1,45 @@
-use alloc::slice::SliceIndex;
-use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::ops::{Index, IndexMut};
-use spin::Mutex;
-use x86_64::VirtAddr;
+use crate::sys::memory::{frame_allocator, phys_to_virt};
+use core::ptr::NonNull;
+use x86_64::structures::paging::FrameAllocator;
+use x86_64::PhysAddr;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PhysBuf {
-    buf: Arc<Mutex<Vec<u8>>>,
+    phys: PhysAddr,
+    virt: NonNull<u8>,
+    len: usize,
 }
+
+unsafe impl Send for PhysBuf {}
+unsafe impl Sync for PhysBuf {}
 
 impl PhysBuf {
     pub fn new(len: usize) -> Self {
-        Self::from(vec![0; len])
-    }
+        // Round to nearest page size (for DMA-safe alloc)
+        let aligned_len = (len + 0xFFF) & !0xFFF;
 
-    fn from(vec: Vec<u8>) -> Self {
-        let buffer_end = vec.len() - 1;
-        let memory_end = phys_addr(&vec[buffer_end]) - phys_addr(&vec[0]);
-        if buffer_end == memory_end as usize {
-            Self {
-                buf: Arc::new(Mutex::new(vec)),
+        let num_pages = aligned_len / 0x1000;
+        let mut first_frame = None;
+
+        for i in 0..num_pages {
+            let frame = frame_allocator().allocate_frame().expect("Out of memory");
+            if i == 0 {
+                first_frame = Some(frame);
             }
-        } else {
-            Self::from(vec.clone()) // Clone vec and try again
+        }
+
+        let phys = first_frame.unwrap().start_address();
+        let virt = phys_to_virt(phys).as_mut_ptr();
+
+        Self {
+            phys,
+            virt: NonNull::new(virt).expect("Failed to map phys addr"),
+            len,
         }
     }
 
     pub fn addr(&self) -> u64 {
-        phys_addr(&self.buf.lock()[0])
-    }
-}
-
-impl<I: SliceIndex<[u8]>> Index<I> for PhysBuf {
-    type Output = I::Output;
-
-    #[inline]
-    fn index(&self, index: I) -> &Self::Output {
-        Index::index(&**self, index)
-    }
-}
-
-impl<I: SliceIndex<[u8]>> IndexMut<I> for PhysBuf {
-    #[inline]
-    fn index_mut(&mut self, index: I) -> &mut Self::Output {
-        IndexMut::index_mut(&mut **self, index)
+        self.phys.as_u64()
     }
 }
 
@@ -53,22 +47,12 @@ impl core::ops::Deref for PhysBuf {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        let vec = self.buf.lock();
-        unsafe { alloc::slice::from_raw_parts(vec.as_ptr(), vec.len()) }
+        unsafe { core::slice::from_raw_parts(self.virt.as_ptr(), self.len) }
     }
 }
 
 impl core::ops::DerefMut for PhysBuf {
     fn deref_mut(&mut self) -> &mut [u8] {
-        let mut vec = self.buf.lock();
-        unsafe {
-            alloc::slice::from_raw_parts_mut(vec.as_mut_ptr(), vec.len())
-        }
+        unsafe { core::slice::from_raw_parts_mut(self.virt.as_ptr(), self.len) }
     }
-}
-
-pub fn phys_addr(ptr: *const u8) -> u64 {
-    let virt_addr = VirtAddr::new(ptr as u64);
-    let phys_addr = super::virt_to_phys(virt_addr).unwrap();
-    phys_addr.as_u64()
 }

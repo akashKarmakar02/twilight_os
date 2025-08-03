@@ -49,15 +49,17 @@ run-x86_64: $(IMAGE_NAME).iso
 	fi
 	qemu-system-$(KARCH) \
 		-m 50 \
-		-device rtl8139 \
-		-netdev user,id=e0,hostfwd=tcp::8080-:80 \
+		-device rtl8139,netdev=e0 \
+		-netdev tap,id=e0,ifname=tap0,script=no,downscript=no \
 		-smp 4 \
 		-usb \
 		-device usb-mouse \
 		-device piix3-usb-uhci \
 		-drive file=hdd.img,format=raw,if=ide \
 		-cdrom $(IMAGE_NAME).iso \
-		-serial stdio
+		-serial stdio \
+		-d int,guest_errors,unimp \
+	  	-D qemu.log
 
 .PHONY: run-hdd-x86_64
 run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd

@@ -28,6 +28,7 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
 
     memory::init(phys_mem_offset, memory_map_response.entries());
+
     executor::init_executor();
     fs::init_fs();
 
@@ -40,6 +41,9 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     driver::cpu::init(mp_response);
     driver::disk::ata::init();
     fs::init(true);
+
+
+    arch::x86_64::gdt::init_after_boot();
 
     x86_64::instructions::interrupts::enable();
 }
