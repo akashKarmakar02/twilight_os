@@ -1,13 +1,13 @@
-use crate::arch::x86_64::gdt::GDT;
+use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;
 use crate::sys::memory::{alloc_pages, phys_mem_offset};
 use core::arch::asm;
-use object::{Object, ObjectSegment};
+use object::{Object, ObjectSegment, SegmentFlags};
 use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::{OffsetPageTable, Translate};
 use x86_64::VirtAddr;
-use x86_64::structures::paging::{FrameAllocator, OffsetPageTable};
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
@@ -37,7 +37,10 @@ pub fn main(args: &[&str]) {
         let mut mapper =
             unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
-        let code_addr = 0x_4444_4444_0000;
+        let code_addr = 0x4444_4484_0000;
+
+        let mut vaddr = 0;
+        let mut len = 0;
 
         if content_buf[0..4] == ELF_MAGIC {
             if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
@@ -45,17 +48,28 @@ pub fn main(args: &[&str]) {
 
                 for segment in obj.segments() {
                     if let Ok(data) = segment.data() {
-                        // NOTE: The size of the segment in memory can be
-                        // larger than on the disk because the object can
-                        // contain uninitialized sections like ".bss" that has
-                        // a length but no data.
                         let addr = code_addr + segment.address();
                         let size = segment.size() as usize;
 
-                        println!("Debug: data size: {}, size: {}", data.len(), size);
-                        println!("Debug: segment: {:?}", segment);
+                        let flags = segment.flags();
+                        match flags {
+                            SegmentFlags::Elf { p_flags } => {
+                                let is_writable = (p_flags & object::elf::PF_W) != 0;
+                                let is_executable = (p_flags & object::elf::PF_X) != 0;
+                                alloc_pages(&mut mapper, addr, size, is_writable, is_executable).unwrap();
+                            }
+                            _ => {}
+                        }
 
-                        load_binary(&mut mapper, addr, size, data).unwrap();
+                        // copy data after allocating
+                        let src = data.as_ptr();
+                        let dst = addr as *mut u8;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(src, dst, data.len());
+                            if size > data.len() {
+                                core::ptr::write_bytes(dst.add(data.len()), 0, size - data.len());
+                            }
+                        }
                     }
                 }
 
@@ -66,16 +80,27 @@ pub fn main(args: &[&str]) {
                     &mut mapper,
                     user_stack_top - stack_size,
                     stack_size as usize,
+                    true,
+                    false
                 )
                 .unwrap();
 
-                // jump_to_user(
-                //     code_addr,
-                //     entry_point_addr,
-                //     user_stack_top,
-                //     GDT.1.user_code_selector.0 as u64,
-                //     GDT.1.user_data_selector.0 as u64,
-                // );
+                let data = read_binary(vaddr, len);
+
+                if let Some(phys) = mapper.translate_addr(VirtAddr::new(0x444444c40080)) {
+                    println!("Mapped to: {:#x}", phys);
+                } else {
+                    println!("Not mapped!");
+                }
+
+
+                jump_to_user(
+                    code_addr,
+                    entry_point_addr,
+                    user_stack_top,
+                    USER_CS.bits() as u64,
+                    USER_SS.bits() as u64,
+                );
             }
         }
     } else {
@@ -109,23 +134,7 @@ pub fn jump_to_user(code_addr: u64, entry_point: u64, stack_top: u64, user_cs: u
     }
 }
 
-fn load_binary(
-    mapper: &mut OffsetPageTable,
-    vaddr: u64,
-    mem_size: usize,
-    data: &[u8],
-) -> Result<(), ()> {
-    if alloc_pages(mapper, vaddr, mem_size).err().is_some() {
-        println!("alloc_pages failed");
-        return Ok(());
-    };
-    let src = data.as_ptr();
-    let dst = vaddr as *mut u8;
-    unsafe {
-        core::ptr::copy_nonoverlapping(src, dst, data.len());
-        if mem_size > data.len() {
-            core::ptr::write_bytes(dst.add(data.len()), 0, mem_size - data.len());
-        }
-    }
-    Ok(())
+
+fn read_binary(vaddr: u64, len: usize) -> &'static [u8] {
+    unsafe { core::slice::from_raw_parts(vaddr as *const u8, len) }
 }

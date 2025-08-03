@@ -141,7 +141,7 @@ pub fn frame_allocator() -> BootInfoFrameAllocator {
 pub fn create_page_table(frame: PhysFrame) -> &'static mut PageTable {
     let phys_addr = frame.start_address();
     let virt_addr = phys_to_virt(phys_addr);
-    let page_table_ptr: *mut PageTable = virt_addr.as_mut_ptr();
+    let page_table_ptr = virt_addr.as_mut_ptr();
     unsafe { &mut *page_table_ptr }
 }
 
@@ -151,35 +151,40 @@ pub fn get_page_table_frame() -> PhysFrame {
     frame
 }
 
+fn make_flags(is_writable: bool, is_executable: bool) -> PageTableFlags {
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+    if is_writable {
+        flags |= PageTableFlags::WRITABLE;
+    }
+    if !is_executable {
+        flags |= PageTableFlags::NO_EXECUTE;
+    }
+    flags
+}
+
 pub fn alloc_pages(
-    mapper: &mut OffsetPageTable, addr: u64, size: usize
+    mapper: &mut OffsetPageTable,
+    addr: u64,
+    size: usize,
+    is_writable: bool,
+    is_executable: bool,
 ) -> Result<(), ()> {
     let size = size.saturating_sub(1) as u64;
     let mut frame_allocator = frame_allocator();
 
-    serial_prtinln!("{:#X}", addr);
-    serial_prtinln!("{:#X}", addr + size);
     let pages = {
-        let start_page: Page = Page::containing_address(VirtAddr::new(addr));
+        let start_page = Page::containing_address(VirtAddr::new(addr));
         let end_page = Page::containing_address(VirtAddr::new(addr + size));
         Page::range_inclusive(start_page, end_page)
     };
 
-    let flags = PageTableFlags::PRESENT
-        | PageTableFlags::WRITABLE
-        | PageTableFlags::USER_ACCESSIBLE;
+    let flags = make_flags(is_writable, is_executable);
 
     for page in pages {
         if let Some(frame) = frame_allocator.allocate_frame() {
-
-            println!("{:?} to {:?}", page, frame);
-
-            let res = unsafe {
-                // TODO: map_to will fail this needs fixing
-                mapper.map_to(page, frame, flags, &mut frame_allocator)
-            };
+            println!("{:?} to {:?} with flags {:?}", page, frame, flags);
+            let res = unsafe { mapper.map_to(page, frame, flags, &mut frame_allocator) };
             if let Ok(mapping) = res {
-                //debug!("Mapped {:?} to {:?}", page, frame);
                 mapping.flush();
             } else {
                 log!("Could not map {:?} to {:?}", page, frame);
@@ -194,4 +199,11 @@ pub fn alloc_pages(
     }
 
     Ok(())
+}
+
+
+pub fn phys_addr(ptr: *const u8) -> u64 {
+    let virt_addr = VirtAddr::new(ptr as u64);
+    let phys_addr = virt_to_phys(virt_addr).unwrap();
+    phys_addr.as_u64()
 }
