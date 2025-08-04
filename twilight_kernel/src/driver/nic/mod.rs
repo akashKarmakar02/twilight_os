@@ -1,30 +1,45 @@
 mod rtl8139;
+mod pcnet;
+mod e1000;
 
+use crate::driver::timer::cmos::CMOS;
+use crate::sys::pci::DeviceConfig;
+use crate::{log, sys};
 use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64};
 use smoltcp::iface::Interface;
-use smoltcp::phy::{DeviceCapabilities};
+use smoltcp::phy::DeviceCapabilities;
 use smoltcp::time::Instant;
 use smoltcp::wire::EthernetAddress;
 use spin::Mutex;
-use crate::{log, sys};
-use crate::driver::timer::pit::uptime;
-use crate::sys::pci::DeviceConfig;
 
 pub static NET: Mutex<Option<(Interface, EthernetDevice)>> = Mutex::new(None);
+
+#[repr(u8)]
+pub enum SocketStatus {
+    IsListening = 0,
+    IsActive = 1,
+    IsOpen = 2,
+    CanSend = 3,
+    MaySend = 4,
+    CanRecv = 5,
+    MayRecv = 6,
+}
 
 #[derive(Clone)]
 pub enum EthernetDevice {
     RTL8139(rtl8139::Device),
+    PCNET(pcnet::Device),
+    E1000(e1000::Device),
 }
 
 pub trait EthernetDeviceIO {
     fn config(&self) -> Arc<Config>;
     fn stats(&self) -> Arc<Stats>;
     fn receive_packet(&mut self) -> Option<Vec<u8>>;
-    fn transmit_packet(&self, len: usize);
+    fn transmit_packet(&mut self, len: usize);
     fn next_tx_buffer(&mut self, len: usize) -> &mut [u8];
 }
 
@@ -32,28 +47,38 @@ impl EthernetDeviceIO for EthernetDevice {
     fn config(&self) -> Arc<Config> {
         match self {
             EthernetDevice::RTL8139(dev) => dev.config(),
+            EthernetDevice::PCNET(dev) => dev.config(),
+            EthernetDevice::E1000(dev) => dev.config(),
         }
     }
     fn stats(&self) -> Arc<Stats> {
         match self {
             EthernetDevice::RTL8139(dev) => dev.stats(),
+            EthernetDevice::PCNET(dev) => dev.stats(),
+            EthernetDevice::E1000(dev) => dev.stats(),
         }
     }
     fn receive_packet(&mut self) -> Option<Vec<u8>> {
         match self {
             EthernetDevice::RTL8139(dev) => dev.receive_packet(),
+            EthernetDevice::PCNET(dev) => dev.receive_packet(),
+            EthernetDevice::E1000(dev) => dev.receive_packet(),
         }
     }
-    
-    fn transmit_packet(&self, len: usize) {
+
+    fn transmit_packet(&mut self, len: usize) {
         match self {
             EthernetDevice::RTL8139(dev) => dev.transmit_packet(len),
+            EthernetDevice::PCNET(dev) => dev.transmit_packet(len),
+            EthernetDevice::E1000(dev) => dev.transmit_packet(len),
         }
     }
-    
+
     fn next_tx_buffer(&mut self, len: usize) -> &mut [u8] {
         match self {
             EthernetDevice::RTL8139(dev) => dev.next_tx_buffer(len),
+            EthernetDevice::PCNET(dev) => dev.next_tx_buffer(len),
+            EthernetDevice::E1000(dev) => dev.next_tx_buffer(len),
         }
     }
 }
@@ -65,11 +90,11 @@ impl<'a> smoltcp::phy::Device for EthernetDevice {
 
     fn receive(
         &mut self,
-        _instant: smoltcp::time::Instant,
+        _instant: Instant,
     ) -> Option<(Self::RxToken<'a>, Self::TxToken<'a>)> {
         if let Some(buffer) = self.receive_packet() {
             if self.config().is_debug_enabled() {
-                // debug!("NET Packet Received");
+                log!("NET Packet Received");
                 // usr::hex::print_hex(&buffer);
             }
             self.stats().rx_add(buffer.len() as u64);
@@ -103,7 +128,8 @@ impl<'a> smoltcp::phy::Device for EthernetDevice {
 
 
 fn time() -> Instant {
-    Instant::from_micros((uptime() * 1000000.0) as i64)
+    let mut cmos = CMOS::new();
+    Instant::from_micros((cmos.unix_time() * 1000000) as i64)
 }
 
 /// Configuration for an Ethernet device.
@@ -126,23 +152,24 @@ impl Config {
             mac: Mutex::new(None),
         }
     }
-    
+
     fn is_debug_enabled(&self) -> bool {
-        self.debug.load(core::sync::atomic::Ordering::Relaxed)
+        true
+        // self.debug.load(core::sync::atomic::Ordering::Relaxed)
     }
-    
+
     pub fn enable_debug(&self) {
         self.debug.store(true, core::sync::atomic::Ordering::Relaxed);
     }
-    
+
     pub fn disable_debug(&self) {
         self.debug.store(false, core::sync::atomic::Ordering::Relaxed);
     }
-    
+
     pub fn mac(&self) -> Option<EthernetAddress> {
         *self.mac.lock()
     }
-    
+
     fn update_mac(&self, mac: EthernetAddress) {
         *self.mac.lock() = Some(mac);
     }
@@ -225,8 +252,8 @@ fn find_device(device_id: u16, vendor_id: u16) -> Option<DeviceConfig> {
     if let Some(mut dev) = sys::pci::find_device(device_id, vendor_id) {
         dev.enable_bus_mastering();
         return Some(dev);
-    } 
-    
+    }
+
     None
 }
 
@@ -258,7 +285,7 @@ impl smoltcp::phy::TxToken for TxToken {
         let buf = self.device.next_tx_buffer(len);
         let res = f(buf);
         if config.is_debug_enabled() {
-            // debug!("NET Packet Transmitted");
+            log!("NET Packet Transmitted");
             // usr::hex::print_hex(buf);
         }
         self.device.transmit_packet(len);
@@ -267,8 +294,21 @@ impl smoltcp::phy::TxToken for TxToken {
     }
 }
 
+
+const E1000_DEVICES: [u16; 9] = [
+    0x1004, // 82543GC (Intel PRO/1000 T)
+    0x100C, // 82544GC (Intel PRO/1000 T)
+    0x100E, // 82540EM (Intel PRO/1000 MT)
+    0x100F, // 82545EM (Intel PRO/1000 MT)
+    0x107C, // 82541PI (Intel PRO/1000 GT)
+    0x107D, // 82572EI (Intel PRO/1000 PT)
+    0x10D3, // 82574L
+    0x10F5, // 82567LM
+    0x153A, // I217-LM
+];
+
 pub fn init() {
-    let add = |mut device: EthernetDevice, name| {        
+    let add = |mut device: EthernetDevice, name| {
         log!("NET DRV {}", name);
         if let Some(mac) = device.config().mac() {
             let addr = format!("{}", mac).to_uppercase();
@@ -285,5 +325,19 @@ pub fn init() {
         let io = dev.io_base();
         let nic = rtl8139::Device::new(io);
         add(EthernetDevice::RTL8139(nic), "RTL8139");
+    }
+    if let Some(dev) = find_device(0x1022, 0x2000) {
+        let io = dev.io_base();
+        let nic = pcnet::Device::new(io);
+        add(EthernetDevice::PCNET(nic), "PCNET");
+    }
+    for id in E1000_DEVICES {
+        if let Some(dev) = find_device(0x8086, id) {
+            let io = dev.io_base();
+            let mem = dev.mem_base();
+            let bar = dev.bar_type();
+            let nic = e1000::Device::new(io, mem, bar);
+            add(EthernetDevice::E1000(nic), "E1000");
+        }
     }
 }

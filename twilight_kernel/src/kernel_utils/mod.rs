@@ -15,3 +15,4 @@ pub mod shutdown;
 pub mod touch;
 pub mod install;
 pub mod exec;
+pub mod dhcp;

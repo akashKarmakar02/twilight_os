@@ -5,48 +5,78 @@ use core::sync::atomic::{fence, AtomicUsize, Ordering};
 use smoltcp::wire::EthernetAddress;
 use x86_64::instructions::port::Port;
 use crate::driver::nic::{Config, EthernetDeviceIO, Stats};
+use crate::println;
 use crate::sys::memory::phys::PhysBuf;
 
-const RX_BUFFER_SIZE: usize = 0;
+// 00 = 8K + 16 bytes
+// 01 = 16K + 16 bytes
+// 10 = 32K + 16 bytes
+// 11 = 64K + 16 bytes
+const RX_BUFFER_IDX: usize = 0;
+
 const MTU: usize = 1536;
+
 const RX_BUFFER_PAD: usize = 16;
-const RX_BUFFER_LEN: usize = 8192 << RX_BUFFER_SIZE;
+const RX_BUFFER_LEN: usize = 8192 << RX_BUFFER_IDX;
 
 const TX_BUFFER_LEN: usize = 2048;
-const TX_BUFFER_COUNT: usize = 4;
+const TX_BUFFERS_COUNT: usize = 4;
 const ROK: u16 = 0x01;
 
-const CR_RST: u8 = 1 << 4;
-const CR_RE: u8 = 1 << 3;
-const CR_TE: u8 = 1 << 2;
-const CR_BUFE: u8 = 1 << 0;
+const CR_RST: u8 = 1 << 4; // Reset
+const CR_RE: u8 = 1 << 3; // Receiver Enable
+const CR_TE: u8 = 1 << 2; // Transmitter Enable
+const CR_BUFE: u8 = 1 << 0; // Buffer Empty
 
+// Rx Buffer Length
+const RCR_RBLEN: u32 = (RX_BUFFER_IDX << 11) as u32;
+
+// When the WRAP bit is set, the nic will keep moving the rest
+// of the packet data into the memory immediately after the
+// end of the Rx buffer instead of going back to the begining
+// of the buffer. So the buffer must have an additionnal 1500 bytes.
 const RCR_WRAP: u32 = 1 << 7;
-const RCR_RBLEN: u32 = (RX_BUFFER_LEN << 11) as u32;
 
-const RCR_WARP: u32 = 1 << 7;
+const RCR_AB: u32 = 1 << 3; // Accept Broadcast packets
+const RCR_AM: u32 = 1 << 2; // Accept Multicast packets
+const RCR_APM: u32 = 1 << 1; // Accept Physical Match packets
+const RCR_AAP: u32 = 1 << 0; // Accept All Packets
 
-const RCR_AB: u32 = 1 << 3;
-const RCR_AM: u32 = 1 << 2;
-const RCR_APM: u32 = 1 << 1;
-const RCR_AAP: u32 = 1 << 0;
-
+// Interframe Gap Time
 const TCR_IFG: u32 = 3 << 24;
 
-const IMR_TOK: u16 = 1 << 2; // Transmit OK Interrupt
-const IMR_ROK: u16 = 1 << 0; // Receive OK Interrupt
-
+// Max DMA Burst Size per Tx DMA Burst
+// 000 = 16 bytes
+// 001 = 32 bytes
+// 010 = 64 bytes
+// 011 = 128 bytes
+// 100 = 256 bytes
+// 101 = 512 bytes
+// 110 = 1024 bytes
+// 111 = 2048 bytes
+//const TCR_MXDMA0: u32 = 1 << 8;
 const TCR_MXDMA1: u32 = 1 << 9;
 const TCR_MXDMA2: u32 = 1 << 10;
 
-const TOK: u32 = 1 << 15;
-const OWN: u32 = 1 << 13;
+// Interrupt Mask Register
+//const IMR_TOK: u16 = 1 << 2; // Transmit OK Interrupt
+//const IMR_ROK: u16 = 1 << 0; // Receive OK Interrupt
 
+//const CRS: u32 = 1 << 31; // Carrier Sense Lost
+//const TAB: u32 = 1 << 30; // Transmit Abort
+//const OWC: u32 = 1 << 29; // Out of Window Collision
+//const CDH: u32 = 1 << 28; // CD Heart Beat
+const TOK: u32 = 1 << 15; // Transmit OK
+//const TUN: u32 = 1 << 14; // Transmit FIFO Underrun
+const OWN: u32 = 1 << 13; // DMA operation completed
+
+
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct Ports {
     pub mac: [Port<u8>; 6],
-    pub tx_cmds: [Port<u32>; TX_BUFFER_COUNT],
-    pub tx_addrs: [Port<u32>; TX_BUFFER_COUNT],
+    pub tx_cmds: [Port<u32>; TX_BUFFERS_COUNT],
+    pub tx_addrs: [Port<u32>; TX_BUFFERS_COUNT],
     pub config1: Port<u8>,
     pub rx_addr: Port<u32>,
     pub capr: Port<u16>,
@@ -115,7 +145,7 @@ pub struct Device {
 
     rx_buffer: PhysBuf,
     rx_offset: usize,
-    tx_buffers: [PhysBuf; TX_BUFFER_COUNT],
+    tx_buffers: [PhysBuf; TX_BUFFERS_COUNT],
     tx_id: Arc<AtomicUsize>,
 }
 
@@ -127,23 +157,27 @@ impl Device {
             ports: Ports::new(io_base),
 
             // Add MTU to RX_BUFFER_LEN if RCR_WRAP is set
-            rx_buffer: PhysBuf::new(RX_BUFFER_LEN + RX_BUFFER_PAD + MTU),
+            rx_buffer: { 
+                let buf = PhysBuf::new(RX_BUFFER_LEN + RX_BUFFER_PAD + MTU);
+                buf
+            },
 
             rx_offset: 0,
-            tx_buffers: [(); TX_BUFFER_COUNT].map(|_|
+            tx_buffers: [(); TX_BUFFERS_COUNT].map(|_|
                 PhysBuf::new(TX_BUFFER_LEN)
             ),
 
             // Before a transmission begin the id is incremented,
             // so the first transimission will start at 0.
-            tx_id: Arc::new(AtomicUsize::new(TX_BUFFER_COUNT - 1)),
+            tx_id: Arc::new(AtomicUsize::new(TX_BUFFERS_COUNT - 1)),
         };
         device.init();
         device
     }
 
     pub fn init(&mut self) {
-        unsafe { self.ports.config1.write(0) }; // power on the device
+        // Power on
+        unsafe { self.ports.config1.write(0) }
 
         // Software reset
         unsafe {
@@ -155,14 +189,13 @@ impl Device {
         }
 
         // Set interrupts
-        unsafe { self.ports.imr.write(IMR_TOK | IMR_ROK) }
+        //unsafe { self.ports.imr.write(IMR_TOK | IMR_ROK) }
 
+        // Enable Receive and Transmitter
         unsafe { self.ports.cmd.write(CR_RE | CR_TE) }
-
 
         // Read MAC addr
         self.config.update_mac(EthernetAddress::from_bytes(&self.ports.mac()));
-
 
         // Get physical address of rx_buffer
         let rx_addr = self.rx_buffer.addr();
@@ -199,6 +232,9 @@ impl EthernetDeviceIO for Device {
 
     fn receive_packet(&mut self) -> Option<Vec<u8>> {
         let cmd = unsafe { self.ports.cmd.read() };
+        println!("RX check: cmd = {:#x}", cmd);
+        println!("CAPR: {}", unsafe { self.ports.capr.read() });
+        println!("CBA: {}", unsafe { self.ports.cba.read() });
         if (cmd & CR_BUFE) == CR_BUFE {
             return None;
         }
@@ -231,7 +267,7 @@ impl EthernetDeviceIO for Device {
         Some(self.rx_buffer[(offset + 4)..(offset + n)].to_vec())
     }
 
-    fn transmit_packet(&self, len: usize) {
+    fn transmit_packet(&mut self, len: usize) {
         let tx_id = self.tx_id.load(Ordering::SeqCst);
         let mut cmd_port = self.ports.tx_cmds[tx_id].clone();
         unsafe {
@@ -248,17 +284,21 @@ impl EthernetDeviceIO for Device {
             cmd_port.write(0x1FFF & len as u32);
             fence(Ordering::SeqCst);
 
-            while cmd_port.read() & OWN != OWN {
+            let mut data = cmd_port.read();
+            while data & OWN != OWN {
                 spin_loop();
+                data = cmd_port.read();
             }
-            while cmd_port.read() & TOK != TOK {
+            
+            while data & TOK != TOK {
                 spin_loop();
+                data = cmd_port.read();
             }
         }
     }
 
     fn next_tx_buffer(&mut self, len: usize) -> &mut [u8] {
-        let tx_id = (self.tx_id.load(Ordering::SeqCst) + 1) % TX_BUFFER_COUNT;
+        let tx_id = (self.tx_id.load(Ordering::SeqCst) + 1) % TX_BUFFERS_COUNT;
         self.tx_id.store(tx_id, Ordering::SeqCst);
         &mut self.tx_buffers[tx_id][0..len]
     }

@@ -622,14 +622,13 @@ impl MinixFs {
             indirect_zones: 0,
         };
         inode.zones[0] = new_zone as u16;
-        self.write_inode(new_inode_num, &inode).unwrap();
+        self.write_inode(new_inode_num + 1, &inode).unwrap();
 
         // Add directory entry to the parent directory
-        self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
+        self.create_dir_entry(parent_inode_num, name, new_inode_num + 1).unwrap();
 
-        // Create "." and ".." entries inside the new directory
-        self.create_dir_entry(new_inode_num, ".", new_inode_num).unwrap();
-        self.create_dir_entry(new_inode_num, "..", parent_inode_num).unwrap();
+        self.create_dir_entry(new_inode_num + 1, ".", new_inode_num).unwrap();
+        self.create_dir_entry(new_inode_num + 1, "..", parent_inode_num).unwrap();
 
         Ok(new_inode_num)
     }

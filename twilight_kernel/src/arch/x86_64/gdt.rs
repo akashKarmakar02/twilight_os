@@ -187,7 +187,7 @@ impl Tss {
 
 
 static mut TSS: Tss = {
-    let mut tss = Tss {
+    let tss = Tss {
         reserved: 0,
         rsp: [0; 3],
         reserved2: 0,
@@ -308,56 +308,45 @@ impl SegmentSelector {
     }
 }
 
-pub struct Selectors {
-    code_selector: SegmentSelector,
-    data_selector: SegmentSelector,
-    tss_selector: SegmentSelector,
-    pub user_code_selector: SegmentSelector,
-    pub user_data_selector: SegmentSelector,
-}
 
 pub fn init() {
-    unsafe {
-        let gdt_descriptor = GdtDescriptor::new(
-            (size_of::<[GdtEntry; BOOT_GDT_ENTRY_COUNT]>() - 1) as u16,
-            addr_of!(BOOT_GDT).addr() as u64,
-        );
+    let gdt_descriptor = GdtDescriptor::new(
+        (size_of::<[GdtEntry; BOOT_GDT_ENTRY_COUNT]>() - 1) as u16,
+        addr_of!(BOOT_GDT).addr() as u64,
+    );
 
-        load_gdt(&gdt_descriptor);
-    }
+    load_gdt(&gdt_descriptor);
 
     // Load the GDT segments.
-    unsafe {
-        load_cs(SegmentSelector::new(
-            GdtEntryIndex::KERNEL_CODE,
-            PrivilegeLevel::Ring0,
-        ));
+    load_cs(SegmentSelector::new(
+        GdtEntryIndex::KERNEL_CODE,
+        PrivilegeLevel::Ring0,
+    ));
 
-        load_ds(SegmentSelector::new(
-            GdtEntryIndex::KERNEL_DATA,
-            PrivilegeLevel::Ring0,
-        ));
+    load_ds(SegmentSelector::new(
+        GdtEntryIndex::KERNEL_DATA,
+        PrivilegeLevel::Ring0,
+    ));
 
-        load_es(SegmentSelector::new(
-            GdtEntryIndex::KERNEL_DATA,
-            PrivilegeLevel::Ring0,
-        ));
+    load_es(SegmentSelector::new(
+        GdtEntryIndex::KERNEL_DATA,
+        PrivilegeLevel::Ring0,
+    ));
 
-        load_fs(SegmentSelector::new(
-            GdtEntryIndex::KERNEL_DATA,
-            PrivilegeLevel::Ring0,
-        ));
+    load_fs(SegmentSelector::new(
+        GdtEntryIndex::KERNEL_DATA,
+        PrivilegeLevel::Ring0,
+    ));
 
-        load_gs(SegmentSelector::new(
-            GdtEntryIndex::KERNEL_TLS,
-            PrivilegeLevel::Ring0,
-        ));
+    load_gs(SegmentSelector::new(
+        GdtEntryIndex::KERNEL_TLS,
+        PrivilegeLevel::Ring0,
+    ));
 
-        load_ss(SegmentSelector::new(
-            GdtEntryIndex::KERNEL_DATA,
-            PrivilegeLevel::Ring0,
-        ));
-    }
+    load_ss(SegmentSelector::new(
+        GdtEntryIndex::KERNEL_DATA,
+        PrivilegeLevel::Ring0,
+    ));
 }
 
 

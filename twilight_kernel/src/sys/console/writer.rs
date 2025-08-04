@@ -1,6 +1,6 @@
 use crate::sys::console::font::PSF_FONTS;
 use crate::sys::framebuffer::{FRAMEBUFFER, convert_color};
-use crate::sys::fs::{Vfs, VfsNode};
+use crate::sys::fs::{VfsNode};
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use core::fmt;
@@ -9,7 +9,7 @@ use core::fmt::Write;
 static mut WRITER: Option<Writer> = None;
 
 #[derive(Clone)]
-struct ScreenChar {
+pub struct ScreenChar {
     char: u8,
     color: u32,
 }

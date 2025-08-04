@@ -184,6 +184,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "readelf" => crate::kernel_utils::readelf::main(args),
         "install" => crate::kernel_utils::install::main(),
         "exec" => crate::kernel_utils::exec::main(args),
+        "dhcp" => crate::kernel_utils::dhcp::main(),
         _ => {
             println!("{}: not a command", cmd);
         }

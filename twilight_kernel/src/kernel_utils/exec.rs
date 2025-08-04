@@ -33,14 +33,11 @@ pub fn main(args: &[&str]) {
 
         let page_table = crate::sys::memory::create_page_table(page_table_frame);
 
-        let mut entry_point_addr: u64 = 0;
+        let entry_point_addr: u64;
         let mut mapper =
             unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
         let code_addr = 0x4444_4484_0000;
-
-        let mut vaddr = 0;
-        let mut len = 0;
 
         if content_buf[0..4] == ELF_MAGIC {
             if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
@@ -84,8 +81,6 @@ pub fn main(args: &[&str]) {
                     false
                 )
                 .unwrap();
-
-                let data = read_binary(vaddr, len);
 
                 if let Some(phys) = mapper.translate_addr(VirtAddr::new(0x444444c40080)) {
                     println!("Mapped to: {:#x}", phys);
@@ -134,7 +129,7 @@ pub fn jump_to_user(code_addr: u64, entry_point: u64, stack_top: u64, user_cs: u
     }
 }
 
-
+#[allow(dead_code)]
 fn read_binary(vaddr: u64, len: usize) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(vaddr as *const u8, len) }
 }

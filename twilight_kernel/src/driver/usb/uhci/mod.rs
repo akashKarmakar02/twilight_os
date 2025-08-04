@@ -2,6 +2,7 @@ use x86_64::instructions::port::Port;
 use crate::driver::timer::wait;
 use crate::{log};
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct UHci {
     usb_cmd: Port<u16>,
@@ -14,6 +15,7 @@ pub struct UHci {
     ctrl2: Port<u16>,
 }
 
+#[allow(dead_code)]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct UhciTD {
@@ -23,6 +25,7 @@ pub struct UhciTD {
     pub buffer_ptr: u32,
 }
 
+#[allow(dead_code)]
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct UhciQH {

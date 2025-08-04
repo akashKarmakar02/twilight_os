@@ -8,7 +8,7 @@ use limine::memory_map::{Entry, EntryType};
 use spin::Once;
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate};
 use x86_64::{PhysAddr, VirtAddr};
-use crate::{log, println, serial_prtinln};
+use crate::{log, println};
 
 #[allow(static_mut_refs)]
 static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();
