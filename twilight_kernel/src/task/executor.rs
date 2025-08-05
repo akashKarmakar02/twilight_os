@@ -1,6 +1,7 @@
 use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc};
 use alloc::task::Wake;
+use x86_64::instructions::interrupts;
 use core::task::{Context, Poll, Waker};
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
@@ -17,9 +18,18 @@ pub fn init_executor() {
 pub fn sleep(duration: f64) {
     let start = crate::driver::timer::pit::uptime();
     while crate::driver::timer::pit::uptime() - start < duration {
-        x86_64::instructions::hlt();
+        halt();
     }
 }
+
+pub fn halt() {
+    let disabled = !interrupts::are_enabled();
+    interrupts::enable_and_hlt();
+    if disabled {
+        interrupts::disable();
+    }
+}
+
 
 pub struct Executor {
     tasks: BTreeMap<TaskId, Task>,

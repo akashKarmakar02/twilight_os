@@ -1,12 +1,12 @@
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::hint::spin_loop;
-use core::sync::atomic::{fence, AtomicUsize, Ordering};
-use smoltcp::wire::EthernetAddress;
-use x86_64::instructions::port::Port;
 use crate::driver::nic::{Config, EthernetDeviceIO, Stats};
 use crate::println;
 use crate::sys::memory::phys::PhysBuf;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::hint::spin_loop;
+use core::sync::atomic::{AtomicUsize, Ordering, fence};
+use smoltcp::wire::EthernetAddress;
+use x86_64::instructions::port::Port;
 
 // 00 = 8K + 16 bytes
 // 01 = 16K + 16 bytes
@@ -69,7 +69,6 @@ const TCR_MXDMA2: u32 = 1 << 10;
 const TOK: u32 = 1 << 15; // Transmit OK
 //const TUN: u32 = 1 << 14; // Transmit FIFO Underrun
 const OWN: u32 = 1 << 13; // DMA operation completed
-
 
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -136,7 +135,6 @@ impl Ports {
     }
 }
 
-
 #[derive(Clone)]
 pub struct Device {
     config: Arc<Config>,
@@ -157,15 +155,13 @@ impl Device {
             ports: Ports::new(io_base),
 
             // Add MTU to RX_BUFFER_LEN if RCR_WRAP is set
-            rx_buffer: { 
+            rx_buffer: {
                 let buf = PhysBuf::new(RX_BUFFER_LEN + RX_BUFFER_PAD + MTU);
                 buf
             },
 
             rx_offset: 0,
-            tx_buffers: [(); TX_BUFFERS_COUNT].map(|_|
-                PhysBuf::new(TX_BUFFER_LEN)
-            ),
+            tx_buffers: [(); TX_BUFFERS_COUNT].map(|_| PhysBuf::new(TX_BUFFER_LEN)),
 
             // Before a transmission begin the id is incremented,
             // so the first transimission will start at 0.
@@ -195,7 +191,8 @@ impl Device {
         unsafe { self.ports.cmd.write(CR_RE | CR_TE) }
 
         // Read MAC addr
-        self.config.update_mac(EthernetAddress::from_bytes(&self.ports.mac()));
+        self.config
+            .update_mac(EthernetAddress::from_bytes(&self.ports.mac()));
 
         // Get physical address of rx_buffer
         let rx_addr = self.rx_buffer.addr();
@@ -246,7 +243,9 @@ impl EthernetDeviceIO for Device {
         let offset = ((capr as usize) + RX_BUFFER_PAD) % (1 << 16);
 
         let header = u16::from_le_bytes(
-            self.rx_buffer[(offset + 0)..(offset + 2)].try_into().unwrap(),
+            self.rx_buffer[(offset + 0)..(offset + 2)]
+                .try_into()
+                .unwrap(),
         );
 
         if header & ROK != ROK {
@@ -256,7 +255,9 @@ impl EthernetDeviceIO for Device {
         }
 
         let n = u16::from_le_bytes(
-            self.rx_buffer[(offset + 2)..(offset + 4)].try_into().unwrap()
+            self.rx_buffer[(offset + 2)..(offset + 4)]
+                .try_into()
+                .unwrap(),
         ) as usize;
 
         // Update buffer read pointer
@@ -289,7 +290,7 @@ impl EthernetDeviceIO for Device {
                 spin_loop();
                 data = cmd_port.read();
             }
-            
+
             while data & TOK != TOK {
                 spin_loop();
                 data = cmd_port.read();

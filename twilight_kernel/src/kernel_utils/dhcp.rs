@@ -5,8 +5,8 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use smoltcp::iface::SocketSet;
-use smoltcp::socket::dhcpv4::Event;
 use smoltcp::socket::dhcpv4;
+use smoltcp::socket::dhcpv4::Event;
 use smoltcp::time::Instant;
 
 pub fn main() {
@@ -35,12 +35,12 @@ pub fn main() {
             iface.poll(time, device, &mut sockets);
             let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
 
+            println!("{:?}", event);
+
             match event {
                 None => {}
                 Some(Event::Configured(config)) => {
-                    dhcp_config = Some(
-                        (config.address, config.router, config.dns_servers)
-                    );
+                    dhcp_config = Some((config.address, config.router, config.dns_servers));
                     println!("dhcp success");
                     break;
                 }
@@ -49,7 +49,7 @@ pub fn main() {
 
             if let Some(delay) = iface.poll_delay(time, &sockets) {
                 let d = (delay.total_micros() as f64) / 10000.0;
-                sleep(d.min(0.1)); // 0.1 seconds = 100 ms
+                sleep(d.min(3.0)); // 0.1 seconds = 100 ms
             }
         }
     }
@@ -64,5 +64,4 @@ pub fn main() {
     } else {
         println!("dhcp failed");
     }
-
 }
