@@ -1,4 +1,4 @@
-use crate::sys::fs::minixfs::MinixFs;
+use crate::sys::fs::twilight_fs::MinixFs;
 use crate::{sys};
 use alloc::boxed::Box;
 use alloc::vec;

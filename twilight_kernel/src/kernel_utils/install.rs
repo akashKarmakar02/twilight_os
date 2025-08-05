@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 use crate::driver::disk::BlockDeviceIO;
 use crate::{println};
 use crate::sys::fs::init;
-use crate::sys::fs::minixfs::Inode;
+use crate::sys::fs::twilight_fs::Inode;
 
 macro_rules! copy_file {
     ($path:expr, $verbose:expr) => {{
@@ -25,7 +25,7 @@ pub fn main() {
             inode = disk_size / (disk.block_size() * 16);
             block_size = disk.block_size();
 
-            if let Ok(mut fs) = crate::fs::minixfs::format_superblock(disk, disk_size, inode as u16, block_size as u16) {
+            if let Ok(mut fs) = crate::fs::twilight_fs::format_superblock(disk, disk_size, inode as u16, block_size as u16) {
                 let root_inode_num = fs.allocate_inode().unwrap();
                 let root_zone = fs.allocate_zone().unwrap();
 
@@ -71,7 +71,7 @@ pub fn main() {
 
 
 fn copy_file(path: &str, data: &[u8], verbose: bool) {
-    use crate::sys::fs::minixfs::FsError;
+    use crate::sys::fs::twilight_fs::FsError;
     
     let mut fs = unsafe {
         crate::fs::MFS.get_unchecked().lock()
