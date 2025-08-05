@@ -627,8 +627,8 @@ impl MinixFs {
         // Add directory entry to the parent directory
         self.create_dir_entry(parent_inode_num, name, new_inode_num + 1).unwrap();
 
-        self.create_dir_entry(new_inode_num + 1, ".", new_inode_num).unwrap();
-        self.create_dir_entry(new_inode_num + 1, "..", parent_inode_num).unwrap();
+        self.create_dir_entry(new_inode_num, ".", new_inode_num).unwrap();
+        self.create_dir_entry(new_inode_num, "..", parent_inode_num).unwrap();
 
         Ok(new_inode_num)
     }
