@@ -112,7 +112,7 @@ fn copy_file(path: &str, data: &[u8], verbose: bool) {
     // Create and write file
     match fs.create_file(cur_inode, file_name) {
         Ok(file_inode) => {
-            if let Err(e) = fs.write_file(file_inode + 1, data) {
+            if let Err(e) = fs.write_file(file_inode, data) {
                 println!("Failed to write to '{}': {:?}", path, e);
             } else if verbose {
                 println!("\x1b[93m[DEBUG] \x1b[0mcopied: {} inode: {}", path, file_inode);

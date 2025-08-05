@@ -49,8 +49,7 @@ run-x86_64: $(IMAGE_NAME).iso
 	fi
 	qemu-system-$(KARCH) \
 		-m 50 \
-		-device rtl8139,netdev=e0 \
-		-netdev tap,id=e0,ifname=tap0,script=no,downscript=no \
+		-netdev user,id=net0,hostfwd=tcp::8080-:80 -device rtl8139,netdev=net0 \
 		-smp 4 \
 		-usb \
 		-device usb-mouse \

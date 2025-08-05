@@ -540,8 +540,10 @@ impl MinixFs {
             indirect_zones: 0,
         };
         inode.zones[0] = new_zone as u16;
+        
+        println!("writing file at: {}\n{:?}", new_inode_num, inode);
 
-        self.write_inode(new_inode_num + 1, &inode).unwrap();
+        self.write_inode(new_inode_num, &inode).unwrap();
 
         self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
 
@@ -624,10 +626,10 @@ impl MinixFs {
             indirect_zones: 0,
         };
         inode.zones[0] = new_zone as u16;
-        self.write_inode(new_inode_num + 1, &inode).unwrap();
+        println!("writing dir at: {}", new_inode_num);
+        self.write_inode(new_inode_num, &inode).unwrap();
 
-        // Add directory entry to the parent directory
-        self.create_dir_entry(parent_inode_num, name, new_inode_num + 1).unwrap();
+        self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
 
         self.create_dir_entry(new_inode_num, ".", new_inode_num).unwrap();
         self.create_dir_entry(new_inode_num, "..", parent_inode_num).unwrap();
@@ -641,6 +643,7 @@ impl MinixFs {
         }
 
         let mut inode = self.read_inode(inode_num).unwrap();
+        println!("inode: {:?}", inode);
         let block_size = self.superblock.block_size as usize;
 
         let mut bytes_written = 0;
