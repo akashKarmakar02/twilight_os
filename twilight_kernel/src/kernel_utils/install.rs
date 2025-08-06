@@ -66,6 +66,7 @@ pub fn main() {
     if need_copy {
         copy_file!("/init/logo", true);
         copy_file!("/bin/exit42", true);
+        copy_file!("/bin/hello", true);
     }
 }
 
