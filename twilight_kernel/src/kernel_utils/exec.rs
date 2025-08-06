@@ -3,7 +3,6 @@ use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;
 use crate::sys::memory::{alloc_pages, phys_mem_offset};
-use alloc::string::String;
 use core::arch::asm;
 use object::{Object, ObjectSegment, SegmentFlags};
 use x86_64::VirtAddr;
@@ -34,13 +33,13 @@ pub fn main(args: &[&str]) {
 
         let page_table = crate::sys::memory::create_page_table(page_table_frame);
 
-        let entry_point_addr: u64;
+        let mut entry_point_addr: u64 = 0;
         let mut mapper =
             unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
         let code_addr = 0x4444_4484_0000;
 
-        if content_buf[0..4] == ELF_MAGIC {
+        if content_buf.get(0..4) == Some(&ELF_MAGIC) {
             if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
                 entry_point_addr = obj.entry();
 
@@ -97,9 +96,29 @@ pub fn main(args: &[&str]) {
                     USER_SS.bits() as u64,
                 );
             }
+        } else {
+            alloc_pages(&mut mapper, code_addr, content_buf.len(), false, true).unwrap();
+
+            let src = content_buf.as_ptr();
+            let dst = code_addr as *mut u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, dst, content_buf.len());
+                core::ptr::write_bytes(dst.add(content_buf.len()), 0, content_buf.len());
+            }
+            let user_stack_top = 0x4444_4455_0000u64;
+            let stack_size = 0x4000; // 16 KiB
+
+            alloc_pages(
+                &mut mapper,
+                user_stack_top - stack_size,
+                stack_size as usize,
+                true,
+                false,
+            )
+            .unwrap();
+
+            jump_to_user(code_addr, entry_point_addr, user_stack_top, USER_CS.bits() as u64, USER_SS.bits() as u64);
         }
-    } else {
-        println!("exec: {}: No such file or directory", args[0]);
     }
 }
 

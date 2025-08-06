@@ -792,6 +792,32 @@ impl MinixFs {
             }
         }
 
+        if inode.indirect_zones != 0 {
+            self.device.read(inode.indirect_zones as u32, &mut buffer).unwrap();
+            let zone_size = 512 / 4;
+            for i in 0..(zone_size - 1) {
+                let zone_id_buf: [u8; 4] = buffer[i*4..(i+1)*4].try_into().expect("invalid zone id size");
+                let zone_id = u32::from_le_bytes(zone_id_buf);
+                if zone_id == 0 {
+                    break;
+                }
+
+                let to_read = core::cmp::min(remaining, block_size);
+
+                let mut indirect_content_buf = [0u8; 512];
+    
+                self.device.read(zone_id, &mut indirect_content_buf).unwrap();
+    
+                content.extend_from_slice(&indirect_content_buf[..to_read]);
+
+
+                remaining -= to_read;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+
         Ok(content)
     }
     
