@@ -1,4 +1,6 @@
 mod superblock;
+mod blockgroup;
+mod inode;
 
 use crate::driver::disk::{BlockDevice, BlockDeviceIO};
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
@@ -540,8 +542,6 @@ impl MinixFs {
             indirect_zones: 0,
         };
         inode.zones[0] = new_zone as u16;
-        
-        println!("writing file at: {}\n{:?}", new_inode_num, inode);
 
         self.write_inode(new_inode_num, &inode).unwrap();
 
@@ -626,7 +626,6 @@ impl MinixFs {
             indirect_zones: 0,
         };
         inode.zones[0] = new_zone as u16;
-        println!("writing dir at: {}", new_inode_num);
         self.write_inode(new_inode_num, &inode).unwrap();
 
         self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
@@ -643,7 +642,6 @@ impl MinixFs {
         }
 
         let mut inode = self.read_inode(inode_num).unwrap();
-        println!("inode: {:?}", inode);
         let block_size = self.superblock.block_size as usize;
 
         let mut bytes_written = 0;
@@ -796,6 +794,7 @@ impl MinixFs {
 
         Ok(content)
     }
+    
     pub fn remove_entry(&mut self, path: &str) -> Result<(), FsError> {
         let mut components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
         if components.is_empty() {

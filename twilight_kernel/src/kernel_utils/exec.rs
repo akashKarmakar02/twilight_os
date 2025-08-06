@@ -3,11 +3,12 @@ use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;
 use crate::sys::memory::{alloc_pages, phys_mem_offset};
+use alloc::string::String;
 use core::arch::asm;
 use object::{Object, ObjectSegment, SegmentFlags};
+use x86_64::VirtAddr;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{OffsetPageTable, Translate};
-use x86_64::VirtAddr;
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
@@ -27,7 +28,7 @@ pub fn main(args: &[&str]) {
     };
 
     if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
-        let content_buf = fs.read_file(inode + 1).unwrap();
+        let content_buf = fs.read_file(inode).unwrap();
 
         let (page_table_frame, _) = Cr3::read();
 
@@ -87,7 +88,6 @@ pub fn main(args: &[&str]) {
                 } else {
                     println!("Not mapped!");
                 }
-
 
                 jump_to_user(
                     code_addr,
