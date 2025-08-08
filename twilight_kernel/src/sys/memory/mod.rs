@@ -1,19 +1,20 @@
 pub mod allocator;
 pub mod phys;
 
-use core::sync::atomic::AtomicU64;
-use core::sync::atomic::Ordering::SeqCst;
+use crate::{log, serial_prtinln};
 use conquer_once::spin::OnceCell;
+use core::sync::atomic::Ordering::SeqCst;
+use core::sync::atomic::{AtomicU64, AtomicUsize};
 use limine::memory_map::{Entry, EntryType};
 use spin::Once;
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate};
 use x86_64::{PhysAddr, VirtAddr};
-use crate::{log, println};
 
 #[allow(static_mut_refs)]
 static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();
 
 static mut PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
+static ALLOCATED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static MEMORY_MAP: OnceCell<&'static[&Entry]> = OnceCell::uninit();
 
 
@@ -42,57 +43,40 @@ pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static [&Entry]) {
 
 pub struct BootInfoFrameAllocator {
     memory_map: &'static [&'static Entry],
-    region_index: usize,
-    current_addr: u64,
 }
 
 impl BootInfoFrameAllocator {
     pub unsafe fn init(memory_map: &'static [&Entry]) -> Self {
-        let mut allocator = Self {
+        let allocator = Self {
             memory_map,
-            region_index: 0,
-            current_addr: 0,
         };
 
-        // Skip to first usable region
-        allocator.skip_to_next_usable_region();
         allocator
     }
 
-    fn skip_to_next_usable_region(&mut self) {
-        while self.region_index < self.memory_map.len() {
-            let region = self.memory_map[self.region_index];
-            if region.entry_type == EntryType::USABLE {
-                self.current_addr = align_up(region.base, 4096);
-                return;
-            }
-            self.region_index += 1;
-        }
+    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
+        let regions = self.memory_map.iter();
+        let usable_regions = regions.filter(|r|
+            r.entry_type == EntryType::USABLE
+        );
+        let addr_ranges = usable_regions.map(|r|
+            r.base..(r.base + r.length)
+        );
+        let frame_addresses = addr_ranges.flat_map(|r|
+            r.step_by(4096)
+        );
+        frame_addresses.map(|addr|
+            PhysFrame::containing_address(PhysAddr::new(addr))
+        )
     }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        while self.region_index < self.memory_map.len() {
-            let region = self.memory_map[self.region_index];
-
-            if region.entry_type != EntryType::USABLE {
-                self.region_index += 1;
-                continue;
-            }
-
-            let end = region.base + region.length;
-            if self.current_addr + 4096 <= end {
-                let frame = PhysFrame::containing_address(PhysAddr::new(self.current_addr));
-                self.current_addr += 4096;
-                return Some(frame);
-            } else {
-                self.region_index += 1;
-                self.skip_to_next_usable_region();
-            }
-        }
-
-        None
+        let next = ALLOCATED_FRAMES.fetch_add(1, SeqCst);
+        // FIXME: When the heap is larger than a few megabytes,
+        // creating an iterator for each allocation become very slow.
+        self.usable_frames().nth(next)
     }
 }
 
@@ -114,11 +98,6 @@ pub fn mapper() -> &'static mut OffsetPageTable<'static> {
     #[allow(static_mut_refs)]
     unsafe { MAPPER.get_mut_unchecked() }
 }
-
-fn align_up(addr: u64, align: u64) -> u64 {
-    (addr + align - 1) & !(align - 1)
-}
-
 
 pub fn phys_mem_offset() -> u64 {
     #[allow(static_mut_refs)]
@@ -173,8 +152,8 @@ pub fn alloc_pages(
     let mut frame_allocator = frame_allocator();
 
     let pages = {
-        let start_page = Page::containing_address(VirtAddr::new(addr));
-        let end_page = Page::containing_address(VirtAddr::new(addr + size));
+        let start_page: Page = Page::containing_address(VirtAddr::new(addr));
+        let end_page: Page = Page::containing_address(VirtAddr::new(addr + size));
         Page::range_inclusive(start_page, end_page)
     };
 
@@ -182,7 +161,7 @@ pub fn alloc_pages(
 
     for page in pages {
         if let Some(frame) = frame_allocator.allocate_frame() {
-            println!("{:?} to {:?} with flags {:?}", page, frame, flags);
+            serial_prtinln!("{:?} to {:?} with flags {:?}", page, frame, flags);
             let res = unsafe { mapper.map_to(page, frame, flags, &mut frame_allocator) };
             if let Ok(mapping) = res {
                 mapping.flush();

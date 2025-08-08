@@ -37,7 +37,7 @@ pub fn main(args: &[&str]) {
         let mut mapper =
             unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
-        let code_addr = 0x4444_4484_0000;
+        let code_addr = 0x000000000000;
 
         if content_buf.get(0..4) == Some(&ELF_MAGIC) {
             if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
@@ -51,9 +51,9 @@ pub fn main(args: &[&str]) {
                         let flags = segment.flags();
                         match flags {
                             SegmentFlags::Elf { p_flags } => {
-                                let is_writable = (p_flags & object::elf::PF_W) != 0;
-                                let is_executable = (p_flags & object::elf::PF_X) != 0;
-                                alloc_pages(&mut mapper, addr, size, is_writable, is_executable).unwrap();
+                                let _is_writable = (p_flags & object::elf::PF_W) != 0;
+                                let _is_executable = (p_flags & object::elf::PF_X) != 0;
+                                alloc_pages(&mut mapper, addr, size, true, true).unwrap();
                             }
                             _ => {}
                         }
@@ -70,19 +70,21 @@ pub fn main(args: &[&str]) {
                     }
                 }
 
-                let user_stack_top = 0x4444_4455_0000u64;
-                let stack_size = 0x4000; // 16 KiB
+                const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
+                const STACK_SIZE: u64 = 0x4000;
+
+                let user_stack_top = VirtAddr::new(USER_STACK_TOP);
+                let user_stack_base = user_stack_top - STACK_SIZE;
 
                 alloc_pages(
                     &mut mapper,
-                    user_stack_top - stack_size,
-                    stack_size as usize,
-                    true,
-                    false
-                )
-                .unwrap();
+                    user_stack_base.as_u64(),
+                    STACK_SIZE as usize,
+                    true, // writable
+                    false // executable
+                ).unwrap();
 
-                if let Some(phys) = mapper.translate_addr(VirtAddr::new(0x444444c40080)) {
+                if let Some(phys) = mapper.translate_addr(VirtAddr::new(0x4000c9)) {
                     println!("Mapped to: {:#x}", phys);
                 } else {
                     println!("Not mapped!");
@@ -91,12 +93,13 @@ pub fn main(args: &[&str]) {
                 jump_to_user(
                     code_addr,
                     entry_point_addr,
-                    user_stack_top,
+                    user_stack_top.as_u64(),
                     USER_CS.bits() as u64,
                     USER_SS.bits() as u64,
                 );
             }
         } else {
+            let code_addr = 0x400000;
             alloc_pages(&mut mapper, code_addr, content_buf.len(), false, true).unwrap();
 
             let src = content_buf.as_ptr();
@@ -106,7 +109,7 @@ pub fn main(args: &[&str]) {
                 core::ptr::write_bytes(dst.add(content_buf.len()), 0, content_buf.len());
             }
             let user_stack_top = 0x4444_4455_0000u64;
-            let stack_size = 0x4000; // 16 KiB
+            let stack_size = 0x32000; // 128 KiB
 
             alloc_pages(
                 &mut mapper,
