@@ -2,7 +2,7 @@ use alloc::string::{String, ToString};
 use x86_64::instructions::interrupts;
 use crate::arch::x86_64::halt;
 use crate::driver::disk::ata::{FileIO, IO};
-use crate::println;
+use crate::{print, println};
 use crate::sys::buffer::stdin::STDIN;
 
 #[allow(dead_code)]
@@ -41,7 +41,7 @@ pub fn read_char() -> char {
         let res = interrupts::without_interrupts(|| {
             let mut stdin = STDIN.lock();
             if !stdin.is_empty() {
-                Some(stdin.remove(0).unwrap() as char)
+                Some(stdin.remove(0).unwrap())
             } else {
                 None
             }
@@ -54,6 +54,7 @@ pub fn read_char() -> char {
 
 
 pub fn read_line() -> String {
+    let mut line = String::new();
     loop {
         halt();
         let res = interrupts::without_interrupts(|| {
@@ -61,11 +62,19 @@ pub fn read_line() -> String {
             let ch = stdin.back();
             match ch {
                 Some('\n') => {
-                    let line: String = stdin.clone().iter().collect();
+                    let mut result_line = line.clone();
+                    result_line.push('\n');
+                    print!("\n");
                     stdin.clear();
-                    Some(line)
+                    Some(result_line)
                 }
-                _ => None,
+                Some(ch) => {
+                    print!("{}", ch);
+                    line.push(*ch);
+                    stdin.clear();
+                    None
+                },
+                None => None,
             }
         });
         if let Some(line) = res {

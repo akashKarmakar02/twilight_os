@@ -2,7 +2,7 @@ mod service;
 
 use x86_64::structures::idt::InterruptStackFrame;
 use crate::arch::x86_64::idt::{Registers, PICS};
-use crate::println;
+use crate::{print, println};
 use twilight_common::syscall::numbers::*;
 use crate::sys::syscall::service::read;
 
@@ -15,10 +15,9 @@ pub extern "sysv64" fn syscall_handler(
     let arg1 = regs.rdi;
     let arg2 = regs.rsi;
     let arg3 = regs.rdx;
-    // not in use
     let _arg4 = regs.r10;
     let _arg5 = regs.r8;
-    // let arg6 = regs.r9;
+    let _arg6 = regs.r9;
     
     let res = match syscall_number {
         SYS_READ => {
@@ -34,13 +33,12 @@ pub extern "sysv64" fn syscall_handler(
             let res = unsafe { core::slice::from_raw_parts(buf, len) };
 
             if file_descriptor == 1 {
-                println!("{}", core::str::from_utf8(res).unwrap());
+                print!("{}", core::str::from_utf8(res).unwrap());
             }
 
             len
         }
         SYS_EXIT => {
-            println!("Process exiting with code: {}", arg1);
             0x10000000
         }
         _ => {

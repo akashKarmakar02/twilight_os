@@ -8,7 +8,7 @@ use core::arch::asm;
 use object::{Object, ObjectSegment, SegmentFlags};
 use spin::Mutex;
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{OffsetPageTable, PageTable, Translate};
+use x86_64::structures::paging::{OffsetPageTable, PageTable};
 use x86_64::VirtAddr;
 
 pub static PREVIOUS_TABLE: OnceCell<Mutex<PageTable>> = OnceCell::uninit();
@@ -40,7 +40,7 @@ pub fn main(args: &[&str]) {
 
         PREVIOUS_TABLE.try_init_once(|| Mutex::new(page_table_k)).expect("Already initalized");
 
-        let mut entry_point_addr: u64 = 0;
+        let entry_point_addr: u64;
         let mut mapper =
             unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
@@ -91,11 +91,11 @@ pub fn main(args: &[&str]) {
                     false // executable
                 ).unwrap();
 
-                if let Some(phys) = mapper.translate_addr(VirtAddr::new(0x4000c9)) {
-                    println!("Mapped to: {:#x}", phys);
-                } else {
-                    println!("Not mapped!");
-                }
+                // if let Some(phys) = mapper.translate_addr(VirtAddr::new(0x4000c9)) {
+                //     println!("Mapped to: {:#x}", phys);
+                // } else {
+                //     println!("Not mapped!");
+                // }
 
                 jump_to_user(
                     code_addr,
@@ -105,29 +105,6 @@ pub fn main(args: &[&str]) {
                     USER_SS.bits() as u64,
                 );
             }
-        } else {
-            let code_addr = 0x400000;
-            alloc_pages(&mut mapper, code_addr, content_buf.len(), false, true).unwrap();
-
-            let src = content_buf.as_ptr();
-            let dst = code_addr as *mut u8;
-            unsafe {
-                core::ptr::copy_nonoverlapping(src, dst, content_buf.len());
-                core::ptr::write_bytes(dst.add(content_buf.len()), 0, content_buf.len());
-            }
-            let user_stack_top = 0x4444_4455_0000u64;
-            let stack_size = 0x32000; // 128 KiB
-
-            alloc_pages(
-                &mut mapper,
-                user_stack_top - stack_size,
-                stack_size as usize,
-                true,
-                false,
-            )
-            .unwrap();
-
-            jump_to_user(code_addr, entry_point_addr, user_stack_top, USER_CS.bits() as u64, USER_SS.bits() as u64);
         }
     }
 }

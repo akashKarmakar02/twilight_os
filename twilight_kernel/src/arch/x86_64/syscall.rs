@@ -51,16 +51,6 @@ pub fn init() {
     // Enable EFER.SCE
     let efer = rdmsr(IA32_EFER);
     wrmsr(IA32_EFER, efer | 1);
-
-    // Optional debug read-back
-    let rstar = rdmsr(IA32_STAR);
-    let rlstar = rdmsr(IA32_LSTAR);
-    let rfmask = rdmsr(IA32_FMASK);
-    let refer = rdmsr(IA32_EFER);
-    println!(
-        "STAR={:#x} LSTAR={:#x} FMASK={:#x} EFER={:#x}",
-        rstar, rlstar, rfmask, refer
-    );
 }
 
 #[unsafe(naked)]
@@ -94,15 +84,12 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "pop rdx",
     "pop rcx",
     "pop rax",
-    "iretq",
+    "sysretq",
 
     "terminate:",
     "add rsp, 9 * 8",
-    // At this point, we're back in kernel mode and can handle process cleanup
     "call {terminate_process_cleanup}",
-    // This should not return - the cleanup function should handle switching
-    // to another process or returning to kernel idle state
-    "ud2", // Undefined instruction - should never reach here
+    "ud2",
 
     // constants:
     // userland_cs = const USER_CS.bits(),
