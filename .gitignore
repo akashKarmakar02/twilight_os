@@ -8,3 +8,5 @@ twilight-os.iso
 hdd.img
 twilight-os.hdd
 qemu.log
+
+/userspace/target
