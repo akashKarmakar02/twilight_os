@@ -14,7 +14,7 @@ use crate::println;
 // AT Attachment with Packet Interface Extension (ATA/ATAPI-4)
 // (1998)
 
-pub const BLOCK_SIZE: usize = 1024;
+pub const BLOCK_SIZE: usize = 512;
 
 // Keep track of the last selected bus and drive pair to speed up operations
 pub static LAST_SELECTED: Mutex<Option<(u8, u8)>> = Mutex::new(None);

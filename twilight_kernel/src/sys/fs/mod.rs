@@ -1,8 +1,8 @@
-pub mod minixfs;
+pub mod twilight_fs;
 pub mod ram_fs;
 
 use crate::println;
-use crate::sys::fs::minixfs::MinixFs;
+use crate::sys::fs::twilight_fs::MinixFs;
 use crate::sys::fs::ram_fs::RamFS;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -11,6 +11,8 @@ use spin::Mutex;
 
 pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
 pub static MFS: OnceCell<Mutex<MinixFs>> = OnceCell::uninit();
+
+pub const KERNEL_PADDING: usize = 4 * 1024 * 1024;
 
 pub const FS_PADDING: usize = 2097152;
 
@@ -43,6 +45,7 @@ pub fn init(show_log: bool) {
         }
     }
     println!("\x1b[93m[{:.6}]\x1b[0m No MinixFS Superblock found", uptime);
+    println!("\x1b[93mWarning\x1b[0m Trying running 'install' to install Twilight OS");
 }
 
 pub trait VfsNode {

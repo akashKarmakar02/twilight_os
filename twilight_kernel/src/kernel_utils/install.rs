@@ -1,8 +1,8 @@
 use alloc::vec::Vec;
 use crate::driver::disk::BlockDeviceIO;
-use crate::println;
+use crate::{println};
 use crate::sys::fs::init;
-use crate::sys::fs::twilight_fs::{Inode};
+use crate::sys::fs::twilight_fs::Inode;
 
 macro_rules! copy_file {
     ($path:expr, $verbose:expr) => {{
@@ -10,22 +10,8 @@ macro_rules! copy_file {
     }};
 }
 
-pub fn main(args: &[&str]) {
-    if args.len() < 2 {
-        println!("Usage: mkfs -t <fs> <disk>");
-        return;
-    }
 
-    if args[1] != "twilight_fs" {
-        println!("Unsupported filesystem type {}", args[2]);
-        return;
-    }
-
-    if args[2] != "/dev/ata0" {
-        println!("disk not found");
-        return;
-    }
-
+pub fn main() {
     let disk_size;
     let inode;
     let block_size;
@@ -38,11 +24,6 @@ pub fn main(args: &[&str]) {
             disk_size = disk.block_size() * disk.block_count();
             inode = disk_size / (disk.block_size() * 16);
             block_size = disk.block_size();
-
-            if let Ok(_sb) = crate::fs::twilight_fs::read_superblock(disk) {
-                println!("disk already formatted");
-                return;
-            }
 
             if let Ok(mut fs) = crate::fs::twilight_fs::format_superblock(disk, disk_size, inode as u16, block_size as u16) {
                 let root_inode_num = fs.allocate_inode().unwrap();
@@ -61,14 +42,15 @@ pub fn main(args: &[&str]) {
                     indirect_zones: 0,
                 };
                 root_inode.zones[0] = root_zone as u16;
+                
                 fs.write_inode(root_inode_num + 1, &root_inode).expect("TODO: panic message");
-
+                
                 // Add '.' and '..'
                 fs.create_dir_entry(root_inode_num + 1, ".", root_inode_num + 1).expect("TODO: panic message");
                 fs.create_dir_entry(root_inode_num + 1, "..", root_inode_num + 1).expect("TODO: panic message");
-                
+
                 init(false);
-                
+
                 fs.create_dir(root_inode_num + 1, "bin").unwrap();
                 fs.create_dir(root_inode_num + 1, "dev").unwrap();
                 fs.create_dir(root_inode_num + 1, "init").unwrap();
@@ -80,12 +62,14 @@ pub fn main(args: &[&str]) {
             return;
         }
     }
-    
+
     if need_copy {
         copy_file!("/init/logo", true);
         copy_file!("/bin/exit42", true);
+        copy_file!("/bin/hello", true);
     }
 }
+
 
 fn copy_file(path: &str, data: &[u8], verbose: bool) {
     use crate::sys::fs::twilight_fs::FsError;
@@ -104,8 +88,7 @@ fn copy_file(path: &str, data: &[u8], verbose: bool) {
         return;
     }
 
-    // Traverse or create parent directories
-    let mut cur_inode = 1; // root
+    let mut cur_inode = 1;
     for &part in &components[..components.len() - 1] {
         match fs.find_dir_entry(cur_inode, part) {
             Ok(Some(inode)) => cur_inode = inode,
@@ -130,10 +113,10 @@ fn copy_file(path: &str, data: &[u8], verbose: bool) {
     // Create and write file
     match fs.create_file(cur_inode, file_name) {
         Ok(file_inode) => {
-            if let Err(e) = fs.write_file(file_inode + 1, data) {
+            if let Err(e) = fs.write_file(file_inode, data) {
                 println!("Failed to write to '{}': {:?}", path, e);
             } else if verbose {
-                println!("\x1b[93m[DEBUG] \x1b[0mcopied: {}", path);
+                println!("\x1b[93m[DEBUG] \x1b[0mcopied: {} inode: {}", path, file_inode);
             }
         }
         Err(FsError::FileAlreadyExists) => {

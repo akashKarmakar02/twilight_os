@@ -7,9 +7,6 @@ use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
 use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest};
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
-use twilight_kernel::driver::keyboard::keyboard_interrupt;
-use twilight_kernel::task::Task;
-use twilight_kernel::task::executor::EXECUTOR;
 use twilight_kernel::{println, serial_print, serial_prtinln};
 
 #[used]
@@ -87,10 +84,8 @@ unsafe extern "C" fn kmain() -> ! {
     twilight_kernel::sys::console::init_console();
 
     twilight_kernel::sys::console::start_kernel_console();
-
-    let mut executor = EXECUTOR.get().unwrap().lock();
-    executor.spawn(Task::new(keyboard_interrupt()));
-    executor.run();
+    
+    hcf()
 }
 
 #[panic_handler]
