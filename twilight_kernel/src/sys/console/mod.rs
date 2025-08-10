@@ -185,6 +185,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "install" => crate::kernel_utils::install::main(),
         "exec" => crate::kernel_utils::exec::main(args),
         "dhcp" => crate::kernel_utils::dhcp::main(),
+        "vi" => crate::kernel_utils::vi::main(args),
         _ => {
             println!("{}: not a command", cmd);
         }

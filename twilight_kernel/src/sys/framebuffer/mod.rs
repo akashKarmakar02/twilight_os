@@ -1,6 +1,6 @@
+use crate::sys::fs::{VfsError, VfsNode};
 use limine::framebuffer::Framebuffer;
 use spin::Once;
-use crate::sys::fs::{VfsError, VfsNode};
 
 #[allow(static_mut_refs)]
 pub static mut FRAMEBUFFER: Once<TwilightFrameBuffer> = Once::new();
@@ -45,6 +45,17 @@ impl TwilightFrameBuffer {
 
         (r << 16) | (g << 8) | b // Keep the RGB format same as input
     }
+
+    // pub fn write(&mut self, offset: u32, buffer: &[u32], unless: bool) {
+    //     let fb_ptr = self.addr();
+    //     unsafe {
+    //         let fb_u32_ptr = fb_ptr.cast::<u32>();
+    //         for i in 1..buffer.len() {
+    //             let color = buffer[i];
+    //             fb_u32_ptr.add(i + offset as usize).write(color);
+    //         }
+    //     }
+    // }
 }
 
 impl Clone for TwilightFrameBuffer {
@@ -81,8 +92,6 @@ impl VfsNode for TwilightFrameBuffer {
         Ok(buffer.len())
     }
 
-
-
     fn size(&self) -> u64 {
         self.width * self.height
     }
@@ -95,7 +104,6 @@ impl VfsNode for TwilightFrameBuffer {
 unsafe impl Send for TwilightFrameBuffer {}
 
 unsafe impl Sync for TwilightFrameBuffer {}
-
 
 pub fn init_framebuffer(fb: &Framebuffer) {
     #[allow(static_mut_refs)]
@@ -111,8 +119,6 @@ pub fn get_pitch() -> u64 {
     }
 }
 
-
-
 pub fn convert_color(color: u32) -> [u8; 4] {
     let rgba: [u8; 4] = [
         ((color >> 16) & 0xFF) as u8, // Red
@@ -124,10 +130,16 @@ pub fn convert_color(color: u32) -> [u8; 4] {
     rgba
 }
 
-
-
-
 pub fn get_framebuffer() -> &'static TwilightFrameBuffer {
     #[allow(static_mut_refs)]
-    unsafe { FRAMEBUFFER.get().unwrap() }
+    unsafe {
+        FRAMEBUFFER.get().unwrap()
+    }
+}
+
+pub fn get_framebuffer_mut() -> &'static mut TwilightFrameBuffer {
+    #[allow(static_mut_refs)]
+    unsafe {
+        FRAMEBUFFER.get_mut().unwrap()
+    }
 }
