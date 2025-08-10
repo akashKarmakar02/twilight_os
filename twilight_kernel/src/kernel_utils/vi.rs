@@ -1,0 +1,58 @@
+use alloc::{vec, vec::Vec};
+
+use crate::sys::framebuffer::{TwilightFrameBuffer, get_framebuffer, get_framebuffer_mut};
+
+const HEIGHT: u16 = 720;
+const WIDTH: u16 = 1280;
+
+const BUF_SIZE: u32 = 1280 * 720;
+
+enum ViMode {
+    Command,
+    Insert,
+    View,
+}
+
+struct Vi {
+    content: Vec<u8>,
+    mode: ViMode,
+    cursor_position: u64,
+    framebuffer: &'static mut TwilightFrameBuffer,
+}
+
+impl Vi {
+    fn new(content: Vec<u8>) -> Self {
+        let fb = get_framebuffer_mut();
+        Self {
+            content,
+            cursor_position: 0,
+            mode: ViMode::Command,
+            framebuffer: fb,
+        }
+    }
+
+    fn init(&mut self) {
+        let buf = [0x101010u32; BUF_SIZE as usize];
+        let fb_ptr = self.framebuffer.addr();
+
+        unsafe {
+            let fb_u32_ptr = fb_ptr.cast::<u32>();
+            for i in 1..buf.len() {
+                let color = buf[i];
+                fb_u32_ptr.add(i).write(color);
+            }
+        }
+    }
+}
+
+pub fn main(args: &[&str]) {
+    let mut demo_content = Vec::new();
+    demo_content.push(b'h');
+    demo_content.push(b'e');
+    demo_content.push(b'l');
+    demo_content.push(b'l');
+    demo_content.push(b'o');
+    let mut vi = Vi::new(demo_content);
+
+    vi.init();
+}
