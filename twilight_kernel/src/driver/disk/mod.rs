@@ -1,9 +1,9 @@
 use crate::sys::fs::twilight_fs::MinixFs;
-use crate::{sys};
+use crate::sys;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::{Once};
+use spin::Once;
 
 pub mod ata;
 
@@ -36,7 +36,9 @@ impl BlockDeviceIO for BlockDevice {
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), ()> {
         match self {
             BlockDevice::Mem(dev) => dev.write(addr, buf),
-            BlockDevice::Ata(dev) => dev.write(addr, buf),
+            BlockDevice::Ata(dev) => {
+                dev.write(addr, buf)
+            },
         }
     }
 

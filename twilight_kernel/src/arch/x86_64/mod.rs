@@ -3,6 +3,8 @@ use x86_64::instructions::interrupts;
 pub mod idt;
 pub mod gdt;
 pub mod power;
+pub mod syscall;
+pub mod asm_utils;
 
 pub fn halt() {
     let disabled = !interrupts::are_enabled();

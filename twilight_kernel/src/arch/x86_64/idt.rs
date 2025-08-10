@@ -1,7 +1,7 @@
+use alloc::string::String;
 use crate::arch::x86_64::gdt;
-use crate::println;
-use crate::sys::syscall::syscall_handler;
-use core::arch::naked_asm;
+use crate::{print, println};
+use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
@@ -44,11 +44,6 @@ lazy_static! {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-
-            let f = syscall_wrapper as *mut fn();
-            idt[0x80]
-                .set_handler_fn(core::mem::transmute(f))
-                .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
         }
         idt[interrupt_index(0)].set_handler_fn(timer_interrupt_handler);
         idt[interrupt_index(1)].set_handler_fn(keyboard_interrupt_handler);
@@ -83,12 +78,57 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 }
 
 extern "x86-interrupt" fn page_fault_handler(
-    _stack_frame: InterruptStackFrame,
+    stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
-    panic!("Error Code: {:?} \n{:#?}", error_code, _stack_frame);
-}
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let rip_ptr = rip as *const u8;
 
+    // read bytes
+    let mut instr_bytes = [0u8; 16];
+    unsafe {
+        for i in 0..instr_bytes.len() {
+            instr_bytes[i] = *rip_ptr.add(i);
+        }
+    }
+
+    // decode
+    let mut decoder = Decoder::with_ip(64, &instr_bytes, rip, DecoderOptions::NONE);
+    let instruction = decoder.decode();
+    let mut formatter = IntelFormatter::new();
+    let mut output = String::new();
+    formatter.format(&instruction, &mut output);
+
+    // CR2 = faulting linear address
+    let fault_addr = Cr2::read();
+
+    println!("\nPage fault @ RIP=0x{:x}", rip);
+    print!("Instruction bytes: ");
+    for b in &instr_bytes[..instruction.len()] { print!("{:02x} ", b); }
+    print!("\n");
+    println!("Decoded: {}", output);
+    println!("CR2 (faulting linear/virtual): {:?}", fault_addr);
+    println!("Error code: {:?}\n{:#?}", error_code, stack_frame);
+
+    // Check whether instruction has a memory operand
+    use iced_x86::OpKind;
+    for i in 0..instruction.op_count() {
+        match instruction.op_kind(i) {
+            OpKind::Memory => {
+                println!(
+                    "Instruction has memory operand: base={:?} index={:?} scale={} disp={:#x}",
+                    instruction.memory_base(),
+                    instruction.memory_index(),
+                    instruction.memory_index_scale(),
+                    instruction.memory_displacement64()
+                );
+            }
+            _ => {}
+        }
+    }
+
+    panic!("page fault");
+}
 extern "x86-interrupt" fn stack_segment_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -109,47 +149,10 @@ extern "x86-interrupt" fn segment_not_present_handler(
     panic!();
 }
 
-// Naked function wrapper saving all scratch registers to the stack
-// See: https://os.phil-opp.com/returning-from-exceptions/
-macro_rules! wrap {
-    ($fn: ident => $w:ident) => {
-        #[unsafe(naked)]
-        pub unsafe extern "sysv64" fn $w() {
-            naked_asm!(
-                "push rax",
-                "push rcx",
-                "push rdx",
-                "push rsi",
-                "push rdi",
-                "push r8",
-                "push r9",
-                "push r10",
-                "push r11",
-                "mov rsi, rsp", // Arg #2: register list
-                "mov rdi, rsp", // Arg #1: interupt frame
-                "add rdi, 9 * 8", // 9 registers * 8 bytes
-                "call {}",
-                "pop r11",
-                "pop r10",
-                "pop r9",
-                "pop r8",
-                "pop rdi",
-                "pop rsi",
-                "pop rdx",
-                "pop rcx",
-                "pop rax",
-                "iretq",
-                sym $fn
-            );
-        }
-    };
-}
-
-wrap!(syscall_handler => syscall_wrapper);
-
 // device interrupt
 use crate::driver::keyboard::keyboard_interrupt;
 use spin::Mutex;
+use x86_64::registers::control::Cr2;
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;

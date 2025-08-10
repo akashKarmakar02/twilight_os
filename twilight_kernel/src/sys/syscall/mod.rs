@@ -27,6 +27,22 @@ pub extern "sysv64" fn syscall_handler(
             let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
             read(arg1, buf, len)
         },
+        SYS_WRITE => {
+            let file_descriptor = arg1;
+            let buf = arg2 as *const u8;
+            let len = arg3;
+            let res = unsafe { core::slice::from_raw_parts(buf, len) };
+
+            if file_descriptor == 1 {
+                println!("{}", core::str::from_utf8(res).unwrap());
+            }
+
+            len
+        }
+        SYS_EXIT => {
+            println!("Process exiting with code: {}", arg1);
+            0x10000000
+        }
         _ => {
             println!("Unknown syscall number: {}", syscall_number);
             0

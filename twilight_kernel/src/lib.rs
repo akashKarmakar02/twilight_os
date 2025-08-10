@@ -2,6 +2,8 @@
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
 #![feature(let_chains)]
+#![feature(decl_macro)]
+
 pub mod arch;
 pub mod driver;
 pub mod kernel_utils;
@@ -45,9 +47,10 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
 
     arch::x86_64::gdt::init_after_boot();
 
+    arch::x86_64::syscall::init();
+
     x86_64::instructions::interrupts::enable();
 }
-
 
 #[macro_export]
 macro_rules! log {
