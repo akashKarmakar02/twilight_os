@@ -1,5 +1,4 @@
 use crate::driver::nic::{Config, EthernetDeviceIO, Stats};
-use crate::println;
 use crate::sys::memory::phys::PhysBuf;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -229,9 +228,6 @@ impl EthernetDeviceIO for Device {
 
     fn receive_packet(&mut self) -> Option<Vec<u8>> {
         let cmd = unsafe { self.ports.cmd.read() };
-        println!("RX check: cmd = {:#x}", cmd);
-        println!("CAPR: {}", unsafe { self.ports.capr.read() });
-        println!("CBA: {}", unsafe { self.ports.cba.read() });
         if (cmd & CR_BUFE) == CR_BUFE {
             return None;
         }

@@ -22,8 +22,6 @@ pub fn main() {
         let timeout = 30;
         let started = cmos.unix_time();
 
-        println!("DHCP: {}", started);
-
         loop {
             if cmos.unix_time() - started > timeout {
                 println!("ERROR: timeout");
@@ -35,13 +33,10 @@ pub fn main() {
             iface.poll(time, device, &mut sockets);
             let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
 
-            println!("{:?}", event);
-
             match event {
                 None => {}
                 Some(Event::Configured(config)) => {
                     dhcp_config = Some((config.address, config.router, config.dns_servers));
-                    println!("dhcp success");
                     break;
                 }
                 Some(Event::Deconfigured) => {}
@@ -49,7 +44,7 @@ pub fn main() {
 
             if let Some(delay) = iface.poll_delay(time, &sockets) {
                 let d = (delay.total_micros() as f64) / 10000.0;
-                sleep(d.min(3.0)); // 0.1 seconds = 100 ms
+                sleep(d.min(0.1)); // 0.1 seconds = 100 ms
             }
         }
     }
