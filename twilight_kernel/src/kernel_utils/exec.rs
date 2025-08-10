@@ -3,11 +3,15 @@ use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;
 use crate::sys::memory::{alloc_pages, phys_mem_offset};
+use conquer_once::spin::OnceCell;
 use core::arch::asm;
 use object::{Object, ObjectSegment, SegmentFlags};
-use x86_64::VirtAddr;
+use spin::Mutex;
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{OffsetPageTable, Translate};
+use x86_64::structures::paging::{OffsetPageTable, PageTable, Translate};
+use x86_64::VirtAddr;
+
+pub static PREVIOUS_TABLE: OnceCell<Mutex<PageTable>> = OnceCell::uninit();
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
@@ -32,6 +36,9 @@ pub fn main(args: &[&str]) {
         let (page_table_frame, _) = Cr3::read();
 
         let page_table = crate::sys::memory::create_page_table(page_table_frame);
+        let page_table_k = page_table.clone();
+
+        PREVIOUS_TABLE.try_init_once(|| Mutex::new(page_table_k)).expect("Already initalized");
 
         let mut entry_point_addr: u64 = 0;
         let mut mapper =
