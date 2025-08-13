@@ -1,18 +1,20 @@
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
-use crate::sys::framebuffer::{TwilightFrameBuffer, get_framebuffer, get_framebuffer_mut};
+use crate::sys::framebuffer::{get_framebuffer_mut, TwilightFrameBuffer};
 
-const HEIGHT: u16 = 720;
-const WIDTH: u16 = 1280;
+const _HEIGHT: u16 = 720;
+const _WIDTH: u16 = 1280;
 
 const BUF_SIZE: u32 = 1280 * 720;
 
+#[allow(dead_code)]
 enum ViMode {
     Command,
     Insert,
     View,
 }
 
+#[allow(dead_code)]
 struct Vi {
     content: Vec<u8>,
     mode: ViMode,
@@ -45,7 +47,7 @@ impl Vi {
     }
 }
 
-pub fn main(args: &[&str]) {
+pub fn main(_args: &[&str]) {
     let mut demo_content = Vec::new();
     demo_content.push(b'h');
     demo_content.push(b'e');

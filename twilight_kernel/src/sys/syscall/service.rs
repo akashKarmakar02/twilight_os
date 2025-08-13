@@ -1,10 +1,8 @@
-use crate::println;
-use crate::sys::tty::{read_line};
+use crate::sys::tty::read_line;
 
 pub fn read(handler: usize, buf: &mut [u8], len: usize) -> usize {
     if handler == 0 {
         let mut str = read_line();
-        println!("{}", str);
         str.truncate(len);
 
         let string_bytes = str.as_bytes();

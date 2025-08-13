@@ -1,6 +1,5 @@
 use crate::sys::syscall::syscall_handler;
 use crate::arch::x86_64::gdt::GdtEntryIndex;
-use crate::{println};
 use core::arch::{asm, naked_asm};
 
 pub const IA32_EFER: u32 = 0xc0000080;
@@ -51,16 +50,6 @@ pub fn init() {
     // Enable EFER.SCE
     let efer = rdmsr(IA32_EFER);
     wrmsr(IA32_EFER, efer | 1);
-
-    // Optional debug read-back
-    let rstar = rdmsr(IA32_STAR);
-    let rlstar = rdmsr(IA32_LSTAR);
-    let rfmask = rdmsr(IA32_FMASK);
-    let refer = rdmsr(IA32_EFER);
-    println!(
-        "STAR={:#x} LSTAR={:#x} FMASK={:#x} EFER={:#x}",
-        rstar, rlstar, rfmask, refer
-    );
 }
 
 #[unsafe(naked)]
@@ -82,9 +71,6 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "add rdi, 9 * 8", // 9 registers * 8 bytes
     "call {x86_64_do_syscall}",
 
-    "cmp rax, 0x10000000",
-    "je terminate",
-
     "pop r11",
     "pop r10",
     "pop r9",
@@ -94,15 +80,7 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "pop rdx",
     "pop rcx",
     "pop rax",
-    "iretq",
-
-    "terminate:",
-    "add rsp, 9 * 8",
-    // At this point, we're back in kernel mode and can handle process cleanup
-    "call {terminate_process_cleanup}",
-    // This should not return - the cleanup function should handle switching
-    // to another process or returning to kernel idle state
-    "ud2", // Undefined instruction - should never reach here
+    "sysretq",
 
     // constants:
     // userland_cs = const USER_CS.bits(),
@@ -111,16 +89,5 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     // tss_temp_ustack_off = const offset_of!(Tss, reserved2) + core::mem::size_of::<usize>(),
     // tss_rsp0_off = const offset_of!(Tss, rsp) + core::mem::size_of::<usize>(),
     x86_64_do_syscall = sym syscall_handler,
-    terminate_process_cleanup = sym terminate_process_cleanup,
     )
-}
-
-extern "C" fn terminate_process_cleanup() -> ! {
-    println!("Process terminated via sys_exit, cleaning up...");
-
-    unsafe {
-        loop {
-            asm!("hlt");
-        }
-    }
 }

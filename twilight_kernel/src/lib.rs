@@ -49,6 +49,7 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
 
     arch::x86_64::syscall::init();
 
+
     x86_64::instructions::interrupts::enable();
 }
 

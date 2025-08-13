@@ -1,6 +1,5 @@
 mod rtl8139;
 mod pcnet;
-mod e1000;
 
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::pci::DeviceConfig;
@@ -32,7 +31,6 @@ pub enum SocketStatus {
 pub enum EthernetDevice {
     RTL8139(rtl8139::Device),
     PCNET(pcnet::Device),
-    E1000(e1000::Device),
 }
 
 pub trait EthernetDeviceIO {
@@ -48,21 +46,18 @@ impl EthernetDeviceIO for EthernetDevice {
         match self {
             EthernetDevice::RTL8139(dev) => dev.config(),
             EthernetDevice::PCNET(dev) => dev.config(),
-            EthernetDevice::E1000(dev) => dev.config(),
         }
     }
     fn stats(&self) -> Arc<Stats> {
         match self {
             EthernetDevice::RTL8139(dev) => dev.stats(),
             EthernetDevice::PCNET(dev) => dev.stats(),
-            EthernetDevice::E1000(dev) => dev.stats(),
         }
     }
     fn receive_packet(&mut self) -> Option<Vec<u8>> {
         match self {
             EthernetDevice::RTL8139(dev) => dev.receive_packet(),
             EthernetDevice::PCNET(dev) => dev.receive_packet(),
-            EthernetDevice::E1000(dev) => dev.receive_packet(),
         }
     }
 
@@ -70,7 +65,6 @@ impl EthernetDeviceIO for EthernetDevice {
         match self {
             EthernetDevice::RTL8139(dev) => dev.transmit_packet(len),
             EthernetDevice::PCNET(dev) => dev.transmit_packet(len),
-            EthernetDevice::E1000(dev) => dev.transmit_packet(len),
         }
     }
 
@@ -78,7 +72,6 @@ impl EthernetDeviceIO for EthernetDevice {
         match self {
             EthernetDevice::RTL8139(dev) => dev.next_tx_buffer(len),
             EthernetDevice::PCNET(dev) => dev.next_tx_buffer(len),
-            EthernetDevice::E1000(dev) => dev.next_tx_buffer(len),
         }
     }
 }
@@ -94,7 +87,6 @@ impl<'a> smoltcp::phy::Device for EthernetDevice {
     ) -> Option<(Self::RxToken<'a>, Self::TxToken<'a>)> {
         if let Some(buffer) = self.receive_packet() {
             if self.config().is_debug_enabled() {
-                log!("NET Packet Received");
                 // usr::hex::print_hex(&buffer);
             }
             self.stats().rx_add(buffer.len() as u64);
@@ -285,7 +277,6 @@ impl smoltcp::phy::TxToken for TxToken {
         let buf = self.device.next_tx_buffer(len);
         let res = f(buf);
         if config.is_debug_enabled() {
-            log!("NET Packet Transmitted");
             // usr::hex::print_hex(buf);
         }
         self.device.transmit_packet(len);
@@ -293,19 +284,6 @@ impl smoltcp::phy::TxToken for TxToken {
         res
     }
 }
-
-
-const E1000_DEVICES: [u16; 9] = [
-    0x1004, // 82543GC (Intel PRO/1000 T)
-    0x100C, // 82544GC (Intel PRO/1000 T)
-    0x100E, // 82540EM (Intel PRO/1000 MT)
-    0x100F, // 82545EM (Intel PRO/1000 MT)
-    0x107C, // 82541PI (Intel PRO/1000 GT)
-    0x107D, // 82572EI (Intel PRO/1000 PT)
-    0x10D3, // 82574L
-    0x10F5, // 82567LM
-    0x153A, // I217-LM
-];
 
 pub fn init() {
     let add = |mut device: EthernetDevice, name| {
@@ -330,14 +308,5 @@ pub fn init() {
         let io = dev.io_base();
         let nic = pcnet::Device::new(io);
         add(EthernetDevice::PCNET(nic), "PCNET");
-    }
-    for id in E1000_DEVICES {
-        if let Some(dev) = find_device(0x8086, id) {
-            let io = dev.io_base();
-            let mem = dev.mem_base();
-            let bar = dev.bar_type();
-            let nic = e1000::Device::new(io, mem, bar);
-            add(EthernetDevice::E1000(nic), "E1000");
-        }
     }
 }

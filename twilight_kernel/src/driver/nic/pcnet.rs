@@ -6,7 +6,6 @@ use smoltcp::wire::EthernetAddress;
 use x86_64::instructions::port::Port;
 use crate::arch::x86_64::halt;
 use crate::driver::nic::{Config, EthernetDeviceIO, Stats};
-use crate::println;
 use crate::sys::memory::phys::PhysBuf;
 
 const CSR0_INIT: usize = 0;
@@ -310,8 +309,6 @@ impl EthernetDeviceIO for Device {
                 break;
             }
         }
-
-        println!("{:?}", packet.as_slice().len());
 
         if !packet.is_empty() {
             Some(packet)

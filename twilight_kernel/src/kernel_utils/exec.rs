@@ -2,13 +2,13 @@ use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;
-use crate::sys::memory::{alloc_pages, phys_mem_offset};
+use crate::sys::memory::{active_level_4_table, alloc_pages, frame_allocator, phys_mem_offset};
 use conquer_once::spin::OnceCell;
 use core::arch::asm;
 use object::{Object, ObjectSegment, SegmentFlags};
 use spin::Mutex;
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{OffsetPageTable, PageTable, Translate};
+use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PageTable};
 use x86_64::VirtAddr;
 
 pub static PREVIOUS_TABLE: OnceCell<Mutex<PageTable>> = OnceCell::uninit();
@@ -33,16 +33,26 @@ pub fn main(args: &[&str]) {
     if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
         let content_buf = fs.read_file(inode).unwrap();
 
-        let (page_table_frame, _) = Cr3::read();
+        let (_, flags) = Cr3::read();
+
+        let page_table_frame = frame_allocator().allocate_frame().unwrap();
 
         let page_table = crate::sys::memory::create_page_table(page_table_frame);
-        let page_table_k = page_table.clone();
 
-        PREVIOUS_TABLE.try_init_once(|| Mutex::new(page_table_k)).expect("Already initalized");
+        let kernel_page_table = unsafe { active_level_4_table() };
 
-        let mut entry_point_addr: u64 = 0;
-        let mut mapper =
-            unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+        let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
+
+        for (page, kernel_page) in pages {
+            *page = kernel_page.clone();
+        }
+
+        unsafe {
+            Cr3::write(page_table_frame, flags);
+        };
+
+        let entry_point_addr: u64;
+        let mut mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
         let code_addr = 0x000000000000;
 
@@ -91,11 +101,11 @@ pub fn main(args: &[&str]) {
                     false // executable
                 ).unwrap();
 
-                if let Some(phys) = mapper.translate_addr(VirtAddr::new(0x4000c9)) {
-                    println!("Mapped to: {:#x}", phys);
-                } else {
-                    println!("Not mapped!");
-                }
+                // if let Some(phys) = mapper.translate_addr(VirtAddr::new(0x4000c9)) {
+                //     println!("Mapped to: {:#x}", phys);
+                // } else {
+                //     println!("Not mapped!");
+                // }
 
                 jump_to_user(
                     code_addr,
@@ -105,29 +115,6 @@ pub fn main(args: &[&str]) {
                     USER_SS.bits() as u64,
                 );
             }
-        } else {
-            let code_addr = 0x400000;
-            alloc_pages(&mut mapper, code_addr, content_buf.len(), false, true).unwrap();
-
-            let src = content_buf.as_ptr();
-            let dst = code_addr as *mut u8;
-            unsafe {
-                core::ptr::copy_nonoverlapping(src, dst, content_buf.len());
-                core::ptr::write_bytes(dst.add(content_buf.len()), 0, content_buf.len());
-            }
-            let user_stack_top = 0x4444_4455_0000u64;
-            let stack_size = 0x32000; // 128 KiB
-
-            alloc_pages(
-                &mut mapper,
-                user_stack_top - stack_size,
-                stack_size as usize,
-                true,
-                false,
-            )
-            .unwrap();
-
-            jump_to_user(code_addr, entry_point_addr, user_stack_top, USER_CS.bits() as u64, USER_SS.bits() as u64);
         }
     }
 }
