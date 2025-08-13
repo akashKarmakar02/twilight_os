@@ -72,9 +72,6 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "add rdi, 9 * 8", // 9 registers * 8 bytes
     "call {x86_64_do_syscall}",
 
-    "cmp rax, 0x10000000",
-    "je terminate",
-
     "pop r11",
     "pop r10",
     "pop r9",
@@ -86,11 +83,6 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "pop rax",
     "sysretq",
 
-    "terminate:",
-    "add rsp, 9 * 8",
-    "call {terminate_process_cleanup}",
-    "ud2",
-
     // constants:
     // userland_cs = const USER_CS.bits(),
     // userland_ss = const USER_SS.bits(),
@@ -98,16 +90,5 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     // tss_temp_ustack_off = const offset_of!(Tss, reserved2) + core::mem::size_of::<usize>(),
     // tss_rsp0_off = const offset_of!(Tss, rsp) + core::mem::size_of::<usize>(),
     x86_64_do_syscall = sym syscall_handler,
-    terminate_process_cleanup = sym terminate_process_cleanup,
     )
-}
-
-extern "C" fn terminate_process_cleanup() -> ! {
-    println!("Process terminated via sys_exit, cleaning up...");
-
-    unsafe {
-        loop {
-            asm!("hlt");
-        }
-    }
 }

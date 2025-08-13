@@ -39,7 +39,9 @@ pub extern "sysv64" fn syscall_handler(
             len
         }
         SYS_EXIT => {
-            0x10000000
+            println!("Exiting with code {}", arg1);
+
+            0
         }
         _ => {
             println!("Unknown syscall number: {}", syscall_number);
