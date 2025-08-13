@@ -18,11 +18,12 @@ unsafe impl Send for KernelAcpiHandler {}
 unsafe impl Sync for KernelAcpiHandler {}
 
 impl AcpiHandler for KernelAcpiHandler {
+    #[allow(unsafe_code)]
     unsafe fn map_physical_region<T>(&self, physical_address: usize, size: usize) -> PhysicalMapping<Self, T> {
         let phys_addr = PhysAddr::new(physical_address as u64);
         let virt_addr = phys_to_virt(phys_addr);
         let ptr = NonNull::new(virt_addr.as_mut_ptr()).unwrap();
-        PhysicalMapping::new(physical_address, ptr, size, size, Self)
+        unsafe { PhysicalMapping::new(physical_address, ptr, size, size, Self) }
     }
 
     fn unmap_physical_region<T>(_region: &PhysicalMapping<Self, T>) {}

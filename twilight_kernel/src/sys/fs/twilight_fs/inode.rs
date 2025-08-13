@@ -1,5 +1,6 @@
+#[allow(dead_code)]
 #[repr(u16)]
-enum FileType {
+pub enum FileType {
     File,
     Directory,
     Symlink,

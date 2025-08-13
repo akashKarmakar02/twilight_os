@@ -1,6 +1,5 @@
 use crate::sys::syscall::syscall_handler;
 use crate::arch::x86_64::gdt::GdtEntryIndex;
-use crate::{println};
 use core::arch::{asm, naked_asm};
 
 pub const IA32_EFER: u32 = 0xc0000080;

@@ -1,5 +1,6 @@
 const N: usize = 31;
 
+#[allow(dead_code)]
 #[repr(u8)]
 enum MetadataBlockKind {
     Inode = 0,
