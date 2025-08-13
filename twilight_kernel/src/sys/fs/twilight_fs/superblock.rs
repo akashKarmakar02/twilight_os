@@ -25,7 +25,7 @@ pub struct Superblock {
 
 #[allow(dead_code)]
 impl Superblock {
-    fn new(label: [u8; 32], block_size: u32, total_blocks: u64, alloc_bitmap_start: u64) -> Self {
+    pub(crate) fn new(label: [u8; 32], block_size: u32, total_blocks: u64, alloc_bitmap_start: u64) -> Self {
         let mut cmos = CMOS::new();
         let time = cmos.unix_time();
 

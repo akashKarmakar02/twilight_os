@@ -49,6 +49,7 @@ run-x86_64: $(IMAGE_NAME).iso
 	fi
 	qemu-system-$(KARCH) \
 		-m 50 \
+		-enable-kvm \
 		-netdev user,id=net0,hostfwd=tcp::8080-:80 -device rtl8139,netdev=net0 \
 		-smp 4 \
 		-usb \

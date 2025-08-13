@@ -1,7 +1,8 @@
-mod superblock;
-mod blockgroup;
-mod inode;
-mod dir_entry;
+pub mod superblock;
+pub mod blockgroup;
+pub mod inode;
+pub mod dir_entry;
+pub mod metadata;
 
 use crate::driver::disk::{BlockDevice, BlockDeviceIO};
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};

@@ -1,3 +1,14 @@
+#[repr(u16)]
+enum FileType {
+    File,
+    Directory,
+    Symlink,
+    BlockDevice,
+    CharacterDevice,
+    Socket,
+    Pipe,
+}
+
 #[repr(C, packed)]
 #[allow(dead_code)]
 pub struct Inode {
@@ -14,5 +25,5 @@ pub struct Inode {
     pub indirect: u32,
     pub double_indirect: u32,
     pub triple_indirect: u32,
-    pub padding: u16,
+    pub file_type: FileType,
 }

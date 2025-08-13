@@ -174,6 +174,7 @@ pub fn lookup_device_name(vendor: u16, device: u16) -> &'static str {
         (0x8086, 0x7010) => "Intel 82371SB PIIX3 IDE Controller",
         (0x8086, 0x7020) => "82371SB PIIX3 USB [Natoma/Triton II]",
         (0x8086, 0x2668) => "82801FB/FBM/FR/FW/FRW (ICH6 Family) High Definition Audio Controller",
+        (0x8086, 0x100F) => "Intel 82545EM Gigabit Ethernet Controller",
 
         // Realtek
         (0x10ec, 0x8139) => "Realtek RTL-8139",
@@ -195,6 +196,8 @@ pub fn lookup_device_name(vendor: u16, device: u16) -> &'static str {
         // VMware (common in virtual machines)
         (0x15ad, 0x0740) => "VMware SVGA II Adapter",
         (0x15ad, 0x0790) => "VMware VMXNET3 Ethernet Controller",
+        (0x15AD, 0x07A0) => "VMware PCI Express Root Port",
+        (0x1274, 0x1371) => "Ensoniq ES1371/ES1373 / Creative Labs CT2518",
 
         // QEMU (emulated devices)
         (0x1234, 0x1111) => "QEMU Virtual Graphics Adapter",
