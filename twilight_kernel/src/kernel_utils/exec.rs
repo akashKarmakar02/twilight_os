@@ -2,13 +2,13 @@ use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;
-use crate::sys::memory::{alloc_pages, phys_mem_offset};
+use crate::sys::memory::{active_level_4_table, alloc_pages, frame_allocator, phys_mem_offset};
 use conquer_once::spin::OnceCell;
 use core::arch::asm;
 use object::{Object, ObjectSegment, SegmentFlags};
 use spin::Mutex;
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{OffsetPageTable, PageTable};
+use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PageTable};
 use x86_64::VirtAddr;
 
 pub static PREVIOUS_TABLE: OnceCell<Mutex<PageTable>> = OnceCell::uninit();
@@ -33,16 +33,26 @@ pub fn main(args: &[&str]) {
     if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
         let content_buf = fs.read_file(inode).unwrap();
 
-        let (page_table_frame, _) = Cr3::read();
+        let (_, flags) = Cr3::read();
+
+        let page_table_frame = frame_allocator().allocate_frame().unwrap();
 
         let page_table = crate::sys::memory::create_page_table(page_table_frame);
-        let page_table_k = page_table.clone();
 
-        PREVIOUS_TABLE.try_init_once(|| Mutex::new(page_table_k)).expect("Already initalized");
+        let kernel_page_table = unsafe { active_level_4_table() };
+
+        let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
+
+        for (page, kernel_page) in pages {
+            *page = kernel_page.clone();
+        }
+
+        unsafe {
+            Cr3::write(page_table_frame, flags);
+        };
 
         let entry_point_addr: u64;
-        let mut mapper =
-            unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+        let mut mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
         let code_addr = 0x000000000000;
 

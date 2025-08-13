@@ -22,7 +22,7 @@ pub fn main(args: &[&str]) {
         };
 
         if args.len() > 2 {
-            fs.write_file(inode + 1, args[2..].join(" ").as_bytes()).unwrap();
+            fs.write_file(inode, args[2..].join(" ").as_bytes()).unwrap();
         }
 
         return;
