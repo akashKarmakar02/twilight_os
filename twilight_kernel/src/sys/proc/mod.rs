@@ -1,13 +1,8 @@
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use core::arch::asm;
-use spin::{Mutex, Once};
-use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB};
-use x86_64::{PhysAddr, VirtAddr};
-use core::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use crate::sys::memory::alloc_pages;
-use x86_64::registers::control::Cr3;
-use crate::sys::memory::{frame_allocator, phys_mem_offset};
+use alloc::boxed::Box;
+use core::arch::asm;
+use core::sync::atomic::{AtomicU16, Ordering};
+use x86_64::structures::paging::OffsetPageTable;
 // ================== TrapFrame ==================
 
 #[repr(C)]
@@ -78,7 +73,8 @@ fn alloc_kstack() -> *mut u8 {
 impl<'a> Process<'a> {
     pub fn new(entry_point: usize, root: *mut OffsetPageTable<'a>, cr3: u64) -> Self {
         let kstack = alloc_kstack();
-        let tf_ptr = unsafe { kstack.add(KSTACK_SIZE - core::mem::size_of::<TrapFrame>()) } as *mut TrapFrame;
+        let tf_ptr = unsafe { kstack.add(KSTACK_SIZE - core::mem::size_of::<TrapFrame>()) }
+            as *mut TrapFrame;
 
         unsafe {
             *tf_ptr = TrapFrame {
@@ -119,7 +115,11 @@ impl<'a> Process<'a> {
     }
 }
 
-pub fn create_process<'a>(entry: usize, table: &'a mut OffsetPageTable<'a>, cr3: u64) -> Process<'a> {
+pub fn create_process<'a>(
+    entry: usize,
+    table: &'a mut OffsetPageTable<'a>,
+    cr3: u64,
+) -> Process<'a> {
     let stack_size = 4096 * 2;
     let code_addr = 0x4444_4484_0000;
     let stack_ptr = alloc_pages(table, code_addr, stack_size, true, true);
@@ -192,52 +192,54 @@ pub fn create_process<'a>(entry: usize, table: &'a mut OffsetPageTable<'a>, cr3:
 //     None
 // }
 
-pub unsafe extern "C" fn context_switch(current: *mut TrapFrame, next: *const TrapFrame, next_cr3: usize) {
-    asm!(
-    // Save registers to current
-    "mov [rdi + 0x00], r15",
-    "mov [rdi + 0x08], r14",
-    "mov [rdi + 0x10], r13",
-    "mov [rdi + 0x18], r12",
-    "mov [rdi + 0x20], r11",
-    "mov [rdi + 0x28], r10",
-    "mov [rdi + 0x30], r9",
-    "mov [rdi + 0x38], r8",
-    "mov [rdi + 0x40], rsi",
-    "mov [rdi + 0x48], rdi",
-    "mov [rdi + 0x50], rbp",
-    "mov [rdi + 0x58], rdx",
-    "mov [rdi + 0x60], rcx",
-    "mov [rdi + 0x68], rbx",
-    "mov [rdi + 0x70], rax",
-    // Load registers from next
-    "mov r15, [rsi + 0x00]",
-    "mov r14, [rsi + 0x08]",
-    "mov r13, [rsi + 0x10]",
-    "mov r12, [rsi + 0x18]",
-    "mov r11, [rsi + 0x20]",
-    "mov r10, [rsi + 0x28]",
-    "mov r9,  [rsi + 0x30]",
-    "mov r8,  [rsi + 0x38]",
-    "mov rsi, [rsi + 0x40]",
-    "mov rdi, [rsi + 0x48]",
-    "mov rbp, [rsi + 0x50]",
-    "mov rdx, [rsi + 0x58]",
-    "mov rcx, [rsi + 0x60]",
-    "mov rbx, [rsi + 0x68]",
-    "mov rax, [rsi + 0x70]",
-    // Switch page table
-    "mov cr3, rdx",
-    // Restore stack for iretq
-    "mov rsp, [rsi + 0x80]", // rsp
-    "push [rsi + 0x90]",     // ss
-    "push [rsi + 0x80]",     // rsp
-    "push [rsi + 0x88]",     // rflags
-    "push [rsi + 0x78]",     // cs
-    "push [rsi + 0x70]",     // rip
-    "iretq",
-    options(noreturn)
-    );
+pub extern "C" fn context_switch(current: *mut TrapFrame, next: *const TrapFrame, _next_cr3: usize) {
+    unsafe {
+        asm!(
+            // Save registers to current
+            "mov [rdi + 0x00], r15",
+            "mov [rdi + 0x08], r14",
+            "mov [rdi + 0x10], r13",
+            "mov [rdi + 0x18], r12",
+            "mov [rdi + 0x20], r11",
+            "mov [rdi + 0x28], r10",
+            "mov [rdi + 0x30], r9",
+            "mov [rdi + 0x38], r8",
+            "mov [rdi + 0x40], rsi",
+            "mov [rdi + 0x48], rdi",
+            "mov [rdi + 0x50], rbp",
+            "mov [rdi + 0x58], rdx",
+            "mov [rdi + 0x60], rcx",
+            "mov [rdi + 0x68], rbx",
+            "mov [rdi + 0x70], rax",
+            // Load registers from next
+            "mov r15, [rsi + 0x00]",
+            "mov r14, [rsi + 0x08]",
+            "mov r13, [rsi + 0x10]",
+            "mov r12, [rsi + 0x18]",
+            "mov r11, [rsi + 0x20]",
+            "mov r10, [rsi + 0x28]",
+            "mov r9,  [rsi + 0x30]",
+            "mov r8,  [rsi + 0x38]",
+            "mov rsi, [rsi + 0x40]",
+            "mov rdi, [rsi + 0x48]",
+            "mov rbp, [rsi + 0x50]",
+            "mov rdx, [rsi + 0x58]",
+            "mov rcx, [rsi + 0x60]",
+            "mov rbx, [rsi + 0x68]",
+            "mov rax, [rsi + 0x70]",
+            // Switch page table
+            "mov cr3, rdx",
+            // Restore stack for iretq
+            "mov rsp, [rsi + 0x80]", // rsp
+            "push [rsi + 0x90]",     // ss
+            "push [rsi + 0x80]",     // rsp
+            "push [rsi + 0x88]",     // rflags
+            "push [rsi + 0x78]",     // cs
+            "push [rsi + 0x70]",     // rip
+            "iretq",
+            options(noreturn)
+        )
+    };
 }
 
 // pub fn init_user_page_table() -> (OffsetPageTable<'static>, u64) {
