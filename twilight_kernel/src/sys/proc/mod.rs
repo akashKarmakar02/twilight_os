@@ -1,8 +1,27 @@
-use crate::sys::memory::alloc_pages;
+use crate::sys::memory::{active_level_4_table, alloc_pages, frame_allocator, phys_mem_offset};
 use alloc::boxed::Box;
 use core::arch::asm;
 use core::sync::atomic::{AtomicU16, Ordering};
-use x86_64::structures::paging::OffsetPageTable;
+use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PageTable};
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+use lazy_static::lazy_static;
+use object::{Object, ObjectSegment, SegmentFlags};
+use spin::Mutex;
+use x86_64::registers::control::Cr3;
+use x86_64::VirtAddr;
+use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
+use crate::kernel_utils::exec::jump_to_user;
+
+lazy_static! {
+    pub static ref PROCESS_TABLE: Mutex<ProcessTable> =  Mutex::new(ProcessTable::new());
+}
+
+const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
+const STACK_SIZE: usize = 0x4000;
+static NEXT_PID: AtomicU16 = AtomicU16::new(1);
+
 // ================== TrapFrame ==================
 
 #[repr(C)]
@@ -41,125 +60,166 @@ pub enum ProcessState {
     Dead,
 }
 
-#[repr(C)]
-pub struct Process<'a> {
-    pub frame: TrapFrame,
-    pub stack: *mut u8,
-    pub pid: u16,
-    pub root: *mut OffsetPageTable<'a>,
-    pub cr3: u64,
-    pub state: ProcessState,
+pub struct ProcessTable {
+    pub proc_list: VecDeque<Process>
 }
 
-impl<'a> Drop for Process<'a> {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.stack.is_null() {
-                let _ = Box::from_raw(self.stack);
-            }
-            // TODO: Free page table
-        }
+unsafe impl Send for ProcessTable {}
+
+impl ProcessTable {
+    fn new() -> ProcessTable {
+        ProcessTable { proc_list: VecDeque::new() }
     }
 }
 
-static NEXT_PID: AtomicU16 = AtomicU16::new(1);
-const KSTACK_SIZE: usize = 4096 * 4;
+impl ProcessTable {
 
-fn alloc_kstack() -> *mut u8 {
-    let boxed = Box::new([0u8; KSTACK_SIZE]);
-    Box::into_raw(boxed) as *mut u8
 }
 
-impl<'a> Process<'a> {
-    pub fn new(entry_point: usize, root: *mut OffsetPageTable<'a>, cr3: u64) -> Self {
-        let kstack = alloc_kstack();
-        let tf_ptr = unsafe { kstack.add(KSTACK_SIZE - core::mem::size_of::<TrapFrame>()) }
-            as *mut TrapFrame;
+#[repr(C)]
+pub struct Process {
+    // pub frame: TrapFrame,
+    pub stack: u64, // point to user_stack
+    pub stack_size: usize,
+    pub root: OffsetPageTable<'static>,
+    pub entry_point: u64,
+    pub cr3: PageTable,
+    pub pid: u16,
+    pub state: ProcessState,
+}
+
+
+impl Process {
+    pub fn new(content_buf: Vec<u8>) -> Self {
+
+        // unsafe {
+        //     *tf_ptr = TrapFrame {
+        //         r15: 0,
+        //         r14: 0,
+        //         r13: 0,
+        //         r12: 0,
+        //         r11: 0,
+        //         r10: 0,
+        //         r9: 0,
+        //         r8: 0,
+        //         rsi: 0,
+        //         rdi: 0,
+        //         rbp: 0,
+        //         rdx: 0,
+        //         rcx: 0,
+        //         rbx: 0,
+        //         rax: 0,
+        //         rip: entry_point,
+        //         cs: 0x1B | 3,
+        //         rflags: 0x202,
+        //         rsp: kstack.add(KSTACK_SIZE) as u64,
+        //         ss: 0x23 | 3,
+        //         error_code: 0,
+        //     };
+        // }
+
+        let (_, flags) = Cr3::read();
+
+        let page_table_frame = frame_allocator().allocate_frame().unwrap();
+
+        let page_table = crate::sys::memory::create_page_table(page_table_frame);
+
+        let cloned_page_table = page_table.clone();
+
+        let kernel_page_table = unsafe { active_level_4_table() };
+
+        let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
+
+        for (page, kernel_page) in pages {
+            *page = kernel_page.clone();
+        }
 
         unsafe {
-            *tf_ptr = TrapFrame {
-                r15: 0,
-                r14: 0,
-                r13: 0,
-                r12: 0,
-                r11: 0,
-                r10: 0,
-                r9: 0,
-                r8: 0,
-                rsi: 0,
-                rdi: 0,
-                rbp: 0,
-                rdx: 0,
-                rcx: 0,
-                rbx: 0,
-                rax: 0,
-                rip: entry_point,
-                cs: 0x1B | 3,
-                rflags: 0x202,
-                rsp: kstack.add(KSTACK_SIZE) as u64,
-                ss: 0x23 | 3,
-                error_code: 0,
-            };
+            Cr3::write(page_table_frame, flags);
+        };
+
+        let mut entry_point_addr: u64 = 0;
+        let mut mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+
+        let code_addr = 0x000000000000;
+
+        if content_buf.get(0..4) == Some(&ELF_MAGIC) {
+            if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
+                entry_point_addr = obj.entry();
+
+                for segment in obj.segments() {
+                    if let Ok(data) = segment.data() {
+                        let addr = code_addr + segment.address();
+                        let size = segment.size() as usize;
+
+                        let flags = segment.flags();
+                        match flags {
+                            SegmentFlags::Elf { p_flags } => {
+                                let _is_writable = (p_flags & object::elf::PF_W) != 0;
+                                let _is_executable = (p_flags & object::elf::PF_X) != 0;
+                                alloc_pages(&mut mapper, addr, size, true, true).unwrap();
+                            }
+                            _ => {}
+                        }
+
+                        // copy data after allocating
+                        let src = data.as_ptr();
+                        let dst = addr as *mut u8;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(src, dst, data.len());
+                            if size > data.len() {
+                                core::ptr::write_bytes(dst.add(data.len()), 0, size - data.len());
+                            }
+                        }
+                    }
+                }
+
+                let user_stack_top = VirtAddr::new(USER_STACK_TOP);
+                let user_stack_base = user_stack_top.as_u64() - STACK_SIZE as u64 ;
+
+                alloc_pages(
+                    &mut mapper,
+                    user_stack_base,
+                    STACK_SIZE as usize,
+                    true, // writable
+                    false // executable
+                ).unwrap();
+
+                // if let Some(phys) = mapper.translate_addr(VirtAddr::new(0x4000c9)) {
+                //     println!("Mapped to: {:#x}", phys);
+                // } else {
+                //     println!("Not mapped!");
+                // }
+            }
         }
 
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
 
         Process {
-            frame: unsafe { *tf_ptr },
-            stack: kstack,
+            // frame: unsafe { *tf_ptr },
+            stack: USER_STACK_TOP,
+            stack_size: STACK_SIZE,
+            entry_point: entry_point_addr,
             pid,
-            root,
-            cr3,
+            root: mapper,
+            cr3: cloned_page_table,
             state: ProcessState::Running,
         }
     }
-}
 
-pub fn create_process<'a>(
-    entry: usize,
-    table: &'a mut OffsetPageTable<'a>,
-    cr3: u64,
-) -> Process<'a> {
-    let stack_size = 4096 * 2;
-    let code_addr = 0x4444_4484_0000;
-    let stack_ptr = alloc_pages(table, code_addr, stack_size, true, true);
-    let stack_top = code_addr;
-
-    let frame = TrapFrame {
-        rax: 0,
-        rbx: 0,
-        rcx: 0,
-        rdx: 0,
-        rsi: 0,
-        rdi: 0,
-        rbp: 0,
-        r8: 0,
-        r9: 0,
-        r10: 0,
-        r11: 0,
-        r12: 0,
-        r13: 0,
-        r14: 0,
-        r15: 0,
-        rip: entry,
-        cs: 0x1B | 3,
-        rflags: 0x202,
-        rsp: stack_top,
-        ss: 0x23 | 3,
-        error_code: 0,
-    };
-
-    let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
-
-    Process {
-        frame,
-        stack: code_addr as *mut u8,
-        pid,
-        root: table as *mut _,
-        cr3,
-        state: ProcessState::Running,
+    pub fn exec(&self) {
+        jump_to_user(
+            0x000000000000,
+            self.entry_point,
+            self.stack,
+            USER_CS.bits() as u64,
+            USER_SS.bits() as u64,
+        );
     }
 }
+
+
+
 // ================== Scheduler ==================
 
 // static PROCESS_TABLE: Once<Mutex<Vec<Process>>> = Once::new();
@@ -310,3 +370,25 @@ pub extern "C" fn context_switch(current: *mut TrapFrame, next: *const TrapFrame
 //         }
 //     }
 // }
+
+
+
+
+pub fn init() {
+    let (page_table, _) = Cr3::read();
+    let page_table = crate::memory::create_page_table(page_table);
+    let cloned_page_table = page_table.clone();
+    let mut mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+
+    PROCESS_TABLE.lock().proc_list.push_back(
+        Process{
+            pid: NEXT_PID.fetch_add(1, Ordering::SeqCst),
+            stack: 0,
+            stack_size: 0,
+            entry_point: 0,
+            state: ProcessState::Running,
+            cr3: cloned_page_table,
+            root: mapper,
+        }
+    )
+}
