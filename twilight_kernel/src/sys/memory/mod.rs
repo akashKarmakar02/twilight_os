@@ -180,6 +180,25 @@ pub fn alloc_pages(
     Ok(())
 }
 
+pub fn dealloc_pages(
+    mapper: &mut OffsetPageTable,
+    addr: u64,
+    size: usize,
+) -> Result<(), ()> {
+    let size = size.saturating_sub(1) as u64;
+    let start_page: Page = Page::containing_address(VirtAddr::new(addr));
+    let end_page: Page = Page::containing_address(VirtAddr::new(addr + size));
+    let pages = Page::range_inclusive(start_page, end_page);
+    
+    for page in pages {
+        if let Ok((frame, mapping)) = mapper.unmap(page) {
+            mapping.flush();
+            serial_prtinln!("unmapped page {:?} to frame {:?}", page, frame);
+        }
+    }
+    
+    Ok(())
+}
 
 pub fn phys_addr(ptr: *const u8) -> u64 {
     let virt_addr = VirtAddr::new(ptr as u64);

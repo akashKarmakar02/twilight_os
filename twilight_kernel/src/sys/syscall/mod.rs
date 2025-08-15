@@ -43,7 +43,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_EXIT => {
             println!("Exiting with code {}", arg1);
 
-            0
+            service::exit()
         }
         SYS_NANOSLEEP => {
             let req_timespec_ptr = arg1 as *const Timespec;

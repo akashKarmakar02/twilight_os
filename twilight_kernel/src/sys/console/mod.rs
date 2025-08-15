@@ -20,8 +20,11 @@ static mut CONSOLE_HISTORY: Vec<String> = Vec::new();
 static mut CONSOLE_HISTORY_INDEX: Mutex<usize> = Mutex::new(0);
 
 pub fn init_console() {
+    #[allow(static_mut_refs)]
     unsafe {
-        DIR = String::from("/");
+        if DIR.is_empty() {
+            DIR = String::from("/");
+        }
     }
     handle_console_input();
 }

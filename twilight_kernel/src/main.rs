@@ -83,8 +83,6 @@ unsafe extern "C" fn kmain() -> ! {
 
     twilight_kernel::sys::console::init_console();
 
-    twilight_kernel::sys::console::start_kernel_console();
-    
     hcf()
 }
 

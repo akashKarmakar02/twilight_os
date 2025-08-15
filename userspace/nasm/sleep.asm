@@ -2,11 +2,9 @@ BITS 64
 GLOBAL _start
 
 SECTION .data
-    ; struct timespec { time_t tv_sec; long tv_nsec; }
-    ; On x86-64: time_t = 8 bytes, long = 8 bytes
-    req:
+   req:
         dq 3                  ; tv_sec = 3 seconds
-        dq 3000000000         ; tv_nsec = 3000000000 nanoseconds
+        dq 0                  ;tv_nsec = 3000000000 nanoseconds
 
 SECTION .text
 _start:
