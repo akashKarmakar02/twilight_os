@@ -2,6 +2,7 @@ use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;
 use crate::sys::proc::{Process, PROCESS_TABLE};
+use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use core::arch::asm;
 use spin::Mutex;
@@ -15,24 +16,30 @@ pub fn main(args: &[&str]) {
         return;
     }
 
-    let mut fs = unsafe { fs::MFS.get_unchecked().lock() };
-    #[allow(static_mut_refs)]
-    let pwd = unsafe { DIR.as_str() };
-    let inode = if pwd == "/" {
-        1
-    } else {
-        fs.resolve_path(pwd).unwrap()
-    };
-
-    if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
-        let content_buf = fs.read_file(inode).unwrap();
-        
-        let process = Process::new(content_buf.clone());
-
+    let mut content_buf = Vec::new();
+    {
+        let mut fs = unsafe { fs::MFS.get_unchecked().lock() };
         #[allow(static_mut_refs)]
-        unsafe {
-            PROCESS_TABLE.get_mut().unwrap().run(process);
+        let pwd = unsafe { DIR.as_str() };
+        let inode = if pwd == "/" {
+            1
+        } else {
+            fs.resolve_path(pwd).unwrap()
+        };
+    
+        if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
+            content_buf = fs.read_file(inode).unwrap();
+        } else {
+            println!("exec: {} no such file exists!", args[0]);
         }
+    }
+    
+    
+    let process = Process::new(content_buf.clone());
+
+    #[allow(static_mut_refs)]
+    unsafe {
+        PROCESS_TABLE.get_mut().unwrap().run(process);
     }
 }
 
