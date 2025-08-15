@@ -4,7 +4,9 @@ use x86_64::structures::idt::InterruptStackFrame;
 use crate::arch::x86_64::idt::{Registers, PICS};
 use crate::{print, println};
 use twilight_common::syscall::numbers::*;
+use twilight_common::syscall::types::Timespec;
 use crate::sys::syscall::service::read;
+use crate::task::executor::sleep;
 
 #[allow(dead_code)]
 pub extern "sysv64" fn syscall_handler(
@@ -40,6 +42,19 @@ pub extern "sysv64" fn syscall_handler(
         }
         SYS_EXIT => {
             println!("Exiting with code {}", arg1);
+
+            0
+        }
+        SYS_NANOSLEEP => {
+            let req_timespec_ptr = arg1 as *const Timespec;
+            let _rem_timespec_ptr = arg2 as *mut Timespec;
+
+            unsafe {
+                if !req_timespec_ptr.is_null() {
+                    let req = &*req_timespec_ptr;
+                    sleep(req.tv_sec as f64 + req.tv_nsec as f64 / 1000000000.0);
+                }
+            }
 
             0
         }

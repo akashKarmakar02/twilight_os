@@ -1,4 +1,5 @@
 pub mod numbers;
+pub mod types;
 
 use core::arch::asm;
 
