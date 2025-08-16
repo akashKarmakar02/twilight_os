@@ -137,7 +137,6 @@ impl Process {
         if content_buf.get(0..4) == Some(&ELF_MAGIC) {
             if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
                 entry_point_addr = obj.entry();
-                println!("entry point: {:#X}", entry_point_addr);
 
                 for segment in obj.segments() {
                     if let Ok(data) = segment.data() {
@@ -192,7 +191,6 @@ impl Process {
     }
 
     pub fn exec(&self) {
-        println!("exec process entry point: {:#X}", self.entry_point);
         jump_to_user(
             0x000000000000,
             self.entry_point,
@@ -203,7 +201,6 @@ impl Process {
     }
 
     pub fn cleanup(&mut self) {
-        println!("cleanup process");
         for (addr, size) in self.addr_size_vec.iter() {
             let addr = *addr;
             let size = *size;
@@ -221,8 +218,7 @@ pub fn id() -> u16 {
 pub fn exit() {
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-    let _process = table.proc_list.pop_back().unwrap();
-    // process.cleanup();
+    let mut process = table.proc_list.pop_back().unwrap();
 
     if let Some(k_process) = table.get_process(0) {
         let page_table_frame = k_process.page_table_frame;
@@ -231,6 +227,8 @@ pub fn exit() {
             Cr3::write(page_table_frame, flags);
         }
     }
+
+    process.cleanup();
 
     init_console();
 }
