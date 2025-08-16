@@ -31,6 +31,7 @@ pub fn main(args: &[&str]) {
             content_buf = fs.read_file(inode).unwrap();
         } else {
             println!("exec: {} no such file exists!", args[0]);
+            return;
         }
     }
     
@@ -51,7 +52,6 @@ pub fn jump_to_user(code_addr: u64, entry_point: u64, stack_top: u64, user_cs: u
     unsafe { Cr3::write(crate::sys::memory::get_page_table_frame(), flags) };
 
     let rip = code_addr + entry_point;
-    println!("Jumping to user mode at rip = {:#x}", rip);
     unsafe {
         asm!(
         "cli",              // Disable interrupts

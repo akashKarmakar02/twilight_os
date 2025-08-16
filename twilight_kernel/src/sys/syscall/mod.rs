@@ -41,8 +41,6 @@ pub extern "sysv64" fn syscall_handler(
             len
         }
         SYS_EXIT => {
-            println!("Exiting with code {}", arg1);
-
             service::exit()
         }
         SYS_NANOSLEEP => {

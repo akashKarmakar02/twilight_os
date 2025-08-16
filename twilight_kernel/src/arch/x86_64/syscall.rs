@@ -1,3 +1,4 @@
+use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::sys::syscall::syscall_handler;
 use crate::arch::x86_64::gdt::GdtEntryIndex;
 use core::arch::{asm, naked_asm};
@@ -74,6 +75,12 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "mov qword ptr gs:[8], rsp",
     "mov rsp, qword ptr gs:[0]",
 
+    "push {userland_ss}",
+    "push qword ptr gs:[8]",
+    "push r11",
+    "push {userland_cs}",
+    "push rcx",
+
     "push rax",
     "push rcx",
     "push rdx",
@@ -86,7 +93,10 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "mov rsi, rsp", // Arg #2: register list
     "mov rdi, rsp", // Arg #1: interupt frame
     "add rdi, 9 * 8", // 9 registers * 8 bytes
+
+    "cld",
     "call {x86_64_do_syscall}",
+    "cli",
 
     "pop r11",
     "pop r10",
@@ -98,14 +108,18 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "pop rcx",
     "pop rax",
 
+    "pop rcx",
+    "add rsp, 8",
+    "pop r11",
+    "pop rsp",
+
     // restore user stack register
     "swapgs",
-
     "sysretq",
 
     // constants:
-    // userland_cs = const USER_CS.bits(),
-    // userland_ss = const USER_SS.bits(),
+    userland_cs = const USER_CS.bits(),
+    userland_ss = const USER_SS.bits(),
     // // XXX: add 8 bytes to skip the x86_64 cpu local self ptr
     // tss_temp_ustack_off = const offset_of!(Tss, reserved2) + core::mem::size_of::<usize>(),
     // tss_rsp0_off = const offset_of!(Tss, rsp) + core::mem::size_of::<usize>(),
