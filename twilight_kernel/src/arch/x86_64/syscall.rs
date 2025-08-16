@@ -1,6 +1,7 @@
 use crate::sys::syscall::syscall_handler;
 use crate::arch::x86_64::gdt::GdtEntryIndex;
 use core::arch::{asm, naked_asm};
+use raw_cpuid::CpuId;
 
 pub const IA32_EFER: u32 = 0xc0000080;
 /// System Call Target Address (R/W).
@@ -33,19 +34,31 @@ pub fn rdmsr(msr: u32) -> u64 {
 }
 
 pub fn init() {
+    let cpuid = CpuId::new();
+
+    // Check if syscall is supported as it is a required CPU feature for aero to run.
+    let has_syscall = cpuid
+        .get_extended_processor_and_feature_identifiers()
+        .map_or(false, |i| i.has_syscall_sysret());
+
+    assert!(has_syscall);
+
     // Enable support for `syscall` and `sysret` instructions if the current
     // CPU supports them and the target pointer width is 64.
-    let kernel_code_sel = (GdtEntryIndex::KERNEL_CODE << 3) as u64;
-    let user_code_sel = ((GdtEntryIndex::USER_CODE << 3) | 3) as u64;
-    let star_val = ((user_code_sel & 0xffff) << 48) | ((kernel_code_sel & 0xffff) << 32);
-    wrmsr(IA32_STAR, star_val);
+
+    let syscall_base = (GdtEntryIndex::KERNEL_CODE << 3) as u64;
+    let sysret_base = (GdtEntryIndex::KERNEL_TLS << 3) | 3;
+
+    let star_hi = syscall_base as u32 | (sysret_base as u32) << 16;
+
+    wrmsr(IA32_STAR, (star_hi as u64) << 32);
 
     // LSTAR -> entry point address for syscall in 64-bit mode
     wrmsr(IA32_LSTAR, x86_64_syscall_handler as u64);
 
     // FMASK -> which RFLAGS bits to clear on syscall entry. Usually clear IF (bit 9).
     // Clear IF only:
-    wrmsr(IA32_FMASK, 1 << 9);
+    wrmsr(IA32_FMASK, 0x300);
 
     // Enable EFER.SCE
     let efer = rdmsr(IA32_EFER);
@@ -56,7 +69,11 @@ pub fn init() {
 #[allow(named_asm_labels)]
 unsafe extern "C" fn x86_64_syscall_handler() {
     naked_asm!(
-    // make the GS base point to the kernel TLS
+    "swapgs",
+
+    "mov qword ptr gs:[8], rsp",
+    "mov rsp, qword ptr gs:[0]",
+
     "push rax",
     "push rcx",
     "push rdx",
@@ -80,6 +97,10 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "pop rdx",
     "pop rcx",
     "pop rax",
+
+    // restore user stack register
+    "swapgs",
+
     "sysretq",
 
     // constants:

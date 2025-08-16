@@ -1,15 +1,15 @@
 extern crate alloc;
 
+use crate::arch::x86_64::halt;
 use crate::sys::console::writer::clear_screen;
+use crate::sys::tty::read_char;
 use crate::{print, println, serial_prtinln};
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
-use crate::arch::x86_64::halt;
-use crate::sys::tty::read_char;
 
-pub mod writer;
 pub mod font;
+pub mod writer;
 
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
 pub static CURSOR_POSITION: Mutex<usize> = Mutex::new(0);
@@ -20,8 +20,11 @@ static mut CONSOLE_HISTORY: Vec<String> = Vec::new();
 static mut CONSOLE_HISTORY_INDEX: Mutex<usize> = Mutex::new(0);
 
 pub fn init_console() {
+    #[allow(static_mut_refs)]
     unsafe {
-        DIR = String::from("/");
+        if DIR.is_empty() {
+            DIR = String::from("/");
+        }
     }
     handle_console_input();
 }
@@ -42,10 +45,16 @@ fn handle_console_input() {
         match c {
             '\n' => {
                 print!("\n");
-                let mut cmd_line = STDIO.lock();
-                unsafe {
-                    #[allow(static_mut_refs)]
-                    CONSOLE_HISTORY.push(cmd_line.clone());
+                let cmd_line;
+                {
+                    let mut stdio = STDIO.lock();
+                    cmd_line = stdio.clone();
+                    unsafe {
+                        #[allow(static_mut_refs)]
+                        CONSOLE_HISTORY.push(stdio.clone());
+                    }
+
+                    stdio.clear();
                 }
                 let args: Vec<&str> = cmd_line.split_whitespace().collect();
 
@@ -54,12 +63,11 @@ fn handle_console_input() {
                 } else if !args.is_empty() {
                     exec(args[0], &[]);
                 }
-                cmd_line.clear();
                 start_kernel_console();
 
                 // reset history index
                 #[allow(static_mut_refs)]
-                let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+                let mut idx = unsafe { CONSOLE_HISTORY_INDEX.lock() };
                 *idx = 0;
             }
             '\t' => {
@@ -87,7 +95,7 @@ fn handle_console_input() {
                 start_kernel_console();
 
                 #[allow(static_mut_refs)]
-                let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+                let mut idx = unsafe { CONSOLE_HISTORY_INDEX.lock() };
 
                 #[allow(static_mut_refs)]
                 let len = unsafe { CONSOLE_HISTORY.len() };
@@ -117,7 +125,7 @@ fn handle_console_input() {
                 start_kernel_console();
 
                 #[allow(static_mut_refs)]
-                let mut idx= unsafe { CONSOLE_HISTORY_INDEX.lock() };
+                let mut idx = unsafe { CONSOLE_HISTORY_INDEX.lock() };
 
                 #[allow(static_mut_refs)]
                 let len = unsafe { CONSOLE_HISTORY.len() };
@@ -167,7 +175,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "meminfo" => crate::kernel_utils::meminfo::main(),
         "uname" => {
             println!("TwilightOS Twilight-Kernel 0.1 DevBuild (23/03/25)")
-        },
+        }
         "dealloc" => crate::kernel_utils::dealloc::main(args),
         "allocate" => crate::kernel_utils::allocate::main(),
         "mkfs" => crate::kernel_utils::mkfs::main(args),
@@ -175,7 +183,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "ls" => crate::kernel_utils::ls::main(args, "/"),
         "pitch" => {
             println!("{}", crate::sys::framebuffer::get_pitch());
-        },
+        }
         "df" => crate::kernel_utils::df::main(args),
         "touch" => crate::kernel_utils::touch::main(args),
         "mkdir" => crate::kernel_utils::mkdir::main(args),

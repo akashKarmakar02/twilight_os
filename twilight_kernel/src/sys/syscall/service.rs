@@ -14,3 +14,9 @@ pub fn read(handler: usize, buf: &mut [u8], len: usize) -> usize {
 
     0
 }
+
+pub fn exit() -> usize {
+    crate::sys::proc::exit();
+
+    0
+}

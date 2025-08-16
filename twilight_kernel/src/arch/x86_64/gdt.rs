@@ -310,10 +310,13 @@ impl SegmentSelector {
 
 
 pub fn init() {
-    let gdt_descriptor = GdtDescriptor::new(
-        (size_of::<[GdtEntry; BOOT_GDT_ENTRY_COUNT]>() - 1) as u16,
-        addr_of!(BOOT_GDT).addr() as u64,
-    );
+    let gdt_descriptor = {
+        GdtDescriptor::new(
+            (size_of::<[GdtEntry; BOOT_GDT_ENTRY_COUNT]>() - 1) as u16,
+            addr_of!(BOOT_GDT).addr() as u64,
+        )
+    };
+
 
     load_gdt(&gdt_descriptor);
 
@@ -454,13 +457,13 @@ fn load_cs(selector: SegmentSelector) {
     // 64-bit far calls/jumps in long-mode, AMD does not.
     unsafe {
         asm!(
-            "push {selector}",
-            "lea {tmp}, [1f + rip]",
-            "push {tmp}",
-            "retfq",
-            "1:",
-            selector = in(reg) u64::from(selector.bits()),
-            tmp = lateout(reg) _,
+        "push {selector}",
+        "lea {tmp}, [1f + rip]",
+        "push {tmp}",
+        "retfq",
+        "1:",
+        selector = in(reg) u64::from(selector.bits()),
+        tmp = lateout(reg) _,
         );
     }
 }

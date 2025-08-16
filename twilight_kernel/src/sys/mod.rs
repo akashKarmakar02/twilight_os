@@ -6,4 +6,5 @@ pub mod memory;
 pub mod pci;
 pub mod syscall;
 mod tty;
+pub mod proc;
 pub(crate) mod acpi;

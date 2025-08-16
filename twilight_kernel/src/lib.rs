@@ -49,6 +49,7 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
 
     arch::x86_64::syscall::init();
 
+    sys::proc::init();
 
     x86_64::instructions::interrupts::enable();
 }
@@ -61,6 +62,18 @@ macro_rules! log {
     });
 }
 
+#[macro_export]
+macro_rules! extern_sym {
+    ($sym:ident) => {{
+        unsafe extern "C" {
+            static $sym: ::core::ffi::c_void;
+        }
+
+        // The value is not accessed, we only take its address. The `addr_of!()` ensures
+        // that no intermediate references is created.
+        ::core::ptr::addr_of!($sym)
+    }};
+}
 
 #[alloc_error_handler]
 fn alloc_error(layout: alloc::alloc::Layout) -> ! {
