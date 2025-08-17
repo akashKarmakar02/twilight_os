@@ -175,6 +175,7 @@ pub fn lookup_device_name(vendor: u16, device: u16) -> &'static str {
         (0x8086, 0x7020) => "82371SB PIIX3 USB [Natoma/Triton II]",
         (0x8086, 0x2668) => "82801FB/FBM/FR/FW/FRW (ICH6 Family) High Definition Audio Controller",
         (0x8086, 0x100F) => "Intel 82545EM Gigabit Ethernet Controller",
+        (0x1AF4, 0x1050) => "Red Hat, Inc. Virtio GPU",
 
         // Realtek
         (0x10ec, 0x8139) => "Realtek RTL-8139",

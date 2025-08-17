@@ -20,7 +20,8 @@ pub fn init_heap(
 
     let page_range = {
         let heap_start = VirtAddr::new(HEAP_START as u64);
-        let head_end = heap_start + heap_size / 2 - 1u64;
+        // limiting kernel heep to 16mb
+        let head_end = VirtAddr::new(heap_start.as_u64()) + 16 * 1024 * 1024;
         let heap_start_page = Page::containing_address(heap_start);
         let heap_end_page = Page::containing_address(head_end);
         Page::range_inclusive(heap_start_page, heap_end_page)
