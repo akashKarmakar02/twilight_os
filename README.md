@@ -31,7 +31,10 @@ It currently supports x86_64 architecture. future plans include support for ARM/
 - [x] PCI device detection
 - [x] TFS Filesystem (in heavy development)
 - [x] Network Stack
-- [ ] Userspace utilities (In progress)
+- [x] Userspace utilities (work remains on frame deallocation and process)
+- [x] Basic shell
+- [x] RTC
+- [x] ATA
 - [ ] Kernel Level NES Emulator
 - [ ] DOOM (because why not?)
 
