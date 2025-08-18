@@ -48,7 +48,7 @@ run-x86_64: $(IMAGE_NAME).iso
 		qemu-img create -f raw hdd.img 16M; \
 	fi
 	qemu-system-$(KARCH) \
-		-m 50 \
+		-m 1024 \
 		-enable-kvm \
 		-netdev user,id=net0,hostfwd=tcp::8080-:80 -device rtl8139,netdev=net0 \
 		-smp 4 \
@@ -59,7 +59,9 @@ run-x86_64: $(IMAGE_NAME).iso
 		-cdrom $(IMAGE_NAME).iso \
 		-serial stdio \
 		-d int,guest_errors,unimp \
-	  	-D qemu.log
+	  	-D qemu.log \
+        -device virtio-vga-gl,max_outputs=1 \
+        -display sdl,gl=on
 
 .PHONY: run-hdd-x86_64
 run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd
