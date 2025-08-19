@@ -2,7 +2,6 @@ use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs;
 use crate::sys::proc::{Process, PROCESS_TABLE};
-use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use core::arch::asm;
 use spin::Mutex;
@@ -16,7 +15,7 @@ pub fn main(args: &[&str]) {
         return;
     }
 
-    let mut content_buf = Vec::new();
+    let content_buf;
     {
         let mut fs = unsafe { fs::MFS.get_unchecked().lock() };
         #[allow(static_mut_refs)]
