@@ -1,5 +1,5 @@
 use crate::sys::console::font::PSF_FONTS;
-use crate::sys::framebuffer::{FRAMEBUFFER, convert_color};
+use crate::sys::framebuffer::{FRAMEBUFFER, convert_color, get_framebuffer};
 use crate::sys::fs::{VfsNode};
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
@@ -35,8 +35,8 @@ pub fn get_writer() -> &'static mut Writer {
 // apply background color to the kernel shell using framebuffer
 fn apply_console_bg() {
     // using fixed size (because we don't have ioctl)
-    let width = 1280;
-    let height = 720;
+    let width = get_framebuffer().width as usize;
+    let height = get_framebuffer().height as usize;
     let total_pixels = width * height;
 
     let mut buf = vec![0u8; total_pixels * 4];
@@ -65,7 +65,7 @@ pub fn clear_screen(clear_buffer: bool) {
 }
 
 pub fn print(x: usize, y: usize, screen_char: ScreenChar) {
-    let pitch = 1280; // Width of the framebuffer in pixels
+    let pitch = get_framebuffer().width as usize; // Width of the framebuffer in pixels
 
     let color = screen_char.color;
     let ascii = screen_char.char;
@@ -96,7 +96,7 @@ pub fn print(x: usize, y: usize, screen_char: ScreenChar) {
 }
 
 pub fn clear_char(x: usize, y: usize, color: u32) {
-    let pitch = 1280;
+    let pitch = get_framebuffer().width as usize;
     let char_width = 8;
     let char_height = 16;
 
@@ -134,8 +134,8 @@ impl Writer {
             row_position: 0,
             buffer: Vec::new(),
             color,
-            screen_width: 1280,
-            screen_height: 720,
+            screen_width: get_framebuffer().width,
+            screen_height: get_framebuffer().height,
             cursor_visible: true,
             cursor_timer: 0,
         }
@@ -239,7 +239,7 @@ impl Writer {
             let color = 0xFFFFFFu32; // Cursor color (white)
             let color_bytes = convert_color(color);
 
-            let pitch = 1280; // Framebuffer width in pixels
+            let pitch = get_framebuffer().width as usize; // Framebuffer width in pixels
             let char_width = 8;
             let char_height = 16;
 
@@ -281,7 +281,7 @@ impl Writer {
         let color = 0x101010u32; // Cursor color (white)
         let color_bytes = convert_color(color);
 
-        let pitch = 1280; // Framebuffer width in pixels
+        let pitch = get_framebuffer().width as usize; // Framebuffer width in pixels
         let char_width = 8;
         let char_height = 16;
 
