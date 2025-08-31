@@ -5,6 +5,7 @@ use crate::arch::x86_64::idt::{Registers, PICS};
 use crate::{print, println};
 use twilight_common::syscall::numbers::*;
 use twilight_common::syscall::types::Timespec;
+use crate::driver::timer::cmos::CMOS;
 use crate::sys::syscall::service::read;
 use crate::task::executor::sleep;
 
@@ -42,6 +43,16 @@ pub extern "sysv64" fn syscall_handler(
         }
         SYS_EXIT => {
             service::exit()
+        }
+        SYS_TIME => {
+            let out_ptr = arg1 as *mut i64; // time_t is i64
+            let mut cmos = CMOS::new();
+            let unix_time: u64 = cmos.unix_time();
+
+            if !out_ptr.is_null() {
+                unsafe { *out_ptr = unix_time as i64 };
+            }
+            unix_time as usize
         }
         SYS_NANOSLEEP => {
             let req_timespec_ptr = arg1 as *const Timespec;
