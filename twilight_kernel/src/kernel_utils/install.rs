@@ -68,9 +68,11 @@ pub fn main() {
         copy_file!("/bin/exit42", true);
         copy_file!("/bin/greet", true);
         copy_file!("/bin/sleep", true);
+        copy_file!("/bin/hello", true);
         
     }
 }
+
 
 
 fn copy_file(path: &str, data: &[u8], verbose: bool) {
