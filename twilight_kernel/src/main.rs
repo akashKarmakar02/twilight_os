@@ -5,7 +5,7 @@ extern crate alloc;
 use core::arch::asm;
 use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
-use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest};
+use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest, StackSizeRequest};
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
 use twilight_kernel::{println, serial_print, serial_prtinln};
 
@@ -23,6 +23,10 @@ static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
+static STACK: StackSizeRequest = StackSizeRequest::new().with_size(0x1000 * 32); // 16KiB of stack for both the BSP and the APs
+
+#[used]
+#[unsafe(link_section = ".requests")]
 static MEMMAP: MemoryMapRequest = MemoryMapRequest::new();
 
 #[used]
@@ -32,6 +36,12 @@ static MP: MpRequest = MpRequest::new();
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
+
+    unsafe {
+        core::ptr::read_volatile(STACK.get_response().unwrap());
+    }
+
+    twilight_kernel::driver::cpu::init_cpu_x86_64();
 
     let mut framebuffer: Option<Framebuffer> = None;
     let mut hhdm_response: Option<&HhdmResponse> = None;
