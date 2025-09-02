@@ -1,9 +1,9 @@
-use alloc::string::{String, ToString};
-use x86_64::instructions::interrupts;
 use crate::arch::x86_64::halt;
 use crate::driver::disk::ata::{FileIO, IO};
-use crate::{print, println};
 use crate::sys::buffer::stdin::STDIN;
+use crate::{print, println};
+use alloc::string::{String, ToString};
+use x86_64::instructions::interrupts;
 
 #[allow(dead_code)]
 #[derive(Debug)]

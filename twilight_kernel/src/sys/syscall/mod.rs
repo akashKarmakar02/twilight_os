@@ -1,13 +1,14 @@
 mod service;
 
-use x86_64::structures::idt::InterruptStackFrame;
 use crate::arch::x86_64::idt::{Registers, PICS};
-use crate::{print, println};
-use twilight_common::syscall::numbers::*;
-use twilight_common::syscall::types::Timespec;
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::syscall::service::read;
 use crate::task::executor::sleep;
+use crate::{print, println};
+use alloc::string::String;
+use twilight_common::syscall::numbers::*;
+use twilight_common::syscall::types::Timespec;
+use x86_64::structures::idt::InterruptStackFrame;
 
 #[allow(dead_code)]
 pub extern "sysv64" fn syscall_handler(
@@ -36,7 +37,7 @@ pub extern "sysv64" fn syscall_handler(
             let res = unsafe { core::slice::from_raw_parts(buf, len) };
 
             if file_descriptor == 1 {
-                print!("{}", core::str::from_utf8(res).unwrap());
+                print!("{}", String::from_utf8_lossy(res));
             }
 
             len
@@ -72,7 +73,7 @@ pub extern "sysv64" fn syscall_handler(
             0
         },
     };
-    
+
     regs.rax = res;
 
     unsafe { PICS.lock().notify_end_of_interrupt(0x80) };
