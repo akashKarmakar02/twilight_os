@@ -9,7 +9,7 @@ fn main() {
     let bin_out_dir = Path::new("../rootfs/bin");
 
     fs::create_dir_all(&obj_out_dir).expect("Failed to create target/nasm/");
-    fs::create_dir_all(&bin_out_dir).expect("Failed to create target/nasm-bin/");
+    fs::create_dir_all(&bin_out_dir).expect("Failed to create rootfs/bin/");
 
     for entry in fs::read_dir(nasm_dir).expect("Failed to read nasm folder") {
         let entry = entry.expect("Invalid dir entry");
@@ -48,6 +48,57 @@ fn main() {
                 .expect("Failed to run ld");
             if !ld_status.success() {
                 panic!("ld failed to link object: {}", obj_path.display());
+            }
+        }
+    }
+
+    let c_dir = Path::new("apps");
+    let obj_out_dir = Path::new("target/apps");
+
+    fs::create_dir_all(&obj_out_dir).expect("Failed to create target/apps/");
+
+    for entry in fs::read_dir(c_dir).expect("Failed to read nasm folder") {
+        let entry = entry.expect("Invalid dir entry");
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) == Some("c") {
+            let filename = path.file_stem().unwrap().to_str().unwrap();
+
+            let obj_path = obj_out_dir.join(format!("{filename}.o"));
+            let bin_path = bin_out_dir.join(filename);
+            println!("cargo:rerun-if-changed={}", path.display());
+
+            let c_status = Command::new("gcc")
+                .args([
+                    "-ffreestanding",
+                    "-fno-pie",
+                    "-mno-red-zone",
+                    "-c",
+                    path.to_str().unwrap(),
+                    "-o",
+                    obj_path.to_str().unwrap(),
+                ])
+                .status()
+                .unwrap();
+
+            if !c_status.success() {
+                panic!("GCC failed for file: {}", path.display());
+            }
+
+            let ld_status = Command::new("ld")
+                .args([
+                    "-nostdlib",
+                    "-static",
+                    "libc/crt/crt0.o",
+                    obj_path.to_str().unwrap(),
+                    "twilight_c.a",
+                    "-o", bin_path.to_str().unwrap()
+                ])
+                .status()
+                .unwrap();
+
+            if !ld_status.success() {
+                panic!("LD failed");
             }
         }
     }
