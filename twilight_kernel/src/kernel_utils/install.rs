@@ -69,6 +69,7 @@ pub fn main() {
         copy_file!("/bin/greet", true);
         copy_file!("/bin/sleep", true);
         copy_file!("/bin/date", true);
+        copy_file!("/bin/bc", true);
         copy_file!("/bin/hello", true);
     }
 }
