@@ -10,3 +10,4 @@ twilight-os.hdd
 qemu.log
 
 /userspace/target
+/userspace/twilight_c.a
