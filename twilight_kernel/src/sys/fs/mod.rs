@@ -1,13 +1,16 @@
 pub mod twilight_fs;
 pub mod ram_fs;
+pub mod vfs;
 
 use crate::println;
 use crate::sys::fs::twilight_fs::MinixFs;
 use crate::sys::fs::ram_fs::RamFS;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
+use crate::sys::fs::vfs::VFS;
 
 pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
 pub static MFS: OnceCell<Mutex<MinixFs>> = OnceCell::uninit();
@@ -34,6 +37,10 @@ pub fn init(show_log: bool) {
         for dsk in 0..2 {
             if let Ok(mfs) = MinixFs::check_ata(bus, dsk) {
                 MFS.try_init_once(|| Mutex::new(mfs)).unwrap();
+                #[allow(static_mut_refs)]
+                unsafe {
+                    VFS.get_mut().mount("/", Arc::new(Mutex::new(MinixFs::check_ata(bus, dsk).unwrap())));
+                }
                 if show_log {
                     println!(
                         "\x1b[93m[{:.6}]\x1b[0m MinixFS Superblock found in ATA {}:{}",

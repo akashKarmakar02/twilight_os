@@ -1,27 +1,13 @@
 use crate::println;
 use crate::sys::console::DIR;
-use crate::sys::fs::twilight_fs::FsError::FileAlreadyExists;
+use crate::sys::fs::vfs::VFS;
 
 pub fn main(args: &[&str]) {
     #[allow(static_mut_refs)]
     let pwd = unsafe { DIR.as_str() };
-    
-    let mut inode = 1;
 
-    let mut fs = unsafe { crate::sys::fs::MFS.get_unchecked().lock() };
-
-    if pwd != "/" {
-        inode = fs.resolve_path(pwd).unwrap();
-    }
-    if let Err(e) = fs.create_file(inode, args[0]) {
-        match e {
-            FileAlreadyExists => {
-                println!("{}: already exists", args[0]);
-                return;
-            }
-            _ => {
-                println!("Failed to create file");
-            }
-        }
+    #[allow(static_mut_refs)]
+    if let Err(_) = unsafe { VFS.get_mut().touch(pwd, args[0]) } {
+        println!("touch: {}: File exists", args[0]);
     }
 }

@@ -6,9 +6,11 @@ pub mod metadata;
 
 use crate::driver::disk::{BlockDevice, BlockDeviceIO};
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
+use crate::sys::fs::vfs::{FileSystem, FileType, Metadata};
 use crate::{driver, println};
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::size_of;
 
@@ -552,18 +554,19 @@ impl MinixFs {
         Ok(new_inode_num)
     }
 
-    pub fn list_dir(&mut self, dir_inode_num: u16) -> Result<(), &'static str> {
+    pub fn list_dir(&mut self, dir_inode_num: u16) -> Result<Vec<String>, &'static str> {
         let dir_inode = self.read_inode(dir_inode_num)?;
+        let mut res = Vec::new();
 
         if dir_inode.zones[0] == 0 {
             return Err("Directory has no data block");
         }
 
         let mut buffer = [0u8; 512];
-        if self.device.read(dir_inode.zones[0] as u32, &mut buffer).is_err(){
-            return Err("Failed to read directory block");       
+        if self.device.read(dir_inode.zones[0] as u32, &mut buffer).is_err() {
+            return Err("Failed to read directory block");
         };
-        
+
         let mut offset = 0;
         while offset + 16 <= dir_inode.size as usize {
             let entry = unsafe {
@@ -573,24 +576,13 @@ impl MinixFs {
             let name = core::str::from_utf8(&entry.name)
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            let child_inode = self.read_inode(entry.inode)?;
-            let file_type = match child_inode.mode & 0xF000 {
-                0x4000 => "dir",
-                0x8000 => "file",
-                _ => "unknown",
-            };
 
-            if file_type == "dir" {
-                println!("\x1b[94m{}\x1b[0m", name);
-            } else {
-                println!("{}", name);
-            }
-            
-            
+            res.push(String::from(name));
+
             offset += size_of::<DirEntry>();
         }
 
-        Ok(())
+        Ok(res)
     }
 
     pub fn create_dir(&mut self, parent_inode_num: u16, name: &str) -> Result<u16, FsError> {
@@ -896,4 +888,95 @@ impl MinixFs {
         Err(FileNotFound)
     }
 
+}
+
+impl FileSystem for MinixFs {
+    fn read(&mut self, path: &str) -> Result<Vec<u8>, ()> {
+        if let Ok(inode) = self.resolve_path(path) {
+            Ok(self.read_file(inode).unwrap())
+        } else {
+            Err(())
+        }
+    }
+
+    fn write(&mut self, path: &str, data: &[u8]) -> Result<(), ()> {
+        if let Ok(inode) = self.resolve_path(path) {
+            self.write_file(inode, data).unwrap();
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
+        if let Ok(inode_num) =  self.resolve_path(parent_dir) {
+            let inode = self.read_inode(inode_num).unwrap();
+            if inode.mode & 0xF000 == 0x4000 {
+                if let Err(_) = self.create_dir(inode_num, path) {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            } else {
+                Err(())
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    fn rmdir(&mut self, path: &str) -> Result<(), ()> {
+        if let Err(_) = self.remove_entry(path) {
+            Err(())
+        } else { 
+            Ok(())
+        }
+    }
+
+    fn ls(&mut self, path: &str) -> Result<Vec<String>, ()> {
+        if let Ok(inode) = self.resolve_path(path) {
+            match self.list_dir(inode) {
+                Ok(entries) => Ok(entries),
+                Err(_) => Err(())
+            }
+        } else {
+            Err(())
+        }
+    }
+
+    fn rm(&mut self, path: &str) -> Result<(), ()> {
+        if let Err(_) = self.remove_entry(path) {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
+        if let Ok(inode_num) =  self.resolve_path(parent_path) {
+            let inode = self.read_inode(inode_num).unwrap();
+            if inode.mode & 0xF000 == 0x4000 {
+                self.create_file(inode_num, filename).unwrap();
+                Ok(())
+            } else {
+                Err(())
+            }
+        } else {
+            Err(())
+        }
+    }
+
+    fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
+        if let Ok(inode_num) = self.resolve_path(path) {
+            let inode = self.read_inode(inode_num).unwrap();
+
+            if inode.mode & 0xF000 == 0x4000 {
+                Ok(Metadata { file_type: FileType::Dir })
+            } else {
+                Ok(Metadata { file_type: FileType::File })
+            }
+        } else {
+            Err(())
+        }
+    }
 }

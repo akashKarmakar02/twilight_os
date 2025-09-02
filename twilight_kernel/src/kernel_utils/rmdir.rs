@@ -20,7 +20,7 @@ pub fn main(args: &[&str]) {
     };
 
     #[allow(static_mut_refs)]
-    if let Err(_) = unsafe { VFS.get_mut().rm(rm_path.as_str()) } {
-        println!("rm: {}: No such file or directory", args[0]);
+    if let Err(_) = unsafe { VFS.get_mut().rmdir(rm_path.as_str()) } {
+        println!("rmdir: {}: No such file or directory", args[0]);
     }
 }

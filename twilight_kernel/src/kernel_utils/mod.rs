@@ -1,8 +1,6 @@
-pub mod allocate;
 pub mod cat;
 pub mod cd;
 pub mod date;
-pub mod dealloc;
 pub mod df;
 pub mod echo;
 pub mod ls;
@@ -17,3 +15,4 @@ pub mod install;
 pub mod exec;
 pub mod dhcp;
 pub mod vi;
+pub mod rmdir;

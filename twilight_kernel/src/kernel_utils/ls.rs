@@ -1,18 +1,15 @@
 use crate::println;
-use crate::sys::{console, fs};
+use crate::sys::fs::vfs::VFS;
+use crate::sys::console;
 
 pub fn main(_args: &[&str], _ctx: &str) {
     #[allow(static_mut_refs)]
     let pwd = unsafe { console::DIR.as_str() };
-    let mut fs = unsafe { fs::MFS.get_unchecked().lock() };
-    
-    let mut inode = 1u16;
-    
-    if pwd != "/" {
-        inode = fs.resolve_path(pwd).unwrap_or_else(|_| 1)
-    }
-    
-    if let Err(e) = fs.list_dir(inode) {
-        println!("Error: {}", e);
+
+    #[allow(static_mut_refs)]
+    if let Ok(entries) = unsafe { VFS.get_mut().ls(pwd) } {
+        for entry in entries {
+            println!("{}", entry);
+        }
     }
 }

@@ -1,6 +1,7 @@
 use crate::println;
 use crate::sys::console::DIR;
-use crate::sys::fs;
+use crate::sys::fs::vfs::VFS;
+use alloc::format;
 use alloc::string::String;
 
 pub fn main(args: &[&str]) {
@@ -8,33 +9,31 @@ pub fn main(args: &[&str]) {
         return;
     }
 
-    let mut fs = unsafe { fs::MFS.get_unchecked().lock() };
     #[allow(static_mut_refs)]
     let pwd = unsafe { DIR.as_str() };
-    let inode = if pwd == "/" { 1 } else { fs.resolve_path(pwd).unwrap() };
-
     if args[0] == ">" {
-        let inode = match fs.find_dir_entry(inode, args[1]).unwrap() {
-            Some(inode) => inode,
-            None => {
-                fs.create_file(inode, args[1]).unwrap()
-            },
-        };
-
-        if args.len() > 2 {
-            fs.write_file(inode, args[2..].join(" ").as_bytes()).unwrap();
+        #[allow(static_mut_refs)]
+        if let Ok(_) = unsafe { VFS.get_mut().read(format!("{}/{}", pwd, args[1]).as_str()) } {
+            #[allow(static_mut_refs)]
+            if let Err(_) = unsafe { VFS.get_mut().write(format!("{}/{}", pwd, args[1]).as_str(), args[2..].join(" ").as_bytes()) } {
+                println!("cat: {}: Failed to write", args[1]);
+            }
+        } else {
+            #[allow(static_mut_refs)]
+            if let Err(_) = unsafe { VFS.get_mut().touch(pwd, args[1]) } {
+                println!("cat: {}: Failed to create", args[1]);
+            } else {
+                #[allow(static_mut_refs)]
+                unsafe { VFS.get_mut().write(format!("{}/{}", pwd, args[1]).as_str(), args[2..].join(" ").as_bytes()) }.unwrap();
+            }
         }
 
         return;
     }
 
-    if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
-        let content_buf = fs.read_file(inode);
-
-        println!(
-            "{}",
-            String::from_utf8_lossy(content_buf.unwrap().as_slice())
-        );
+    #[allow(static_mut_refs)]
+    if let Ok(content) = unsafe { VFS.get_mut().read(format!("{}/{}", pwd, args[0]).as_str()) } {
+        println!("{}", String::from_utf8_lossy(content.as_slice()));
     } else {
         println!("cat: {}: No such file or directory", args[0]);
     }

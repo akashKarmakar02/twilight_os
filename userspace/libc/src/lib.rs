@@ -4,6 +4,7 @@ mod unistd;
 
 use crate::unistd::_exit;
 
+#[allow(dead_code)]
 type SsizeT = isize;
 type SizeT = usize;
 

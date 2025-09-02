@@ -21,7 +21,7 @@ pub fn main(args: &[&str]) {
     } else {
         1
     };
-    
+
     if let Ok(inode) = fs.find_dir_entry(parent_inode, args[0]) {
         if inode.is_none() {
             println!("cd: no such file or directory");

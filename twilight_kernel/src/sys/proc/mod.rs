@@ -2,7 +2,7 @@ use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::kernel_utils::exec::jump_to_user;
 use crate::println;
 use crate::sys::console::init_console;
-use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset, virt_to_phys};
+use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
@@ -128,16 +128,16 @@ impl Process {
             Cr3::write(page_table_frame, flags);
         };
 
-        let mut entry_point_addr: u64 = 0;
+        let _entry_point_addr: u64 = 0;
         let mut mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
         let code_addr = 0x000000000000;
         let user_stack_top = VirtAddr::new(USER_STACK_TOP);
 
         let mut entry_point_addr: u64 = 0;
-        let mut phdr_addr: u64 = 0;
-        let mut phent: u64 = 0;
-        let mut phnum: u64 = 0;
+        let _phdr_addr: u64 = 0;
+        let _phent: u64 = 0;
+        let _phnum: u64 = 0;
 
         let mut ph_count = 0;
 
@@ -288,12 +288,12 @@ fn build_initial_stack(
     let mut string_ptrs: Vec<u64> = Vec::new();
 
     // Helper: write a byte slice to stack (null-terminated) and return the pointer written.
-    unsafe fn push_bytes_on_stack(rsp: &mut u64, bytes: &[u8]) -> u64 {
+    fn push_bytes_on_stack(rsp: &mut u64, bytes: &[u8]) -> u64 {
         *rsp = rsp.wrapping_sub((bytes.len() as u64) + 1);
         let dst = *rsp as *mut u8;
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len()) };
         // trailing null
-        *dst.add(bytes.len()) = 0;
+        unsafe { *dst.add(bytes.len()) = 0 };
         *rsp
     }
 
@@ -301,7 +301,7 @@ fn build_initial_stack(
     if let Some(envs) = envp {
         for &env in envs.iter().rev() {
             let bytes = env.as_bytes();
-            let ptr = unsafe { push_bytes_on_stack(&mut stack_top, bytes) };
+            let ptr = push_bytes_on_stack(&mut stack_top, bytes);
             string_ptrs.push(ptr);
         }
     }
@@ -310,7 +310,7 @@ fn build_initial_stack(
     if let Some(args) = argv {
         for &arg in args.iter().rev() {
             let bytes = arg.as_bytes();
-            let ptr = unsafe { push_bytes_on_stack(&mut stack_top, bytes) };
+            let ptr = push_bytes_on_stack(&mut stack_top, bytes);
             string_ptrs.push(ptr);
         }
     }

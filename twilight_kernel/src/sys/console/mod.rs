@@ -176,8 +176,6 @@ fn exec(cmd: &str, args: &[&str]) {
         "uname" => {
             println!("TwilightOS Twilight-Kernel 0.1 DevBuild (23/03/25)")
         }
-        "dealloc" => crate::kernel_utils::dealloc::main(args),
-        "allocate" => crate::kernel_utils::allocate::main(),
         "mkfs" => crate::kernel_utils::mkfs::main(args),
         "cat" => crate::kernel_utils::cat::main(args),
         "ls" => crate::kernel_utils::ls::main(args, "/"),

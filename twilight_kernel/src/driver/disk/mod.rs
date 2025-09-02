@@ -1,9 +1,7 @@
-use crate::sys::fs::twilight_fs::MinixFs;
 use crate::sys;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Once;
 
 pub mod ata;
 
@@ -15,8 +13,6 @@ pub enum BlockDevice {
     Mem(&'static mut MemBlockDevice),
     Ata(&'static mut AtaBlockDevice),
 }
-
-pub static mut DISK_FS: Once<MinixFs> = Once::new();
 
 pub trait BlockDeviceIO {
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()>;

@@ -1,7 +1,8 @@
 use crate::println;
 use crate::sys::console::DIR;
-use crate::sys::fs;
+use crate::sys::fs::vfs::VFS;
 use crate::sys::proc::{Process, PROCESS_TABLE};
+use alloc::format;
 use conquer_once::spin::OnceCell;
 use core::arch::asm;
 use spin::Mutex;
@@ -17,19 +18,16 @@ pub fn main(args: &[&str]) {
 
     let content_buf;
     {
-        let mut fs = unsafe { fs::MFS.get_unchecked().lock() };
         #[allow(static_mut_refs)]
         let pwd = unsafe { DIR.as_str() };
-        let inode = if pwd == "/" {
-            1
+
+        let path = format!("{}/{}", pwd, args[0]);
+
+        #[allow(static_mut_refs)]
+        if let Ok(buf) = unsafe { VFS.get_mut().read(path.as_str()) } {
+            content_buf = buf;
         } else {
-            fs.resolve_path(pwd).unwrap()
-        };
-    
-        if let Some(inode) = fs.find_dir_entry(inode, args[0]).unwrap() {
-            content_buf = fs.read_file(inode).unwrap();
-        } else {
-            println!("exec: {} no such file exists!", args[0]);
+            println!("exec: file not found");
             return;
         }
     }
@@ -46,7 +44,6 @@ pub fn main(args: &[&str]) {
 pub fn jump_to_user(code_addr: u64, entry_point: u64, stack_top: u64, user_cs: u64, user_ss: u64) {
     use x86_64::registers::control::Cr3;
 
-    // Load the new page table (must be done before entering user mode)
     let (_, flags) = Cr3::read();
     unsafe { Cr3::write(crate::sys::memory::get_page_table_frame(), flags) };
 
