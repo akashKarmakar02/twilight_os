@@ -60,8 +60,7 @@ run-x86_64: $(IMAGE_NAME).iso
 		-serial stdio \
 		-d int,guest_errors,unimp \
 	  	-D qemu.log \
-        -device virtio-vga-gl,max_outputs=1 \
-        -display sdl,gl=on
+		-vga std
 
 .PHONY: run-hdd-x86_64
 run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd
