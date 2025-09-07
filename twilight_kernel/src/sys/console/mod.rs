@@ -2,8 +2,11 @@ extern crate alloc;
 
 use crate::arch::x86_64::halt;
 use crate::sys::console::writer::clear_screen;
+use crate::sys::fs::vfs::VFS;
+use crate::sys::proc::{Process, PROCESS_TABLE};
 use crate::sys::tty::read_char;
 use crate::{print, println, serial_prtinln};
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -171,10 +174,9 @@ fn exec(cmd: &str, args: &[&str]) {
             println!("{:.6} seconds", crate::driver::timer::pit::uptime());
         }
         "shutdown" => crate::kernel_utils::shutdown::main(),
-        "date" => crate::kernel_utils::date::main(),
         "meminfo" => crate::kernel_utils::meminfo::main(),
         "uname" => {
-            println!("TwilightOS Twilight-Kernel 0.1 DevBuild (23/03/25)")
+            println!("TwilightOS Twilight-Kernel 0.1 DevBuild (23/03/25)");
         }
         "mkfs" => crate::kernel_utils::mkfs::main(args),
         "cat" => crate::kernel_utils::cat::main(args),
@@ -182,6 +184,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "pitch" => {
             println!("{}", crate::sys::framebuffer::get_pitch());
         }
+        "gs" => crate::kernel_utils::gs::main(),
         "df" => crate::kernel_utils::df::main(args),
         "touch" => crate::kernel_utils::touch::main(args),
         "mkdir" => crate::kernel_utils::mkdir::main(args),
@@ -189,11 +192,24 @@ fn exec(cmd: &str, args: &[&str]) {
         "rm" => crate::kernel_utils::rm::main(args),
         "readelf" => crate::kernel_utils::readelf::main(args),
         "install" => crate::kernel_utils::install::main(),
-        "exec" => crate::kernel_utils::exec::main(args),
         "dhcp" => crate::kernel_utils::dhcp::main(),
         "vi" => crate::kernel_utils::vi::main(args),
         _ => {
-            println!("{}: not a command", cmd);
+            #[allow(static_mut_refs)]
+            let fs = unsafe { VFS.get_mut() };
+
+            if let Ok(buf) = fs.read(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str()) {
+                #[allow(static_mut_refs)]
+                let process = Process::new(buf.clone(), unsafe { DIR.as_str() });
+
+                #[allow(static_mut_refs)]
+                unsafe {
+                    PROCESS_TABLE.get_mut().unwrap().run(process);
+                }
+            } else {
+                println!("{}: not a command", cmd);
+            }
+
         }
     }
 }
