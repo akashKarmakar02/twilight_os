@@ -1,5 +1,7 @@
 mod service;
 
+use alloc::string::String;
+use alloc::vec::Vec;
 use crate::arch::x86_64::idt::{Registers, PICS};
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::syscall::service::read;
@@ -31,9 +33,16 @@ pub extern "sysv64" fn syscall_handler(
         },
         SYS_WRITE => service::write(arg1 as i32, arg2, arg3),
         SYS_OPEN => {
-            
-            0
-        }
+            let upath = UserPtr(arg1 as *const u8);
+
+            let path = match copy_cstr_from_user(upath, 4096) {
+                Ok(s) => s,
+                _ => String::new(),
+            };
+            let flags = arg2 as i32;
+            let mode = arg3 as i32;
+            service::open(&path, flags, mode as u32)
+        },
         SYS_WRITEV => service::writev(arg1 as i32, arg2 as u64, arg3 as i32),
         SYS_ARCH_PRCTL => service::arch_prctl(arg1 as u64, arg2 as u64),
         SYS_EXIT => {
@@ -71,4 +80,61 @@ pub extern "sysv64" fn syscall_handler(
     regs.rax = res;
 
     unsafe { PICS.lock().notify_end_of_interrupt(0x80) };
+}
+
+#[repr(transparent)]
+pub struct UserPtr<T>(pub *const T);
+unsafe impl<T> Send for UserPtr<T> {}
+unsafe impl<T> Sync for UserPtr<T> {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserCopyError {
+    Fault,        // invalid mapping / page fault
+    TooLong,      // exceeded max length without NUL
+    Utf8,         // not valid UTF-8 (optional, if you enforce)
+}
+
+/// Implement this using your page-table walker or copyin routine.
+/// It must validate that `addr` is a canonical, user-mapped address and handle faults.
+fn read_user_byte(addr: *const u8) -> Result<u8, UserCopyError> {
+    // ---- stub / hook point ----
+    // Option A (if you have a safe copyin that returns Result):
+    //     copyin(addr, &mut byte).map(|_| byte).map_err(|_| UserCopyError::Fault)
+    //
+    // Option B (if user pages are directly accessible but may fault):
+    //     unsafe { core::ptr::read_volatile(addr) }  <-- wrap in a fault catcher
+    //
+    // Option C: translate_user_va(addr) -> *const u8 in kernel mapping, then read.
+    //
+    // For now, assume you have:
+    unsafe {
+        if !is_user_accessible(addr as usize) {
+            return Err(UserCopyError::Fault);
+        }
+        Ok(core::ptr::read_volatile(addr))
+    }
+}
+
+/// Copy a NUL-terminated string from user space with a max cap.
+pub fn copy_cstr_from_user(uptr: UserPtr<u8>, max: usize) -> Result<String, UserCopyError> {
+    let mut out: Vec<u8> = Vec::new();
+
+    for i in 0..max {
+        // SAFETY: arithmetic on raw pointer, bounds enforced by `max`
+        let p = unsafe { uptr.0.add(i) };
+        let b = read_user_byte(p)?;
+        if b == 0 {
+            // Finished; optionally validate UTF-8 for POSIX paths (not required)
+            return String::from_utf8(out).map_err(|_| UserCopyError::Utf8);
+        }
+        out.push(b);
+    }
+
+    Err(UserCopyError::TooLong)
+}
+
+// You likely already have something like this; placeholder here:
+unsafe fn is_user_accessible(_va: usize) -> bool {
+    // check canonical addr, U/S bit in PTEs, present, etc.
+    true
 }

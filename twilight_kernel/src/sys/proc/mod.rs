@@ -6,15 +6,16 @@ use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
+use spin::mutex::Mutex;
 use spin::Once;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame};
 use x86_64::VirtAddr;
 use crate::arch::x86_64::io::{set_fsbase, set_inactive_gsbase};
-use crate::sys::fs::VfsNode;
+use crate::sys::fs::vfs::VfsNode;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -76,8 +77,8 @@ impl ProcessTable {
 }
 
 impl ProcessTable {
-    pub fn get_process(&self, pid: u16) -> Option<&Process> {
-        for process in self.proc_list.iter() {
+    pub fn get_process(&mut self, pid: u16) -> Option<&mut Process> {
+        for process in self.proc_list.iter_mut() {
             if process.pid == pid {
                 return Some(process);
             }
@@ -94,7 +95,10 @@ impl ProcessTable {
         self.proc_list.back_mut().unwrap().exec();
     }
 }
-
+pub struct Handler {
+    pub handler: Arc<Mutex<VfsNode>>,
+    pub seek: usize
+}
 #[repr(C)]
 pub struct Process {
     // pub frame: TrapFrame,
@@ -109,7 +113,7 @@ pub struct Process {
     pub pwd: String,
     pub gs_base: VirtAddr,
     pub fs_base: VirtAddr,
-    pub handler: Vec<Box<dyn VfsNode>>,
+    pub handler: Vec<&'static mut Handler>,
 }
 
 impl Process {

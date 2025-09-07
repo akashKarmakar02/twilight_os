@@ -13,6 +13,17 @@ pub extern "C" fn read(fd: c_int, buf: *mut c_void, len: usize) -> SizeT {
     syscall6(0, fd as usize, buf as usize, len, 0, 0, 0)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn open(pathname: *const c_void, flags: c_int, mode: c_int) -> c_int {
+    syscall6(2, pathname as usize, flags as usize, mode as usize, 0, 0, 0) as c_int // SYS_open = 2
+}
+
+/// int close(int fd);
+#[unsafe(no_mangle)]
+pub extern "C" fn close(fd: c_int) -> c_int {
+    syscall6(3, fd as usize, 0, 0, 0, 0, 0) as c_int // SYS_close = 3
+}
+
 /// void _exit(int status);
 #[unsafe(no_mangle)]
 pub extern "C" fn _exit(status: c_int) -> ! {

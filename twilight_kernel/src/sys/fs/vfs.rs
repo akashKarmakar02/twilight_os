@@ -102,6 +102,12 @@ impl Vfs {
             })
     }
 
+    pub fn open(&self, path: &str) -> Result<VfsNode, ()> {
+        let (rel, fs) = self.route(path).ok_or(())?;
+        let mut guard = fs.lock();
+        guard.open(rel)
+    }
+
     pub fn read(&self, path: &str) -> Result<Vec<u8>, ()> {
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
