@@ -1,6 +1,5 @@
 pub mod cat;
 pub mod cd;
-pub mod date;
 pub mod df;
 pub mod echo;
 pub mod ls;
@@ -12,7 +11,8 @@ pub mod rm;
 pub mod shutdown;
 pub mod touch;
 pub mod install;
-pub mod exec;
 pub mod dhcp;
 pub mod vi;
 pub mod rmdir;
+pub mod gs;
+pub mod exec;

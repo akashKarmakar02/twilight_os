@@ -40,6 +40,7 @@ pub fn main() {
                     time: now,
                     zones: [0; 9],
                     indirect_zones: 0,
+                    double_indirect_zones: 0,
                 };
                 root_inode.zones[0] = root_zone as u16;
                 
@@ -71,6 +72,7 @@ pub fn main() {
         copy_file!("/bin/date", true);
         copy_file!("/bin/bc", true);
         copy_file!("/bin/hello", true);
+        copy_file!("/bin/demo", true);
     }
 }
 

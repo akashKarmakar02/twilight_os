@@ -1,3 +1,5 @@
+use crate::arch::x86_64::syscall::{rdmsr, wrmsr, IA32_EFER};
+use crate::{driver, extern_sym, println};
 use alloc::string::String;
 use core::alloc::Layout;
 use limine::response::MpResponse;
@@ -5,8 +7,6 @@ use raw_cpuid::CpuId;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::xcontrol::{XCr0, XCr0Flags};
 use x86_64::VirtAddr;
-use crate::{driver, extern_sym, println};
-use crate::arch::x86_64::syscall::{rdmsr, wrmsr, IA32_EFER};
 
 unsafe extern "C" fn ap_main(_cpu: &limine::mp::Cpu) -> ! {
     use x86_64::instructions::{hlt, interrupts};
@@ -43,8 +43,8 @@ pub fn init_smp(mp_response: &'static MpResponse) {
     }
 }
 
-const IA32_GS_BASE: u32 = 0xc0000101;
-const IA32_KERNEL_GS_BASE: u32 = 0xc0000102;
+pub const IA32_GS_BASE: u32 = 0xc0000101;
+pub const IA32_KERNEL_GS_BASE: u32 = 0xc0000102;
 
 pub fn init(mp_response: &'static MpResponse) {
     let cpuid = CpuId::new();
@@ -81,7 +81,9 @@ pub fn init(mp_response: &'static MpResponse) {
         core::ptr::copy_nonoverlapping(start.as_ptr(), data, size as usize);
         *data.cast::<u64>() = data as u64;
 
-        wrmsr(IA32_GS_BASE, data as u64);
+        wrmsr(IA32_GS_BASE, VirtAddr::zero().as_u64());
+        // set_fsbase()(VirtAddr::zero());
+        // set_inactive_gsbase()(VirtAddr::zero());
         wrmsr(IA32_KERNEL_GS_BASE, data as u64);
     }
 
