@@ -1,0 +1,355 @@
+use core::arch::asm;
+use x86_64::VirtAddr;
+use crate::driver::cpu::has_fsgsbase;
+use crate::serial_prtinln;
+
+pub const IA32_EFER: u32 = 0xc0000080;
+
+/// Map of BASE Address of FS (R/W)  See Table 35-2.
+pub const IA32_FS_BASE: u32 = 0xC0000100;
+
+/// Map of BASE Address of GS (R/W)  See Table 35-2.
+pub const IA32_GS_BASE: u32 = 0xc0000101;
+
+/// Swap Target of BASE Address of GS (R/W) See Table 35-2.
+pub const IA32_KERNEL_GSBASE: u32 = 0xc0000102;
+
+/// System Call Target Address (R/W).
+pub const IA32_STAR: u32 = 0xc0000081;
+
+/// IA-32e Mode System Call Target Address (R/W).
+pub const IA32_LSTAR: u32 = 0xc0000082;
+
+/// System Call Flag Mask (R/W).
+pub const IA32_FMASK: u32 = 0xc0000084;
+
+pub const IA32_SYSENTER_CS: u32 = 0x174;
+pub const IA32_SYSENTER_ESP: u32 = 0x175;
+pub const IA32_SYSENTER_EIP: u32 = 0x176;
+
+/// APIC Location and Status (R/W).
+///
+/// ```text
+/// [..........]   [..........]   [............]  [...............]  [.......]  [...]  [............]
+/// 63         36  35         12       11                10              9        8    7            0
+///   reserved        address      XAPIC global     enable X2APIC    reserved    BSP      reserved
+/// ```
+pub const IA32_APIC_BASE: u32 = 0x1b;
+
+/// Wrapper function to the `outb` assembly instruction used to do the
+/// 8-bit low level port output.
+#[inline]
+pub fn outb(port: u16, value: u8) {
+    unsafe {
+        asm!(
+        "out dx, al",
+        in("dx") port,
+        in("al") value,
+        options(preserves_flags, nomem, nostack)
+        );
+    }
+}
+
+/// Wrapper function to the `inb` assembly instruction used to do the
+/// 8-bit low level port input.
+#[inline]
+pub fn inb(port: u16) -> u8 {
+    let ret: u8;
+
+    unsafe {
+        asm!(
+        "in al, dx",
+        in("dx") port,
+        out("al") ret,
+        options(preserves_flags, nomem, nostack)
+        );
+    }
+
+    ret
+}
+
+/// Wrapper function to the `outw` assembly instruction used to do the
+/// 16-bit low level port output.
+#[inline]
+pub fn outw(port: u16, value: u16) {
+    unsafe {
+        asm!(
+        "out dx, ax",
+        in("dx") port,
+        in("ax") value,
+        options(preserves_flags, nomem, nostack)
+        );
+    }
+}
+
+/// Wrapper function to the `outl` assembly instruction used to do the
+/// 32-bit low level port output.
+#[inline]
+pub fn outl(port: u16, value: u32) {
+    unsafe {
+        asm!(
+        "out dx, eax",
+        in("dx") port,
+        in("eax") value,
+        options(preserves_flags, nomem, nostack)
+        );
+    }
+}
+
+/// Wrapper function to the `inl` assembly instruction used to do the
+/// 32-bit low level port input.
+#[inline]
+pub fn inl(port: u16) -> u32 {
+    let ret: u32;
+
+    unsafe {
+        asm!(
+        "in eax, dx",
+        in("dx") port,
+        out("eax") ret,
+        options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    ret
+}
+
+/// Wrapper function to the `inw` assembly instruction used to do the
+/// 16-bit low level port input.
+#[inline]
+pub fn inw(port: u16) -> u16 {
+    let ret: u16;
+
+    unsafe {
+        asm!(
+        "in ax, dx",
+        out("ax") ret,
+        in("dx") port,
+        options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    ret
+}
+
+/// This function is called after every `outb` and `outl` instruction as on older machines
+/// its necessary to give the PIC some time to react to commands as they might not
+/// be processed quickly.
+#[inline]
+pub fn wait() {
+    outb(0x80, 0);
+}
+
+/// Wrapper function to the `wrmsr` assembly instruction used
+/// to write 64 bits to msr register.
+pub fn wrmsr(msr: u32, value: u64) {
+    let low = value as u32;
+    let high = (value >> 32) as u32;
+
+    unsafe {
+        asm!("wrmsr", in("ecx") msr, in("eax") low, in("edx") high, options(nomem));
+    }
+}
+
+/// Wrapper function to the `rdmsr` assembly instruction used
+// to read 64 bits msr register.
+#[inline]
+pub fn rdmsr(msr: u32) -> u64 {
+    let (high, low): (u32, u32);
+
+    unsafe {
+        asm!("rdmsr", out("eax") low, out("edx") high, in("ecx") msr, options(nomem));
+    }
+
+    ((high as u64) << 32) | (low as u64)
+}
+
+#[inline]
+pub fn delay(cycles: usize) {
+    for _ in 0..cycles {
+        inb(0x80);
+    }
+}
+
+pub trait InOut {
+    unsafe fn port_in(port: u16) -> Self;
+    unsafe fn port_out(port: u16, value: Self);
+}
+
+impl InOut for u8 {
+    unsafe fn port_in(port: u16) -> u8 {
+        inb(port)
+    }
+
+    unsafe fn port_out(port: u16, value: u8) {
+        outb(port, value);
+    }
+}
+
+impl InOut for u16 {
+    unsafe fn port_in(port: u16) -> u16 {
+        inw(port)
+    }
+
+    unsafe fn port_out(port: u16, value: u16) {
+        outw(port, value);
+    }
+}
+
+impl InOut for u32 {
+    unsafe fn port_in(port: u16) -> u32 {
+        inl(port)
+    }
+
+    unsafe fn port_out(port: u16, value: u32) {
+        outl(port, value);
+    }
+}
+
+// based :^)
+
+#[derive(Copy, Clone)]
+pub struct BasedPort {
+    base: u16,
+}
+
+impl BasedPort {
+    pub fn new(base: u16) -> BasedPort {
+        BasedPort { base }
+    }
+
+    pub fn read_offset<V: InOut>(&self, offset: u16) -> V {
+        unsafe { V::port_in(self.base + offset) }
+    }
+
+    pub fn write_offset<V: InOut>(&mut self, offset: u16, value: V) {
+        unsafe { V::port_out(self.base + offset, value) }
+    }
+}
+
+#[inline]
+pub fn wrfsbase(base: VirtAddr) {
+    unsafe {
+        asm!("wrfsbase {}", in(reg) base.as_u64(), options(nostack, preserves_flags));
+    }
+}
+
+#[inline]
+pub fn rdfsbase() -> VirtAddr {
+    unsafe {
+        let val: u64;
+        asm!("rdfsbase {}", out(reg) val, options(nomem, nostack, preserves_flags));
+
+        VirtAddr::new(val)
+    }
+}
+
+#[inline]
+pub fn wrgsbase(base: VirtAddr) {
+    unsafe {
+        asm!("wrgsbase {}", in(reg) base.as_u64(), options(nostack, preserves_flags));
+    }
+}
+
+#[inline]
+pub fn rdgsbase() -> VirtAddr {
+    unsafe {
+        let val: u64;
+        asm!("rdgsbase {}", out(reg) val, options(nomem, nostack, preserves_flags));
+
+        VirtAddr::new(val)
+    }
+}
+
+/// # Safety
+/// The caller must ensure that the swap operation does not cause any undefined behavior.
+#[inline(always)]
+pub fn swapgs() {
+    unsafe {
+        asm!("swapgs", options(nostack, preserves_flags));
+    }
+}
+
+// XXX: There is no variant of the {rd,wr}gsbase instructions for accessing `KERNEL_GS_BASE`, so we
+// wrap those in two `swapgs` instructions. This approach is still faster than reading/writing from
+// the `KERNEL_GS_BASE` MSR.
+
+/// Sets the inactive `GS` segment's base address.
+#[inline(always)]
+pub fn set_inactive_gsbase() -> fn(base: VirtAddr) {
+    fn with_wrgsbase(base: VirtAddr) {
+        swapgs();
+        wrgsbase(base);
+        swapgs();
+    }
+
+    fn with_wrmsr(base: VirtAddr) {
+        serial_prtinln!("Here");
+        wrmsr(IA32_KERNEL_GSBASE, base.as_u64());
+    }
+
+    if has_fsgsbase() {
+        with_wrgsbase
+    } else {
+        with_wrmsr
+    }
+}
+
+/// Returns the inactive `GS` segment's base address.
+#[inline(always)]
+pub fn get_inactive_gsbase() -> fn() -> VirtAddr {
+    fn with_rdgsbase() -> VirtAddr {
+        // SAFETY: The GS base is swapped back to the original value after the read.
+        swapgs();
+        let base = rdgsbase();
+        swapgs();
+
+        base
+    }
+
+    fn with_rdmsr() -> VirtAddr {
+        VirtAddr::new(rdmsr(IA32_KERNEL_GSBASE))
+    }
+
+    if has_fsgsbase() {
+        with_rdgsbase
+    } else {
+        with_rdmsr
+    }
+}
+
+/// Sets the `FS` segment's base address.
+#[inline(always)]
+pub fn set_fsbase() -> fn(base: VirtAddr) {
+    fn with_wrfsbase(base: VirtAddr) {
+        wrfsbase(base);
+    }
+
+    fn with_wrmsr(base: VirtAddr) {
+        wrmsr(IA32_FS_BASE, base.as_u64());
+    }
+
+    if has_fsgsbase() {
+        with_wrfsbase
+    } else {
+        with_wrmsr
+    }
+}
+
+/// Returns the `FS` segment's base address.
+#[inline(always)]
+pub fn get_fsbase() -> fn() -> VirtAddr {
+    fn with_rdfsbase() -> VirtAddr {
+        rdfsbase()
+    }
+
+    fn with_rdmsr() -> VirtAddr {
+        VirtAddr::new(rdmsr(IA32_FS_BASE))
+    }
+
+    if has_fsgsbase() {
+        with_rdfsbase
+    } else {
+        with_rdmsr
+    }
+}

@@ -48,7 +48,7 @@ pub fn init() {
     // CPU supports them and the target pointer width is 64.
 
     let syscall_base = (GdtEntryIndex::KERNEL_CODE << 3) as u64;
-    let sysret_base = (GdtEntryIndex::KERNEL_TLS << 3) | 3;
+    let sysret_base = (GdtEntryIndex::USER_CODE << 3) | 3;
 
     let star_hi = syscall_base as u32 | (sysret_base as u32) << 16;
 
@@ -72,11 +72,11 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     naked_asm!(
     "swapgs",
 
-    "mov qword ptr gs:[8], rsp",
-    "mov rsp, qword ptr gs:[0]",
+    "mov gs:[8], rsp",
+    "mov rsp, gs:[0]",
 
     "push {userland_ss}",
-    "push qword ptr gs:[8]",
+    "push gs:[8]",
     "push r11",
     "push {userland_cs}",
     "push rcx",
@@ -111,7 +111,7 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "pop rcx",
     "add rsp, 8",
     "pop r11",
-    "pop rsp",
+    "mov rsp, gs:[8]",
 
     // restore user stack register
     "swapgs",
@@ -120,9 +120,6 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     // constants:
     userland_cs = const USER_CS.bits(),
     userland_ss = const USER_SS.bits(),
-    // // XXX: add 8 bytes to skip the x86_64 cpu local self ptr
-    // tss_temp_ustack_off = const offset_of!(Tss, reserved2) + core::mem::size_of::<usize>(),
-    // tss_rsp0_off = const offset_of!(Tss, rsp) + core::mem::size_of::<usize>(),
     x86_64_do_syscall = sym syscall_handler,
     )
 }

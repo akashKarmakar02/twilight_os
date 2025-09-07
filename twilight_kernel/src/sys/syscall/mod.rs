@@ -4,8 +4,7 @@ use crate::arch::x86_64::idt::{Registers, PICS};
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::syscall::service::read;
 use crate::task::executor::sleep;
-use crate::{print, println};
-use alloc::string::String;
+use crate::println;
 use twilight_common::syscall::numbers::*;
 use twilight_common::syscall::types::Timespec;
 use x86_64::structures::idt::InterruptStackFrame;
@@ -30,18 +29,13 @@ pub extern "sysv64" fn syscall_handler(
             let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
             read(arg1, buf, len)
         },
-        SYS_WRITE => {
-            let file_descriptor = arg1;
-            let buf = arg2 as *const u8;
-            let len = arg3;
-            let res = unsafe { core::slice::from_raw_parts(buf, len) };
-
-            if file_descriptor == 1 {
-                print!("{}", String::from_utf8_lossy(res));
-            }
-
-            len
+        SYS_WRITE => service::write(arg1 as i32, arg2, arg3),
+        SYS_OPEN => {
+            
+            0
         }
+        SYS_WRITEV => service::writev(arg1 as i32, arg2 as u64, arg3 as i32),
+        SYS_ARCH_PRCTL => service::arch_prctl(arg1 as u64, arg2 as u64),
         SYS_EXIT => {
             service::exit()
         }

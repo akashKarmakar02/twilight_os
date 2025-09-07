@@ -4,13 +4,17 @@ use crate::println;
 use crate::sys::console::init_console;
 use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset};
 use alloc::collections::VecDeque;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
 use spin::Once;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame};
 use x86_64::VirtAddr;
+use crate::arch::x86_64::io::{set_fsbase, set_inactive_gsbase};
+use crate::sys::fs::VfsNode;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -92,7 +96,6 @@ impl ProcessTable {
 }
 
 #[repr(C)]
-#[derive(Debug)]
 pub struct Process {
     // pub frame: TrapFrame,
     pub stack: u64, // point to user_stack
@@ -103,10 +106,14 @@ pub struct Process {
     pub pid: u16,
     pub state: ProcessState,
     pub addr_size_vec: Vec<(u64, usize)>,
+    pub pwd: String,
+    pub gs_base: VirtAddr,
+    pub fs_base: VirtAddr,
+    pub handler: Vec<Box<dyn VfsNode>>,
 }
 
 impl Process {
-    pub fn new(content_buf: Vec<u8>) -> Self {
+    pub fn new(content_buf: Vec<u8>, pwd: &str) -> Self {
 
         let (_, flags) = Cr3::read();
 
@@ -193,6 +200,10 @@ impl Process {
             page_table_frame,
             state: ProcessState::Running,
             addr_size_vec,
+            pwd: pwd.to_string(),
+            fs_base: VirtAddr::zero(),
+            gs_base: VirtAddr::zero(),
+            handler: Vec::new()
         };
         p
     }
@@ -233,6 +244,8 @@ pub fn exit() {
         unsafe {
             Cr3::write(page_table_frame, flags);
         }
+        set_fsbase()(k_process.fs_base);
+        set_inactive_gsbase()(k_process.gs_base);
     }
 
     process.cleanup();
@@ -264,6 +277,10 @@ pub fn init() {
                 state: ProcessState::Running,
                 page_table_frame,
                 mapper,
+                pwd: "/".to_string(),
+                handler: Vec::new(),
+                gs_base: VirtAddr::zero(),
+                fs_base: VirtAddr::zero(),
             }
         )
     }

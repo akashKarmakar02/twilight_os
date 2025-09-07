@@ -5,6 +5,7 @@ pub mod gdt;
 pub mod power;
 pub mod syscall;
 pub mod asm_utils;
+pub mod io;
 
 pub fn halt() {
     let disabled = !interrupts::are_enabled();
