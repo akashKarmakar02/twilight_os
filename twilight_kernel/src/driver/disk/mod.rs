@@ -7,50 +7,14 @@ pub mod ata;
 
 pub const BLOCK_SIZE: usize = 512;
 
-pub static mut BLOCK_DEVICE: Option<&'static mut BlockDevice> = None;
+pub static mut BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
 
-pub enum BlockDevice {
-    Mem(&'static mut MemBlockDevice),
-    Ata(&'static mut AtaBlockDevice),
-}
 
-pub trait BlockDeviceIO {
+pub trait BlockDeviceIO: Send + Sync + 'static {
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()>;
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), ()>;
     fn block_size(&self) -> usize;
     fn block_count(&self) -> usize;
-}
-
-impl BlockDeviceIO for BlockDevice {
-    fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()> {
-        match self {
-            BlockDevice::Mem(dev) => dev.read(addr, buf),
-            BlockDevice::Ata(dev) => dev.read(addr, buf),
-        }
-    }
-
-    fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), ()> {
-        match self {
-            BlockDevice::Mem(dev) => dev.write(addr, buf),
-            BlockDevice::Ata(dev) => {
-                dev.write(addr, buf)
-            },
-        }
-    }
-
-    fn block_size(&self) -> usize {
-        match self {
-            BlockDevice::Mem(dev) => dev.block_size(),
-            BlockDevice::Ata(dev) => dev.block_size(),
-        }
-    }
-
-    fn block_count(&self) -> usize {
-        match self {
-            BlockDevice::Mem(dev) => dev.block_count(),
-            BlockDevice::Ata(dev) => dev.block_count(),
-        }
-    }
 }
 
 const ATA_CACHE_SIZE: usize = 512;
@@ -127,6 +91,7 @@ impl BlockDeviceIO for AtaBlockDevice {
     }
 }
 
+#[derive(Clone)]
 pub struct MemBlockDevice {
     dev: Vec<[u8; BLOCK_SIZE]>,
 }
@@ -167,18 +132,14 @@ pub fn mount_mem() {
     let len = mem / BLOCK_SIZE;
     let dev = Box::leak(Box::new(MemBlockDevice::new(len)));
 
-    let block_dev = Box::leak(Box::new(BlockDevice::Mem(dev)));
-
     #[allow(static_mut_refs)]
     unsafe {
-        BLOCK_DEVICE = Some(block_dev)
+        BLOCK_DEVICE = Some(dev)
     };
 }
 
 pub fn mount_ata(bus: u8, dsk: u8) {
-    let dev = Box::leak(Box::new(AtaBlockDevice::new(bus, dsk).unwrap()));
-
-    let block_dev = Box::leak(Box::new(BlockDevice::Ata(dev)));
+    let block_dev = Box::leak(Box::new(AtaBlockDevice::new(bus, dsk).unwrap()));
 
     #[allow(static_mut_refs)]
     unsafe {

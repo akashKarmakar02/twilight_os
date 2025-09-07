@@ -1,4 +1,4 @@
-use crate::driver::disk::{BlockDevice, BlockDeviceIO};
+use crate::driver::disk::{BlockDeviceIO};
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::fs::KERNEL_PADDING;
 
@@ -50,7 +50,7 @@ impl Superblock {
         sb
     }
 
-    fn write_to_disk(&self, disk: &'static mut BlockDevice, is_boot: bool) {
+    fn write_to_disk(&self, disk: &'static mut dyn BlockDeviceIO, is_boot: bool) {
         let buf = unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, size_of::<Self>()) };
         disk.write(if is_boot { KERNEL_PADDING as u32 }  else { 0 }, buf).unwrap();
     }

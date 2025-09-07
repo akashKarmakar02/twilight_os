@@ -1,5 +1,4 @@
 use alloc::vec::Vec;
-use crate::driver::disk::BlockDeviceIO;
 use crate::println;
 use crate::sys::fs::init;
 use crate::sys::fs::twilight_fs::{Inode};
@@ -39,12 +38,12 @@ pub fn main(args: &[&str]) {
             inode = disk_size / (disk.block_size() * 16);
             block_size = disk.block_size();
 
-            if let Ok(_sb) = crate::fs::twilight_fs::read_superblock(disk) {
+            if let Ok(_sb) = crate::fs::twilight_fs::read_superblock(&mut **disk) {
                 println!("disk already formatted");
                 return;
             }
 
-            if let Ok(mut fs) = crate::fs::twilight_fs::format_superblock(disk, disk_size, inode as u16, block_size as u16) {
+            if let Ok(mut fs) = crate::fs::twilight_fs::format_superblock(&mut **disk, disk_size, inode as u16, block_size as u16) {
                 let root_inode_num = fs.allocate_inode().unwrap();
                 let root_zone = fs.allocate_zone().unwrap();
 

@@ -180,7 +180,7 @@ fn exec(cmd: &str, args: &[&str]) {
         }
         "mkfs" => crate::kernel_utils::mkfs::main(args),
         "cat" => crate::kernel_utils::cat::main(args),
-        "ls" => crate::kernel_utils::ls::main(args, "/"),
+        "ls" => crate::kernel_utils::ls::main(args),
         "pitch" => {
             println!("{}", crate::sys::framebuffer::get_pitch());
         }

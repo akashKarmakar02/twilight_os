@@ -2,7 +2,6 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::ops::DerefMut;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
 use crate::driver::disk::BlockDeviceIO;
@@ -31,30 +30,32 @@ pub struct Metadata {
     pub size: usize,
 }
 
+pub type BlockDev = Arc<Mutex<Box<dyn BlockDeviceIO + Send>>>;
+
 #[allow(dead_code)]
 pub struct VfsNode {
-    device: Arc<Mutex<dyn BlockDeviceIO>>,
-    metadata: Metadata,
-    node: Box<dyn VfsNodeOps>,
+    pub device: BlockDev,
+    pub metadata: Metadata,
+    pub node: Box<dyn VfsNodeOps>,
 }
 
 impl VfsNode {
-    pub fn new(device: Arc<Mutex<dyn BlockDeviceIO>>, metadata: Metadata, node: Box<dyn VfsNodeOps>) -> Self {
+    pub fn new(device: BlockDev, metadata: Metadata, node: Box<dyn VfsNodeOps>) -> Self {
         Self { device, metadata, node }
     }
 
     pub fn read(&mut self) -> Result<Vec<u8>, ()> {
-        self.node.read(self.device.lock().deref_mut())
+        self.node.read(&mut self.device)
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<(), ()> {
-        self.node.write(self.device.lock().deref_mut(),data)
+        self.node.write(&mut self.device, data)
     }
 }
 
 pub trait VfsNodeOps: Send + Sync + 'static {
-    fn read(&self, device: &mut dyn BlockDeviceIO) -> Result<Vec<u8>, ()>;
-    fn write(&self, device: &mut dyn BlockDeviceIO, data: &[u8]) -> Result<(), ()>;
+    fn read(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()>;
+    fn write(&self, device: &mut BlockDev, data: &[u8]) -> Result<(), ()>;
 }
 
 pub trait FileSystem: Send + Sync + 'static {

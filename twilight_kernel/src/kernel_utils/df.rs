@@ -5,7 +5,7 @@ pub fn main(_args: &[&str]) {
     let disk = unsafe { crate::driver::disk::BLOCK_DEVICE.as_mut() };
 
     if let Some(disk_ref) = disk {
-        if crate::fs::twilight_fs::read_superblock(disk_ref).is_ok() {
+        if crate::fs::twilight_fs::read_superblock(&mut **disk_ref).is_ok() {
             println!("{:<12}{}", "Filesystem", "Mounted on");
             println!("{:<12}{}", "minixfs", "/dev/ata0");
         } else {
