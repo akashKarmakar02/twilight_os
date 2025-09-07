@@ -3,6 +3,7 @@ use crate::sys::framebuffer::{FRAMEBUFFER, convert_color, get_framebuffer};
 use crate::sys::fs::{VfsNode};
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
+use alloc::collections::VecDeque;
 use core::fmt;
 use core::fmt::Write;
 
@@ -116,7 +117,7 @@ pub fn clear_char(x: usize, y: usize, color: u32) {
 
 pub struct Writer {
     buffer: Vec<u64>,
-    pub buffer_content: Vec<Vec<ScreenChar>>,
+    pub buffer_content: VecDeque<Vec<ScreenChar>>,
     pub column_position: usize,
     pub row_position: usize,
     color: u32,
@@ -129,7 +130,7 @@ pub struct Writer {
 impl Writer {
     pub fn new(color: u32) -> Self {
         Self {
-            buffer_content: Vec::new(),
+            buffer_content: VecDeque::new(),
             column_position: 0,
             row_position: 0,
             buffer: Vec::new(),
@@ -161,6 +162,9 @@ impl Writer {
             '\r' => {
                 self.clear_line();
                 self.column_position = 0;
+                if let Some(current_buffer) = self.buffer_content.get_mut(self.row_position) {
+                    current_buffer.pop();
+                }
             }
             '\t' => {
                 self.column_position += 4;
@@ -180,7 +184,7 @@ impl Writer {
                         char: c as u8,
                         color: self.color,
                     });
-                    self.buffer_content.push(current_buffer);
+                    self.buffer_content.push_back(current_buffer);
                 }
 
                 let screen_char = ScreenChar {
@@ -213,9 +217,9 @@ impl Writer {
         let max_rows = (self.screen_height / 16) as usize;
 
         if self.row_position >= max_rows {
-            self.buffer_content.remove(0);
+            self.buffer_content.pop_front();
 
-            self.buffer_content.push(Vec::new());
+            self.buffer_content.push_back(Vec::new());
 
             self.redraw_screen();
 
