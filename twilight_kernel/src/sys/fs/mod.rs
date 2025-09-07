@@ -55,7 +55,7 @@ pub fn init(show_log: bool) {
     println!("\x1b[93mWarning\x1b[0m Trying running 'install' to install Twilight OS");
 }
 
-pub trait VfsNode {
+pub trait VfsNode: Send + Sync + 'static {
     fn read(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, VfsError>;
 
     fn write(&mut self, offset: u64, buffer: &[u8]) -> Result<usize, VfsError>;

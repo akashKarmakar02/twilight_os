@@ -6,7 +6,7 @@ pub mod metadata;
 
 use crate::driver::disk::{BlockDevice, BlockDeviceIO};
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
-use crate::sys::fs::vfs::{FileSystem, FileType, Metadata};
+use crate::sys::fs::vfs::{FileSystem, FileType, Metadata, VfsNode, VfsNodeOps};
 use crate::{driver, println};
 use alloc::boxed::Box;
 use alloc::format;
@@ -43,6 +43,18 @@ pub struct Inode {
     pub nlinks: u8,
     pub zones: [u16; 9],
     pub indirect_zones: u16,
+    pub double_indirect_zones: u16,
+}
+
+#[allow(dead_code)]
+impl VfsNodeOps for Inode {
+    fn read(&self, _device: &mut dyn BlockDeviceIO) -> Result<Vec<u8>, ()> {
+        todo!()
+    }
+
+    fn write(&self, _device: &mut dyn BlockDeviceIO, _data: &[u8]) -> Result<(), ()> {
+        todo!()
+    }
 }
 
 #[repr(C, packed)]
@@ -544,6 +556,7 @@ impl MinixFs {
             nlinks: 0,
             zones: [0; 9],
             indirect_zones: 0,
+            double_indirect_zones: 0,
         };
         inode.zones[0] = new_zone as u16;
 
@@ -618,6 +631,7 @@ impl MinixFs {
             nlinks: 2, // "." and ".."
             zones: [0; 9],
             indirect_zones: 0,
+            double_indirect_zones: 0,
         };
         inode.zones[0] = new_zone as u16;
         self.write_inode(new_inode_num, &inode).unwrap();
@@ -708,6 +722,16 @@ impl MinixFs {
 
             // store updated indirect block
             self.device.write(inode.indirect_zones as u32, &indirect_block).unwrap();
+        }
+
+        if remaining > 0 {
+            if inode.double_indirect_zones == 0 {
+                inode.double_indirect_zones = self.allocate_zone().unwrap() as u16;
+                let zero_block = [0u8; 512];
+                self.device.write(inode.double_indirect_zones as u32, &zero_block).unwrap();
+            }
+
+
         }
 
         inode.size = bytes_written as u32;
@@ -812,6 +836,21 @@ impl MinixFs {
             }
         }
 
+        if inode.double_indirect_zones != 0 {
+            self.device.read(inode.double_indirect_zones as u32, &mut buffer).unwrap();
+            let zone_size = 512 / 4;
+            for i in 0..(zone_size - 1) {
+                let zone_id_buf: [u8; 4] = buffer[i*4..(i+1)*4].try_into().expect("invalid zone id size");
+                let zone_id = u32::from_le_bytes(zone_id_buf);
+                if zone_id == 0 {
+                    break;
+                }
+
+                let mut indirect_zones_buf = [0u8; 512];
+                self.device.read(zone_id, &mut indirect_zones_buf).unwrap();
+            }
+        }
+
         Ok(content)
     }
     
@@ -891,6 +930,10 @@ impl MinixFs {
 }
 
 impl FileSystem for MinixFs {
+    fn open(&mut self, _path: &str) -> Result<VfsNode, ()> {
+        todo!()
+    }
+
     fn read(&mut self, path: &str) -> Result<Vec<u8>, ()> {
         if let Ok(inode) = self.resolve_path(path) {
             Ok(self.read_file(inode).unwrap())
@@ -971,9 +1014,9 @@ impl FileSystem for MinixFs {
             let inode = self.read_inode(inode_num).unwrap();
 
             if inode.mode & 0xF000 == 0x4000 {
-                Ok(Metadata { file_type: FileType::Dir })
+                Ok(Metadata { file_type: FileType::Dir, size: inode.size as usize })
             } else {
-                Ok(Metadata { file_type: FileType::File })
+                Ok(Metadata { file_type: FileType::File, size: inode.size as usize })
             }
         } else {
             Err(())

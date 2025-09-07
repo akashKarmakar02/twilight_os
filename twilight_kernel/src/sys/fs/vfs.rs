@@ -1,8 +1,11 @@
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::DerefMut;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
+use crate::driver::disk::BlockDeviceIO;
 
 #[allow(dead_code)]
 pub static mut VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
@@ -13,12 +16,49 @@ pub enum FileType {
     Dir,
 }
 
+#[derive(Debug)]
+pub enum VfsError {
+    NotFound,
+    NotDir,
+    AlreadyExists,
+    Io,
+    Invalid,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Metadata {
-    pub file_type: FileType
+    pub file_type: FileType,
+    pub size: usize,
+}
+
+#[allow(dead_code)]
+pub struct VfsNode {
+    device: Arc<Mutex<dyn BlockDeviceIO>>,
+    metadata: Metadata,
+    node: Box<dyn VfsNodeOps>,
+}
+
+impl VfsNode {
+    pub fn new(device: Arc<Mutex<dyn BlockDeviceIO>>, metadata: Metadata, node: Box<dyn VfsNodeOps>) -> Self {
+        Self { device, metadata, node }
+    }
+
+    pub fn read(&mut self) -> Result<Vec<u8>, ()> {
+        self.node.read(self.device.lock().deref_mut())
+    }
+
+    pub fn write(&mut self, data: &[u8]) -> Result<(), ()> {
+        self.node.write(self.device.lock().deref_mut(),data)
+    }
+}
+
+pub trait VfsNodeOps: Send + Sync + 'static {
+    fn read(&self, device: &mut dyn BlockDeviceIO) -> Result<Vec<u8>, ()>;
+    fn write(&self, device: &mut dyn BlockDeviceIO, data: &[u8]) -> Result<(), ()>;
 }
 
 pub trait FileSystem: Send + Sync + 'static {
+    fn open(&mut self, path: &str) -> Result<VfsNode, ()>;
     fn read(&mut self, path: &str) -> Result<Vec<u8>, ()>;
     fn write(&mut self, path: &str, data: &[u8]) -> Result<(), ()>;
     fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()>;

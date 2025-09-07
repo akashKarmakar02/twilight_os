@@ -59,6 +59,7 @@ pub fn main(args: &[&str]) {
                     time: now,
                     zones: [0; 9],
                     indirect_zones: 0,
+                    double_indirect_zones: 0,
                 };
                 root_inode.zones[0] = root_zone as u16;
                 fs.write_inode(root_inode_num + 1, &root_inode).expect("TODO: panic message");
