@@ -62,7 +62,7 @@ pub fn read(handler: usize, buf: &mut [u8], len: usize) -> usize {
             if copy_len > 0 {
                 buf[..copy_len].copy_from_slice(&content[seek..(seek + copy_len)]);
             }
-            node.seek = copy_len;
+            node.seek += copy_len;
             return copy_len;
         }
     }
