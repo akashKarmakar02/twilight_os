@@ -18,7 +18,7 @@ pub struct Registers {
     pub rsi: usize,
     pub rdx: usize,
     pub rcx: usize,
-    pub rax: usize,
+    pub rax: i64,
 }
 
 // Translate IRQ into system interrupt

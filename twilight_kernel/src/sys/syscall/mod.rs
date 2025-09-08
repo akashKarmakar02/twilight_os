@@ -16,7 +16,7 @@ pub extern "sysv64" fn syscall_handler(
     _stack_frame: &mut InterruptStackFrame,
     regs: &mut Registers
 ) {
-    let syscall_number = regs.rax;
+    let syscall_number = regs.rax as usize;
     let arg1 = regs.rdi;
     let arg2 = regs.rsi;
     let arg3 = regs.rdx;
@@ -56,7 +56,7 @@ pub extern "sysv64" fn syscall_handler(
             if !out_ptr.is_null() {
                 unsafe { *out_ptr = unix_time as i64 };
             }
-            unix_time as usize
+            unix_time as i64
         }
         SYS_NANOSLEEP => {
             let req_timespec_ptr = arg1 as *const Timespec;
@@ -69,11 +69,11 @@ pub extern "sysv64" fn syscall_handler(
                 }
             }
 
-            0
+            0i64
         }
         _ => {
             println!("Unknown syscall number: {}", syscall_number);
-            0
+            -1
         },
     };
 
