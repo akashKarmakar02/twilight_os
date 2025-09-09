@@ -5,7 +5,6 @@ pub mod echo;
 pub mod ls;
 pub mod meminfo;
 pub mod mkdir;
-pub mod mkfs;
 pub mod readelf;
 pub mod rm;
 pub mod shutdown;
