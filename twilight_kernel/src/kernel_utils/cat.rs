@@ -35,6 +35,6 @@ pub fn main(args: &[&str]) {
     if let Ok(content) = unsafe { VFS.get_mut().read(format!("{}/{}", pwd, args[1]).as_str()) } {
         println!("{}", String::from_utf8_lossy(content.as_slice()));
     } else {
-        println!("cat: {}: No such file or directory", args[1s]);
+        println!("cat: {}: No such file or directory", args[1]);
     }
 }
