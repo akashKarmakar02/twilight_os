@@ -72,6 +72,7 @@ pub fn main() {
         copy_file!("/bin/bc", true);
         copy_file!("/bin/hello", true);
         copy_file!("/bin/echo", true);
+        copy_file!("/bin/uname", true);
     }
 }
 

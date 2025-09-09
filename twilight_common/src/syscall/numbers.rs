@@ -5,5 +5,6 @@ pub const SYS_CLOSE: usize = 3;
 pub const SYS_WRITEV: usize = 20;
 pub const SYS_NANOSLEEP: usize = 35;
 pub const SYS_EXIT: usize = 60;
+pub const SYS_UNAME: usize = 63;
 pub const SYS_ARCH_PRCTL: usize = 158;
 pub const SYS_TIME: usize = 201;

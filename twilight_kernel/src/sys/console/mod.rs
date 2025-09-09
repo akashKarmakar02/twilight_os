@@ -166,7 +166,6 @@ fn handle_console_input() {
 
 fn exec(cmd: &str, args: &[&str]) {
     match cmd {
-        // "echo" => crate::kernel_utils::echo::main(args),
         "clear" => {
             clear_screen(true);
         }
@@ -175,9 +174,6 @@ fn exec(cmd: &str, args: &[&str]) {
         }
         "shutdown" => crate::kernel_utils::shutdown::main(),
         "meminfo" => crate::kernel_utils::meminfo::main(),
-        "uname" => {
-            println!("TwilightOS Twilight-Kernel 0.1 DevBuild (23/03/25)");
-        }
         "cat" => crate::kernel_utils::cat::main(args),
         "ls" => crate::kernel_utils::ls::main(args),
         "pitch" => {

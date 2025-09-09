@@ -1,12 +1,12 @@
 mod service;
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use crate::arch::x86_64::idt::{Registers, PICS};
+use crate::arch::x86_64::idt::{PICS, Registers};
 use crate::driver::timer::cmos::CMOS;
+use crate::println;
 use crate::sys::syscall::service::read;
 use crate::task::executor::sleep;
-use crate::println;
+use alloc::string::String;
+use alloc::vec::Vec;
 use twilight_common::syscall::numbers::*;
 use twilight_common::syscall::types::Timespec;
 use x86_64::structures::idt::InterruptStackFrame;
@@ -14,7 +14,7 @@ use x86_64::structures::idt::InterruptStackFrame;
 #[allow(dead_code)]
 pub extern "sysv64" fn syscall_handler(
     _stack_frame: &mut InterruptStackFrame,
-    regs: &mut Registers
+    regs: &mut Registers,
 ) {
     let syscall_number = regs.rax as usize;
     let arg1 = regs.rdi;
@@ -23,14 +23,14 @@ pub extern "sysv64" fn syscall_handler(
     let _arg4 = regs.r10;
     let _arg5 = regs.r8;
     let _arg6 = regs.r9;
-    
+
     let res = match syscall_number {
         SYS_READ => {
             let ptr = arg2 as *mut u8;
             let len = arg3;
             let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
             read(arg1, buf, len)
-        },
+        }
         SYS_WRITE => service::write(arg1 as i32, arg2, arg3),
         SYS_OPEN => {
             let upath = UserPtr(arg1 as *const u8);
@@ -42,12 +42,11 @@ pub extern "sysv64" fn syscall_handler(
             let flags = arg2 as i32;
             let mode = arg3 as i32;
             service::open(&path, flags, mode as u32)
-        },
+        }
         SYS_WRITEV => service::writev(arg1 as i32, arg2 as u64, arg3 as i32),
         SYS_ARCH_PRCTL => service::arch_prctl(arg1 as u64, arg2 as u64),
-        SYS_EXIT => {
-            service::exit()
-        }
+        SYS_EXIT => service::exit(),
+        SYS_UNAME => service::uname(arg2),
         SYS_TIME => {
             let out_ptr = arg1 as *mut i64; // time_t is i64
             let mut cmos = CMOS::new();
@@ -74,7 +73,7 @@ pub extern "sysv64" fn syscall_handler(
         _ => {
             println!("Unknown syscall number: {}", syscall_number);
             -1
-        },
+        }
     };
 
     regs.rax = res;
@@ -89,9 +88,9 @@ unsafe impl<T> Sync for UserPtr<T> {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserCopyError {
-    Fault,        // invalid mapping / page fault
-    TooLong,      // exceeded max length without NUL
-    Utf8,         // not valid UTF-8 (optional, if you enforce)
+    Fault,   // invalid mapping / page fault
+    TooLong, // exceeded max length without NUL
+    Utf8,    // not valid UTF-8 (optional, if you enforce)
 }
 
 /// Implement this using your page-table walker or copyin routine.

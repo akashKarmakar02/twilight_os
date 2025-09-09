@@ -15,3 +15,14 @@ pub struct Timespec {
     pub tv_sec: i64,  // time_t: seconds
     pub tv_nsec: i64, // long: nanoseconds
 }
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct UtsName {
+    pub sysname: [u8; 65],
+    pub nodename: [u8; 65],
+    pub release: [u8; 65],
+    pub version: [u8; 65],
+    pub machine: [u8; 65],
+    pub domainname: [u8; 65],
+}
