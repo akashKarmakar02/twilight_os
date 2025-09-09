@@ -651,35 +651,58 @@ impl MinixFs {
         Ok(new_inode_num)
     }
 
-    pub fn list_dir(&mut self, dir_inode_num: u16) -> Result<Vec<String>, &'static str> {
+   pub fn list_dir(&mut self, dir_inode_num: u16) -> Result<Vec<String>, &'static str> {
         let dir_inode = self.read_inode(dir_inode_num)?;
-        let mut res = Vec::new();
+        let mut entries = Vec::new();
 
-        if dir_inode.zones[0] == 0 {
-            return Err("Directory has no data block");
+        const DIR_ENTRY_SIZE: usize = size_of::<DirEntry>();
+
+        const BLOCK_SIZE: usize = 512;
+        let mut buffer = [0u8; BLOCK_SIZE];
+        
+        let mut bytes_processed = 0;
+        let total_size = dir_inode.size as usize;
+        let zones = dir_inode.zones;
+
+        for &zone_num in zones.iter() {
+            if zone_num == 0 {
+                break;
+            }
+
+            if self.device.lock().read(zone_num as u32, &mut buffer).is_err() {
+                return Err("Failed to read directory data block");
+            }
+
+            for chunk in buffer.chunks_exact(DIR_ENTRY_SIZE) {
+                if bytes_processed >= total_size {
+                    break;
+                }
+
+                let entry = unsafe { &*(chunk.as_ptr() as *const DirEntry) };
+                
+                bytes_processed += DIR_ENTRY_SIZE;
+
+                if entry.inode == 0 {
+                    continue;
+                }
+
+                let name_end = entry.name.iter().position(|&b| b == 0).unwrap_or(entry.name.len());
+                let name_bytes = &entry.name[..name_end];
+
+                match core::str::from_utf8(name_bytes) {
+                    Ok(name) => {
+                        if !name.is_empty() {
+                            entries.push(String::from(name));
+                        }
+                    }
+                    Err(_) => {
+                        continue;
+                    }
+                }
+            }
         }
 
-        let mut buffer = [0u8; 512];
-        if self.device.lock().read(dir_inode.zones[0] as u32, &mut buffer).is_err() {
-            return Err("Failed to read directory block");
-        };
-
-        let mut offset = 0;
-        while offset + 16 <= dir_inode.size as usize {
-            let entry = unsafe {
-                core::ptr::read(buffer[offset..].as_ptr() as *const DirEntry)
-            };
-
-            let name = core::str::from_utf8(&entry.name)
-                .unwrap_or("")
-                .trim_end_matches('\0');
-
-            res.push(String::from(name));
-
-            offset += size_of::<DirEntry>();
-        }
-
-        Ok(res)
+        Ok(entries)
     }
 
     pub fn create_dir(&mut self, parent_inode_num: u16, name: &str) -> Result<u16, FsError> {
