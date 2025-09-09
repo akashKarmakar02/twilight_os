@@ -1,4 +1,4 @@
-use crate::arch::x86_64::io::{rdmsr, wrmsr, IA32_FS_BASE, IA32_GS_BASE};
+use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
 use crate::sys::fs::vfs::VFS;
 use crate::sys::proc::{Handler, PROCESS_TABLE};
 use crate::sys::tty::{read_char, read_line};
@@ -30,7 +30,13 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
         }
         n => {
             #[allow(static_mut_refs)]
-            let process = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()).unwrap() };
+            let process = unsafe {
+                PROCESS_TABLE
+                    .get_mut()
+                    .unwrap()
+                    .get_process(crate::sys::proc::id())
+                    .unwrap()
+            };
 
             if let Some(node) = process.handler.get_mut(n as usize - 3) {
                 if let Ok(_) = node.handler.lock().write(buf) {
@@ -130,6 +136,31 @@ pub fn exit() -> i64 {
     unsafe { asm!("swapgs") };
 
     crate::sys::proc::exit();
+
+    0
+}
+
+pub fn uname(ptr: usize) -> i64 {
+    let uname_ptr = ptr as *mut UtsName;
+
+    fn fill(buf: &mut [u8; 65], s: &str) {
+        buf.fill(0);
+        let bytes = s.as_bytes();
+        let n = core::cmp::min(bytes.len(), 64); // leave room for NUL
+        buf[..n].copy_from_slice(&bytes[..n]);
+        buf[n] = 0;
+    }
+
+    unsafe {
+        let uname_s = &mut *uname_ptr;
+
+        fill(&mut uname_s.sysname, "TwilightOS");
+        fill(&mut uname_s.nodename, "twilight");
+        fill(&mut uname_s.release, "0.1.0-testing-build.x86_64");
+        fill(&mut uname_s.version, "#1 NON-SMP 09-09-2025");
+        fill(&mut uname_s.machine, "x86_64");
+        fill(&mut uname_s.domainname, "-");
+    }
 
     0
 }
