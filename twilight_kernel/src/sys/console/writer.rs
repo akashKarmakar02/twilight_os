@@ -1,9 +1,9 @@
 use crate::sys::console::font::PSF_FONTS;
 use crate::sys::framebuffer::{FRAMEBUFFER, convert_color, get_framebuffer};
-use crate::sys::fs::{VfsNode};
+use crate::sys::fs::VfsNode;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::{vec, vec::Vec};
-use alloc::collections::VecDeque;
 use core::fmt;
 use core::fmt::Write;
 
@@ -155,6 +155,9 @@ impl Writer {
                     0x101010u32,
                 );
                 self.clear_cursor();
+                if let Some(current_buffer) = self.buffer_content.get_mut(self.row_position) {
+                    current_buffer.pop();
+                }
                 if self.column_position > 0 {
                     self.column_position -= 1;
                 }
