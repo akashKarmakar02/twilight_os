@@ -62,7 +62,7 @@ fn handle_console_input() {
                 let args: Vec<&str> = cmd_line.split_whitespace().collect();
 
                 if args.len() > 1 {
-                    exec(args[0], &args[1..]);
+                    exec(args[0], &args);
                 } else if !args.is_empty() {
                     exec(args[0], &[]);
                 }
@@ -166,7 +166,7 @@ fn handle_console_input() {
 
 fn exec(cmd: &str, args: &[&str]) {
     match cmd {
-        "echo" => crate::kernel_utils::echo::main(args),
+        // "echo" => crate::kernel_utils::echo::main(args),
         "clear" => {
             clear_screen(true);
         }
@@ -200,7 +200,7 @@ fn exec(cmd: &str, args: &[&str]) {
 
             if let Ok(buf) = fs.read(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str()) {
                 #[allow(static_mut_refs)]
-                let process = Process::new(buf.clone(), unsafe { DIR.as_str() });
+                let process = Process::new(buf.clone(), unsafe { DIR.as_str() }, args);
 
                 #[allow(static_mut_refs)]
                 unsafe {

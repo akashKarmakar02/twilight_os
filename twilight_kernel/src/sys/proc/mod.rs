@@ -1,12 +1,14 @@
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
+use crate::arch::x86_64::io::{set_fsbase, set_inactive_gsbase};
 use crate::kernel_utils::exec::jump_to_user;
-use crate::println;
 use crate::sys::console::init_console;
+use crate::sys::fs::vfs::VfsNode;
 use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset};
+use crate::println;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
 use spin::mutex::Mutex;
@@ -14,8 +16,6 @@ use spin::Once;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame};
 use x86_64::VirtAddr;
-use crate::arch::x86_64::io::{set_fsbase, set_inactive_gsbase};
-use crate::sys::fs::vfs::VfsNode;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -117,7 +117,7 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn new(content_buf: Vec<u8>, pwd: &str) -> Self {
+    pub fn new(content_buf: Vec<u8>, pwd: &str, args: &[&str]) -> Self {
 
         let (_, flags) = Cr3::read();
 
@@ -193,7 +193,7 @@ impl Process {
             }
         }
         // Some(virt_to_phys(VirtAddr::new(0x400000)).unwrap().as_u64())
-        let user_rsp = build_initial_stack(user_stack_top.as_u64(), entry_point_addr, None, None, None, None, Some(ph_count as u64));
+        let user_rsp = build_initial_stack(user_stack_top.as_u64(), entry_point_addr, Some(args), None, None, None, Some(ph_count as u64));
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let p = Process {
             stack: user_rsp,
@@ -289,7 +289,6 @@ pub fn init() {
         )
     }
 }
-
 #[repr(C)]
 struct AuxvEntry {
     key: u64,
@@ -305,194 +304,73 @@ fn build_initial_stack(
     phent: Option<u64>,
     phnum: Option<u64>,
 ) -> u64 {
-    // Keep a vector of pointers (u64) for strings; we'll push them as we write strings.
-    let mut string_ptrs: Vec<u64> = Vec::new();
+    let mut argv_ptrs: Vec<u64> = Vec::new();
+    let mut envp_ptrs: Vec<u64> = Vec::new();
 
-    // Helper: write a byte slice to stack (null-terminated) and return the pointer written.
     fn push_bytes_on_stack(rsp: &mut u64, bytes: &[u8]) -> u64 {
-        *rsp = rsp.wrapping_sub((bytes.len() as u64) + 1);
+        *rsp = rsp.wrapping_sub(bytes.len() as u64 + 1);
         let dst = *rsp as *mut u8;
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len()) };
-        // trailing null
         unsafe { *dst.add(bytes.len()) = 0 };
         *rsp
     }
 
-    // Push env strings (in reverse so final order is preserved)
     if let Some(envs) = envp {
         for &env in envs.iter().rev() {
-            let bytes = env.as_bytes();
-            let ptr = push_bytes_on_stack(&mut stack_top, bytes);
-            string_ptrs.push(ptr);
+            envp_ptrs.push(push_bytes_on_stack(&mut stack_top, env.as_bytes()));
         }
+        envp_ptrs.reverse();
     }
 
-    // Push argv strings (in reverse)
     if let Some(args) = argv {
         for &arg in args.iter().rev() {
-            let bytes = arg.as_bytes();
-            let ptr = push_bytes_on_stack(&mut stack_top, bytes);
-            string_ptrs.push(ptr);
+            argv_ptrs.push(push_bytes_on_stack(&mut stack_top, arg.as_bytes()));
         }
+        argv_ptrs.reverse();
     }
 
-    // Align stack to 16 bytes (System V: RSP must be aligned to 16 before CALL/IRET)
-    if (stack_top & 0xF) != 0 {
-        // Make it 16 aligned
-        stack_top &= !0xF;
-    }
+    // keep a clean 16B boundary before auxv/tables (optional)
+    stack_top &= !0xFu64;
 
-    // Build auxv (values must be u64; convert Option to u64)
     let auxv_entries = [
         AuxvEntry { key: 3, value: phdr_addr.unwrap_or(0) }, // AT_PHDR
         AuxvEntry { key: 4, value: phent.unwrap_or(0) },     // AT_PHENT
         AuxvEntry { key: 5, value: phnum.unwrap_or(0) },     // AT_PHNUM
-        AuxvEntry { key: 6, value: 4096 },                  // AT_PAGESZ
-        AuxvEntry { key: 9, value: entry_point },           // AT_ENTRY
-        AuxvEntry { key: 0, value: 0 },                     // auxv terminator
+        AuxvEntry { key: 6, value: 4096 },                   // AT_PAGESZ
+        AuxvEntry { key: 9, value: entry_point },            // AT_ENTRY
+        AuxvEntry { key: 0, value: 0 },                      // AT_NULL
     ];
 
-    // Push auxv array
     stack_top -= (core::mem::size_of::<AuxvEntry>() * auxv_entries.len()) as u64;
     unsafe {
         let dst = stack_top as *mut AuxvEntry;
         core::ptr::copy_nonoverlapping(auxv_entries.as_ptr(), dst, auxv_entries.len());
     }
 
-    // Null-terminate envp array (a 0 pointer)
+    // envp NULL, then envp pointers
     stack_top -= 8;
     unsafe { *(stack_top as *mut u64) = 0; }
-
-    // Push env pointers (if any) in the original order
-    if let Some(envs) = envp {
-        // string_ptrs currently holds envs then args pushed in that order; we pushed envs first (reversed)
-        // To push the env pointers in correct order, pop the last envs.len() entries in reverse.
-        for _ in 0..envs.len() {
-            stack_top -= 8;
-            let ptr = string_ptrs.pop().expect("env pointer expected");
-            unsafe { *(stack_top as *mut u64) = ptr; }
-        }
+    for &p in envp_ptrs.iter().rev() {
+        stack_top -= 8;
+        unsafe { *(stack_top as *mut u64) = p; }
     }
 
-    // Null-terminate argv array
+    // argv NULL, then argv pointers
     stack_top -= 8;
     unsafe { *(stack_top as *mut u64) = 0; }
-
-    // Push argv pointers (if any)
     if let Some(args) = argv {
-        for _ in 0..args.len() {
+        for &p in argv_ptrs.iter().rev() {
             stack_top -= 8;
-            let ptr = string_ptrs.pop().expect("argv pointer expected");
-            unsafe { *(stack_top as *mut u64) = ptr; }
+            unsafe { *(stack_top as *mut u64) = p; }
         }
         // argc
         stack_top -= 8;
         unsafe { *(stack_top as *mut u64) = args.len() as u64; }
     } else {
-        // no argv: argc = 0
         stack_top -= 8;
         unsafe { *(stack_top as *mut u64) = 0; }
     }
 
-    // Final alignment to 16 bytes before user entry (if necessary)
-    if (stack_top & 0xF) != 0 {
-        stack_top &= !0xF;
-    }
-
+    // No extra padding here!
     stack_top
 }
-
-//
-// #[repr(C)]
-// struct AuxvEntry {
-//     key: u64,
-//     value: u64,
-// }
-//
-// fn build_initial_stack(
-//     stack_top: u64,
-//     entry_point: u64,
-//     argv: Option<&[&str]>,
-//     envp: Option<&[&str]>,
-//     phdr_addr: Option<u64>,
-//     phent: Option<u64>,
-//     phnum: Option<u64>
-// ) -> u64 {
-//     let mut rsp = stack_top;
-//
-//     let mut string_ptrs: Vec<u64> = Vec::new();
-//
-//     if let Some(envp) = envp {
-//         for &env in envp.iter().rev() {
-//             let bytes = env.as_bytes();
-//             rsp -= bytes.len() as u64 + 1;
-//             unsafe {
-//                 core::ptr::copy_nonoverlapping(bytes.as_ptr(), rsp as *mut u8, bytes.len());
-//                 *(rsp as *mut u8).add(bytes.len()) = 0;
-//             }
-//             string_ptrs.push(rsp);
-//         }
-//     }
-//
-//     if let Some(argv) = argv {
-//         for &arg in argv.iter().rev() {
-//             let bytes = arg.as_bytes();
-//             rsp -= bytes.len() as u64 + 1;
-//             unsafe {
-//                 core::ptr::copy_nonoverlapping(bytes.as_ptr(), rsp as *mut u8, bytes.len());
-//                 *(rsp as *mut u8).add(bytes.len()) = 0;
-//             }
-//             string_ptrs.push(rsp);
-//         }
-//     }
-//
-//
-//     if(rsp & 15) != 0 {
-//         rsp -= 8;
-//         unsafe { *(rsp as *mut u64) = 0; }
-//     }
-//
-//     let auxv_entries = [
-//         AuxvEntry { key: 3, value: phdr_addr }, // AT_PHDR: Program headers address
-//         AuxvEntry { key: 4, value: phent }, // AT_PHENT: Program header entry size
-//         AuxvEntry { key: 5, value: phnum }, // AT_PHNUM: Number of program headers
-//         AuxvEntry { key: 6, value: 4096 }, // AT_PAGEZ: Page size
-//         AuxvEntry { key: 9, value: entry_point }, // AT_ENTRY: Entry point
-//         AuxvEntry { key: 0, value: 0 }, // NULL terminator
-//     ];
-//
-//     rsp -= (core::mem::size_of::<AuxvEntry>() * auxv_entries.len()) as u64;
-//     unsafe {
-//         core::ptr::copy_nonoverlapping(
-//             auxv_entries.as_ptr(),
-//             rsp as *mut AuxvEntry,
-//             auxv_entries.len(),
-//         );
-//     }
-//
-//     rsp -= 8;
-//     unsafe { *(rsp as *mut u64) = 0; }
-//
-//     for _ in 0..envp.len() {
-//         rsp -= 8;
-//         unsafe { *(rsp as *mut u64) = string_ptrs.pop().unwrap(); }
-//     }
-//
-//     rsp -= 8;
-//     unsafe { *(rsp as *mut u64) = 0; }
-//
-//     for _ in 0..argv.len() {
-//         rsp -= 8;
-//         unsafe { *(rsp as *mut u64) = string_ptrs.pop().unwrap(); }
-//     }
-//
-//     rsp -= 8;
-//     unsafe { *(rsp as *mut u64) = argv.len() as u64; }
-//
-//     if (rsp & 15) != 0 {
-//         rsp -= 8;
-//         unsafe { *(rsp as *mut u64) = 0; }
-//     }
-//
-//     rsp
-// }
