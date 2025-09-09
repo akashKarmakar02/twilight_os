@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 pub fn main(args: &[&str]) {
-    if args.is_empty() {
+    if args.len() < 2 {
         println!("cd: cd <directory>");
         return;
     }
@@ -22,7 +22,7 @@ pub fn main(args: &[&str]) {
         1
     };
 
-    if let Ok(inode) = fs.find_dir_entry(parent_inode, args[0]) {
+    if let Ok(inode) = fs.find_dir_entry(parent_inode, args[1]) {
         if inode.is_none() {
             println!("cd: no such file or directory");
             return;
@@ -33,10 +33,10 @@ pub fn main(args: &[&str]) {
             };
             return;
         }
-        if args[0] == "." {
+        if args[1] == "." {
             return;
         }
-        if args[0] == ".." {
+        if args[1] == ".." {
             let mut cur: Vec<&str> = cur.split("/").collect();
             cur.pop();
             unsafe  {
@@ -48,9 +48,9 @@ pub fn main(args: &[&str]) {
 
     unsafe {
         if cur == "/" {
-            DIR = format!("{}{}", cur, args[0]);
+            DIR = format!("{}{}", cur, args[1]);
         } else {
-            DIR = format!("{}/{}", cur, args[0]);
+            DIR = format!("{}/{}", cur, args[1]);
         }
     };
 }

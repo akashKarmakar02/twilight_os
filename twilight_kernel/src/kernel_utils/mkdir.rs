@@ -7,7 +7,7 @@ pub fn main(args: &[&str]) {
     let pwd = unsafe { DIR.as_str() };
 
     #[allow(static_mut_refs)]
-    if let Err(_) = unsafe { VFS.get_mut().mkdir(pwd, args[0]) } {
-        println!("mkdir: {}: Failed to create", args[0]);
+    if let Err(_) = unsafe { VFS.get_mut().mkdir(pwd, args[1]) } {
+        println!("mkdir: {}: Failed to create", args[1]);
     }
 }

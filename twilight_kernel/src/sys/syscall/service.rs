@@ -15,13 +15,34 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     let file_descriptor = arg1;
     let buf = arg2 as *const u8;
     let len = arg3;
-    let res = unsafe { core::slice::from_raw_parts(buf, len) };
+    let buf = unsafe { core::slice::from_raw_parts(buf, len) };
 
-    if file_descriptor == 1 {
-        print!("{}", String::from_utf8_lossy(res));
-    }
+    let res = match file_descriptor {
+        1 => {
+            print!("{}", String::from_utf8_lossy(buf));
 
-    len as i64
+            len as i64
+        }
+        2 => {
+            print!("\x1b[91m{}\x1b[0m", String::from_utf8_lossy(buf));
+
+            len as i64
+        }
+        n => {
+            #[allow(static_mut_refs)]
+            let process = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()).unwrap() };
+
+            if let Some(node) = process.handler.get_mut(n as usize - 3) {
+                if let Ok(_) = node.handler.lock().write(buf) {
+                    return len as i64;
+                }
+            }
+
+            -1
+        }
+    };
+
+    res
 }
 
 pub fn read(handler: usize, buf: &mut [u8], len: usize) -> i64 {
