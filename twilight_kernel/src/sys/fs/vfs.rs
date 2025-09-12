@@ -15,6 +15,16 @@ pub enum FileType {
     Dir,
 }
 
+impl PartialEq for FileType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FileType::File, FileType::File) => true,
+            (FileType::Dir, FileType::Dir) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum VfsError {
     NotFound,
@@ -31,6 +41,18 @@ pub struct Metadata {
 }
 
 pub type BlockDev = Arc<Mutex<Box<dyn BlockDeviceIO + Send>>>;
+
+
+pub trait FsCtx {
+    fn block_size(&self) -> usize;
+
+    fn read_block(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()>;
+    fn write_block(&mut self, lba: u32, buf: &[u8]) -> Result<(), ()>;
+
+    fn alloc_zone(&mut self) -> Result<u32, &'static str>;
+    fn free_zone(&mut self, zone: u32) -> Result<(), &'static str>;
+    fn write_inode_minix(&mut self, ino: u32, inode: &crate::sys::fs::twilight_fs::Inode) -> Result<(), &'static str>;
+}
 
 #[allow(dead_code)]
 pub struct VfsNode {
@@ -55,7 +77,7 @@ impl VfsNode {
 
 pub trait VfsNodeOps: Send + Sync + 'static {
     fn read(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()>;
-    fn write(&self, device: &mut BlockDev, data: &[u8]) -> Result<(), ()>;
+    fn write(&mut self, device: &mut BlockDev, data: &[u8]) -> Result<(), ()>;
 }
 
 pub trait FileSystem: Send + Sync + 'static {
@@ -144,7 +166,7 @@ impl Vfs {
         guard.rm(rel)
     }
 
-    pub fn touch(&self, parent_path: &str, filename: &str) -> Result<(), ()> {
+    pub fn touch(&self, parent_path: &str, filename: &str, mode: u32) -> Result<(), ()> {
         let (rel, fs) = self.route(parent_path).ok_or(())?;
         let mut guard = fs.lock();
         guard.touch(rel, filename)

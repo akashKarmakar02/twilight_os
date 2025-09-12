@@ -2,13 +2,13 @@ mod service;
 
 use crate::arch::x86_64::idt::{PICS, Registers};
 use crate::driver::timer::cmos::CMOS;
-use crate::println;
+use crate::{println, serial_print, serial_prtinln};
 use crate::sys::syscall::service::read;
 use crate::task::executor::sleep;
 use alloc::string::String;
 use alloc::vec::Vec;
 use twilight_common::syscall::numbers::*;
-use twilight_common::syscall::types::Timespec;
+use twilight_common::syscall::types::{Rlimit64, Timespec};
 use x86_64::structures::idt::InterruptStackFrame;
 
 #[allow(dead_code)]
@@ -17,10 +17,11 @@ pub extern "sysv64" fn syscall_handler(
     regs: &mut Registers,
 ) {
     let syscall_number = regs.rax as usize;
+    serial_prtinln!("syscall: {}", syscall_number);
     let arg1 = regs.rdi;
     let arg2 = regs.rsi;
     let arg3 = regs.rdx;
-    let _arg4 = regs.r10;
+    let arg4 = regs.r10;
     let _arg5 = regs.r8;
     let _arg6 = regs.r9;
 
@@ -44,9 +45,12 @@ pub extern "sysv64" fn syscall_handler(
             service::open(&path, flags, mode as u32)
         }
         SYS_WRITEV => service::writev(arg1 as i32, arg2 as u64, arg3 as i32),
-        SYS_ARCH_PRCTL => service::arch_prctl(arg1 as u64, arg2 as u64),
         SYS_EXIT => service::exit(),
-        SYS_UNAME => service::uname(arg2),
+        SYS_UNAME => service::uname(arg1),
+        SYS_ARCH_PRCTL => service::arch_prctl(arg1 as u64, arg2 as u64),
+        SYS_GET_TID => {
+            crate::sys::proc::id() as i64
+        }
         SYS_TIME => {
             let out_ptr = arg1 as *mut i64; // time_t is i64
             let mut cmos = CMOS::new();
@@ -70,9 +74,43 @@ pub extern "sysv64" fn syscall_handler(
 
             0i64
         }
+        SYS_EXIT_GROUP => service::exit(),
+        SYS_OPENAT => {
+            let upath = UserPtr(arg2 as *const u8);
+
+            let path = match copy_cstr_from_user(upath, 4096) {
+                Ok(s) => s,
+                _ => String::new(),
+            };
+            let flags = arg3 as i32;
+            let mode = arg4 as i32;
+            service::openat(arg1 as i32, path.as_str(), flags, mode as u32)
+        }
+        SYS_PR_LIMIT64 => {
+            let pid = arg1;
+            let resource = arg2 as u32;
+
+            let new_limit_ptr = arg3 as *const Rlimit64;
+            let old_limit_ptr = arg4 as *mut Rlimit64;
+
+            let new_limit = if new_limit_ptr.is_null() {
+                None
+            } else {
+                Some(unsafe { &*new_limit_ptr })
+            };
+
+            let old_limit = if old_limit_ptr.is_null() {
+                None
+            } else {
+                Some(unsafe { &mut *old_limit_ptr })
+            };
+
+
+            service::pr_limit64(pid as i32, resource, new_limit, old_limit)
+        }
         _ => {
             println!("Unknown syscall number: {}", syscall_number);
-            -1
+            0
         }
     };
 

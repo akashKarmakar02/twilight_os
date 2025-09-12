@@ -1,11 +1,11 @@
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
-use crate::sys::fs::vfs::VFS;
-use crate::sys::proc::{Handler, PROCESS_TABLE};
+use crate::sys::fs::vfs::{FileType, VFS};
+use crate::sys::proc::{Handler, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::tty::{read_char, read_line};
 use crate::{print, serial_prtinln};
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::arch::asm;
 use spin::mutex::Mutex;
@@ -24,7 +24,7 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
             len as i64
         }
         2 => {
-            print!("\x1b[91m{}\x1b[0m", String::from_utf8_lossy(buf));
+            print!("{}", String::from_utf8_lossy(buf));
 
             len as i64
         }
@@ -79,6 +79,9 @@ pub fn read(handler: usize, buf: &mut [u8], len: usize) -> i64 {
     };
 
     if let Some(node) = process.handler.get_mut(handler - 3) {
+        if node.handler.lock().metadata.file_type == FileType::Dir {
+            return -EISDIR as i64;
+        }
         let seek = node.seek;
         if let Ok(content) = node.handler.lock().read() {
             let copy_len = if seek < content.len() {
@@ -97,47 +100,179 @@ pub fn read(handler: usize, buf: &mut [u8], len: usize) -> i64 {
     -1
 }
 
-#[allow(dead_code)]
-pub fn open(path: &str, _flags: i32, _mode: u32) -> i64 {
+fn join_paths(base: &str, rel: &str) -> String {
+    if rel.is_empty() || rel == "." {
+        return base.to_string();
+    }
+    if rel.starts_with('/') {
+        return rel.to_string();
+    }
+    if base == "/" {
+        format!("/{}", rel.trim_start_matches('/'))
+    } else {
+        format!("{}/{}", base.trim_end_matches('/'), rel)
+    }
+}
+
+fn normalize_path(p: &str) -> String {
+    let mut out: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    for seg in p.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            out.pop();
+        } else {
+            out.push(seg);
+        }
+    }
+    if out.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", out.join("/"))
+    }
+}
+
+fn base_for_dirfd(process: &mut Process, dirfd: i32) -> Result<String, i32> {
+    if dirfd == AT_FDCWD {
+        return Ok(process.pwd.clone());
+    }
+    if dirfd < 3 {
+        return Err(-EBADF);
+    }
+    let idx = (dirfd - 3) as usize;
+    if idx >= process.handler.len() {
+        return Err(-EBADF);
+    }
+
+    // You store '&'static mut Handler' in the table:
+    let h: &mut Handler = process.handler[idx];
+
+    // Ensure it’s a directory FD
+    if h.handler.lock().metadata.file_type != FileType::Dir {
+        return Err(-ENOTDIR);
+    }
+
+    Ok(h.path.clone())
+}
+fn split_parent_name(path: &str) -> (&str, &str) {
+    if let Some(p) = path.rfind('/') {
+        if p == 0 {
+            ("/", &path[1..])
+        } else {
+            (&path[..p], &path[p + 1..])
+        }
+    } else {
+        (".", path)
+    }
+}
+
+pub fn open(path: &str, flags: i32, mode: u32) -> i64 {
+    openat(AT_FDCWD, path, flags, mode)
+}
+
+pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
     #[allow(static_mut_refs)]
-    if let Some(process) = unsafe {
+    let proc_option = unsafe {
         PROCESS_TABLE
             .get_mut()
             .unwrap()
             .get_process(crate::sys::proc::id())
-    } {
-        let node = if path.starts_with("/") {
-            #[allow(static_mut_refs)]
-            unsafe {
-                VFS.get_mut().open(path)
-            }
-        } else {
-            #[allow(static_mut_refs)]
-            unsafe {
-                VFS.get_mut()
-                    .open(format!("{}/{}", process.pwd, path).as_str())
-            }
-        };
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
 
-        if let Ok(node) = node {
-            let handler = process.handler.len() + 3;
-            let h = Box::leak(Box::new(Handler {
-                handler: Arc::new(Mutex::new(node)),
-                seek: 0,
-            }));
-            process.handler.push(h);
-            return handler as i64;
+    // Resolve full path
+    let full_path = if path.starts_with('/') {
+        normalize_path(path)
+    } else {
+        match base_for_dirfd(process, dirfd) {
+            Ok(base) => normalize_path(&join_paths(&base, path)),
+            Err(e) => return e as i64,
+        }
+    };
+
+    // Try open existing
+    let mut existed = true;
+    #[allow(static_mut_refs)]
+    let node = unsafe { VFS.get_mut().open(&full_path) };
+    let node = match (node, (flags & O_CREAT) != 0) {
+        (Ok(n), _) => n,
+        (Err(_), true) => {
+            // create new file with mode
+            let (parent, name) = split_parent_name(&full_path);
+            // parent must exist and be a dir
+            #[allow(static_mut_refs)]
+            if let Ok(meta) = unsafe { VFS.get_mut().metadata(parent) } {
+                if meta.file_type != FileType::Dir {
+                    return -(ENOTDIR as i64);
+                }
+            } else {
+                return -(ENOENT as i64);
+            }
+
+            #[allow(static_mut_refs)]
+            if unsafe { VFS.get_mut().touch(parent, name, mode) }.is_err() {
+                return -(EIO as i64);
+            }
+            existed = false;
+            #[allow(static_mut_refs)]
+            // reopen
+            match unsafe { VFS.get_mut().open(&full_path) } {
+                Ok(n2) => n2,
+                Err(_) => return -(EIO as i64),
+            }
+        }
+        (Err(_), false) => return -(ENOENT as i64),
+    };
+
+    // Enforce O_EXCL if it existed
+    if existed && (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
+        return -(EEXIST as i64);
+    }
+
+    // O_DIRECTORY: must be a directory
+    if (flags & O_DIRECTORY) != 0 && node.metadata.file_type != FileType::Dir {
+        return -(ENOTDIR as i64);
+    }
+
+    // Cannot open directory for write unless you implement it
+    let accmode = flags & O_ACCMODE;
+    if node.metadata.file_type == FileType::Dir && (accmode == O_WRONLY || accmode == O_RDWR) {
+        return -(EISDIR as i64);
+    }
+
+    // O_TRUNC (only for regular files)
+    if (flags & O_TRUNC) != 0 && node.metadata.file_type == FileType::File {
+        // You don't have truncate: emulate by writing empty content
+        #[allow(static_mut_refs)]
+        if unsafe { VFS.get_mut().write(&full_path, &[]) }.is_err() {
+            return -(EOPNOTSUPP as i64);
         }
     }
-    -1
+
+    // Install FD
+    let new_fd = process.handler.len() + 3;
+    let h = Box::leak(Box::new(Handler {
+        handler: Arc::new(Mutex::new(node)),
+        seek: 0,
+        path: full_path,
+        flags, // <-- store flags so read/write can enforce later
+    }));
+    process.handler.push(h);
+    new_fd as i64
 }
 
 pub fn exit() -> i64 {
-    unsafe { asm!("swapgs") };
+    serial_prtinln!("exiting process with pid {}", crate::sys::proc::id());
+    unsafe {
+        asm!("swapgs")
+    };
 
     crate::sys::proc::exit();
 
-    0
+    unreachable!()
 }
 
 pub fn uname(ptr: usize) -> i64 {
@@ -151,15 +286,17 @@ pub fn uname(ptr: usize) -> i64 {
         buf[n] = 0;
     }
 
-    unsafe {
-        let uname_s = &mut *uname_ptr;
+    if !uname_ptr.is_null() {
+        unsafe {
+            let uname_s = &mut *uname_ptr;
 
-        fill(&mut uname_s.sysname, "TwilightOS");
-        fill(&mut uname_s.nodename, "twilight");
-        fill(&mut uname_s.release, "0.1.0-testing-build.x86_64");
-        fill(&mut uname_s.version, "#1 NON-SMP 09-09-2025");
-        fill(&mut uname_s.machine, "x86_64");
-        fill(&mut uname_s.domainname, "-");
+            fill(&mut uname_s.sysname, "TwilightOS");
+            fill(&mut uname_s.nodename, "twilight");
+            fill(&mut uname_s.release, "0.1.0-testing-build.x86_64");
+            fill(&mut uname_s.version, "#1 NON-SMP 09-09-2025");
+            fill(&mut uname_s.machine, "x86_64");
+            fill(&mut uname_s.domainname, "-");
+        }
     }
 
     0
@@ -208,4 +345,20 @@ pub fn writev(fd: i32, iov_ptr: u64, iovcnt: i32) -> i64 {
         }
     }
     total
+}
+
+pub fn pr_limit64(pid: i32, resource: u32, _new_limit_ptr: Option<&Rlimit64>, old_limit_ptr: Option<&mut Rlimit64>) -> i64 {
+    if pid != 0 {
+        return -ESRCH as i64;
+    }
+    if resource != RLIMIT_STACK {
+        return -EINVAL as i64;
+    }
+
+    if let Some(old_limit_ptr) = old_limit_ptr {
+        old_limit_ptr.rlim_max = USER_STACK_SIZE as u64;
+        old_limit_ptr.rlim_cur = USER_STACK_SIZE as u64;
+    }
+
+    0
 }
