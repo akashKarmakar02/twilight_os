@@ -1,7 +1,7 @@
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, set_fsbase, set_inactive_gsbase, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
-use crate::println;
+use crate::{println, serial_prtinln};
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
 use crate::sys::memory::{
@@ -10,6 +10,7 @@ use crate::sys::memory::{
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
@@ -23,7 +24,7 @@ pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
-const STACK_SIZE: usize = 0x4000;
+pub const USER_STACK_SIZE: usize = 0x4000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
 
@@ -59,37 +60,36 @@ pub struct TrapFrame {
 #[derive(Debug)]
 struct Elf64Ehdr {
     e_ident: [u8; 16],
-    e_type:  u16,
+    e_type: u16,
     e_machine: u16,
     e_version: u32,
-    e_entry:  u64,
-    e_phoff:  u64,
-    e_shoff:  u64,
-    e_flags:  u32,
+    e_entry: u64,
+    e_phoff: u64,
+    e_shoff: u64,
+    e_flags: u32,
     e_ehsize: u16,
     e_phentsize: u16,
-    e_phnum:  u16,
+    e_phnum: u16,
     e_shentsize: u16,
-    e_shnum:  u16,
+    e_shnum: u16,
     e_shstrndx: u16,
 }
 
 #[repr(C, packed)]
 #[derive(Debug)]
 struct Elf64Phdr {
-    p_type:   u32,
-    p_flags:  u32,
+    p_type: u32,
+    p_flags: u32,
     p_offset: u64,
-    p_vaddr:  u64,
-    p_paddr:  u64,
+    p_vaddr: u64,
+    p_paddr: u64,
     p_filesz: u64,
-    p_memsz:  u64,
-    p_align:  u64,
+    p_memsz: u64,
+    p_align: u64,
 }
 
 const PT_LOAD: u32 = 1;
 const PT_PHDR: u32 = 6;
-
 
 // ================== Process ==================
 
@@ -206,24 +206,31 @@ impl Process {
                 // Try PT_PHDR first
                 for i in 0..e_phnum {
                     let ph = unsafe {
-                        &*(content_buf.as_ptr()
-                            .add((e_phoff + i*e_phentsize) as usize) as *const Elf64Phdr)
+                        &*(content_buf
+                            .as_ptr()
+                            .add((e_phoff + i * e_phentsize) as usize)
+                            as *const Elf64Phdr)
                     };
-                    if ph.p_type == PT_PHDR { phdr_va = load_bias + ph.p_vaddr; break; }
+                    if ph.p_type == PT_PHDR {
+                        phdr_va = load_bias + ph.p_vaddr;
+                        break;
+                    }
                 }
 
                 // Fallback: translate file offset via containing PT_LOAD
                 if phdr_va == 0 {
                     let ph_tbl_start = e_phoff;
-                    let ph_tbl_end   = e_phoff + e_phentsize * e_phnum;
+                    let ph_tbl_end = e_phoff + e_phentsize * e_phnum;
                     for i in 0..e_phnum {
                         let ph = unsafe {
-                            &*(content_buf.as_ptr()
-                                .add((e_phoff + i*e_phentsize) as usize) as *const Elf64Phdr)
+                            &*(content_buf
+                                .as_ptr()
+                                .add((e_phoff + i * e_phentsize) as usize)
+                                as *const Elf64Phdr)
                         };
                         if ph.p_type == PT_LOAD {
                             let seg_start = ph.p_offset;
-                            let seg_end   = ph.p_offset + ph.p_filesz;
+                            let seg_end = ph.p_offset + ph.p_filesz;
                             if ph_tbl_start >= seg_start && ph_tbl_end <= seg_end {
                                 phdr_va = load_bias + ph.p_vaddr + (e_phoff - ph.p_offset);
                                 break;
@@ -235,7 +242,6 @@ impl Process {
                 entry_point_addr = eh.e_entry + load_bias;
                 phent = e_phentsize;
                 phnum = e_phnum;
-
 
                 for segment in obj.segments() {
                     if let Ok(data) = segment.data() {
@@ -266,10 +272,12 @@ impl Process {
                     }
                 }
 
-                let user_stack_base = user_stack_top.as_u64() - STACK_SIZE as u64;
+                let user_stack_base = user_stack_top.as_u64() - USER_STACK_SIZE as u64;
 
-                if let Ok(_) = alloc_pages(&mut mapper, user_stack_base, STACK_SIZE, true, false) {
-                    addr_size_vec.push((user_stack_base, STACK_SIZE));
+                if let Ok(_) =
+                    alloc_pages(&mut mapper, user_stack_base, USER_STACK_SIZE, true, false)
+                {
+                    addr_size_vec.push((user_stack_base, USER_STACK_SIZE));
                 }
             }
         }
@@ -288,7 +296,7 @@ impl Process {
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let p = Process {
             stack: user_rsp,
-            stack_size: STACK_SIZE,
+            stack_size: USER_STACK_SIZE,
             entry_point: entry_point_addr,
             pid,
             mapper,
@@ -364,8 +372,6 @@ pub fn init() {
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     PID.store(pid, Ordering::SeqCst);
 
-
-
     #[allow(static_mut_refs)]
     unsafe {
         PROCESS_TABLE
@@ -400,8 +406,8 @@ fn build_initial_stack(
     entry_point: u64,
     argv: Option<&[&str]>,
     envp: Option<&[&str]>,
-    phdr_addr: u64,  // runtime VA (load_base + e_phoff)
-    phent: u64,      // 56 for Elf64_Phdr
+    phdr_addr: u64, // runtime VA (load_base + e_phoff)
+    phent: u64,     // 56 for Elf64_Phdr
     phnum: u64,
     execfn_ptr: Option<u64>,   // usually argv[0]
     random16_ptr: Option<u64>, // 16 bytes placed on stack
@@ -416,17 +422,29 @@ fn build_initial_stack(
         }
         *rsp
     }
+    // helper: push raw bytes without a trailing NUL (for AT_RANDOM)
+    fn push_raw(rsp: &mut u64, bytes: &[u8]) -> u64 {
+        *rsp -= bytes.len() as u64;
+        let p = *rsp as *mut u8;
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len()); }
+        *rsp
+    }
 
     // place strings first (argv/envp), record their pointers in-order
     let mut argv_ptrs: Vec<u64> = Vec::new();
     let mut envp_ptrs: Vec<u64> = Vec::new();
 
     if let Some(envs) = envp {
-        for &e in envs.iter().rev() { envp_ptrs.push(push_bytes(&mut rsp, e.as_bytes())); }
+        for &e in envs.iter().rev() {
+            envp_ptrs.push(push_bytes(&mut rsp, e.as_bytes()));
+        }
         envp_ptrs.reverse();
     }
+    println!("arg: {:?}", argv);
     if let Some(args) = argv {
-        for &a in args.iter().rev() { argv_ptrs.push(push_bytes(&mut rsp, a.as_bytes())); }
+        for &a in args.iter() {
+            argv_ptrs.push(push_bytes(&mut rsp, a.as_bytes()));
+        }
         argv_ptrs.reverse();
     }
 
@@ -435,65 +453,74 @@ fn build_initial_stack(
         p
     } else {
         // simple deterministic bytes if you don't have RNG yet (acceptable to start)
-        let bytes = [0u8;16];
-        push_bytes(&mut rsp, &bytes)
+        let bytes = [0u8; 16];
+        push_raw(&mut rsp, &bytes)
     };
-    let execfn = execfn_ptr.or_else(|| argv_ptrs.get(0).copied()).unwrap_or(0);
+    let execfn = execfn_ptr
+        .or_else(|| argv_ptrs.get(0).copied())
+        .unwrap_or(0);
+    serial_prtinln!("{}", execfn);
 
-    // maintain 16-byte alignment such that final (rsp % 16) == 8
-    rsp &= !0xFu64;
 
     // ---- write auxv (topmost among these tables) ----
-    let aux: [AuxvEntry; 14] = [
-        AuxvEntry { key:  3, value: phdr_addr }, // AT_PHDR
-        AuxvEntry { key:  4, value: phent     }, // AT_PHENT
-        AuxvEntry { key:  5, value: phnum     }, // AT_PHNUM
-        AuxvEntry { key:  6, value: 4096      }, // AT_PAGESZ
-        AuxvEntry { key:  9, value: entry_point }, // AT_ENTRY
-        AuxvEntry { key: 25, value: 0         }, // AT_SECURE
-        AuxvEntry { key: 17, value: 0         }, // AT_UID
-        AuxvEntry { key: 18, value: 0         }, // AT_EUID
-        AuxvEntry { key: 19, value: 0         }, // AT_GID
-        AuxvEntry { key: 20, value: 0         }, // AT_EGID
-        AuxvEntry { key: 23, value: 100       }, // AT_CLKTCK
-        AuxvEntry { key: 25, value: 0         }, // AT_SECURE (dup ok)
-        AuxvEntry { key: 25, value: 0         }, // keep simple; real set once is fine
-        AuxvEntry { key:  0, value: 0         }, // AT_NULL
+    let aux_vec: Vec<AuxvEntry> = vec![
+        AuxvEntry { key: 3, value: phdr_addr }, // AT_PHDR
+        AuxvEntry { key: 4, value: phent     }, // AT_PHENT
+        AuxvEntry { key: 5, value: phnum     }, // AT_PHNUM
+        AuxvEntry { key: 6, value: 4096      }, // AT_PAGESZ
+        AuxvEntry { key: 9, value: entry_point }, // AT_ENTRY
+        AuxvEntry { key: 25, value: rand_ptr }, // AT_RANDOM
+        AuxvEntry { key: 31, value: execfn   }, // AT_EXECFN
+        AuxvEntry { key: 17, value: 0 }, // AT_UID
+        AuxvEntry { key: 18, value: 0 }, // AT_EUID
+        AuxvEntry { key: 19, value: 0 }, // AT_GID
+        AuxvEntry { key: 20, value: 0 }, // AT_EGID
+        AuxvEntry { key: 23, value: 100 }, // AT_CLKTCK
+        AuxvEntry { key: 0, value: 0 }, // AT_NULL
     ];
-    // (You should also include AT_RANDOM=25 and AT_EXECFN=31; add them below:)
-    let mut aux_vec: Vec<AuxvEntry> = aux.to_vec();
-    aux_vec.insert(5, AuxvEntry { key: 25, value: rand_ptr }); // AT_RANDOM
-    aux_vec.insert(6, AuxvEntry { key: 31, value: execfn   }); // AT_EXECFN
 
     rsp -= (core::mem::size_of::<AuxvEntry>() * aux_vec.len()) as u64;
     unsafe {
         core::ptr::copy_nonoverlapping(aux_vec.as_ptr(), rsp as *mut AuxvEntry, aux_vec.len());
     }
 
+    rsp -= 8;
+    unsafe {
+        *(rsp as *mut u64) = 0;
+    }
+
     // ---- envp pointers then NULL ----
     for &p in &envp_ptrs {
-        rsp -= 8; unsafe { *(rsp as *mut u64) = p; }
+        rsp -= 8;
+        unsafe {
+            *(rsp as *mut u64) = p;
+        }
     }
-    rsp -= 8; unsafe { *(rsp as *mut u64) = 0; } // terminator
+
+    // envp termintor
+    rsp -= 8;
+    unsafe {
+        *(rsp as *mut u64) = 0;
+    }
+
 
     // ---- argv pointers then NULL ----
-    if !argv_ptrs.is_empty() {
-        for &p in &argv_ptrs {
-            rsp -= 8; unsafe { *(rsp as *mut u64) = p; }
+    for &p in &argv_ptrs {
+        serial_prtinln!("ptr: {:#X}", p);
+        rsp -= 8; 
+        unsafe {
+            *(rsp as *mut u64) = p; 
         }
-        rsp -= 8; unsafe { *(rsp as *mut u64) = 0; } // terminator
-        // ---- argc ----
-        rsp -= 8; unsafe { *(rsp as *mut u64) = argv_ptrs.len() as u64; }
-    } else {
-        // argc=0, and still provide argv NULL
-        rsp -= 8; unsafe { *(rsp as *mut u64) = 0; } // argv NULL
-        rsp -= 8; unsafe { *(rsp as *mut u64) = 0; } // argc=0 (not standard, better pass argc=1 with "")
     }
 
-    // ensure final alignment rule (rsp % 16 == 8). If not, pad 8 bytes above argc.
-    if (rsp & 0xF) != 8 {
-        rsp -= 8; unsafe { *(rsp as *mut u64) = 0; }
-    }
+    // ---- padding BEFORE argc to ensure final %rsp == 8 ----
+    // We want (rsp_after_argc % 16 == 8). After we push argc (8 bytes),
+    // rsp will be (current_rsp - 8). So we need (current_rsp % 16 == 0).
+    // If it's 8, push a padding 0 to flip it to 0.
+
+    // ---- argc ----
+    rsp -= 8;
+    unsafe { *(rsp as *mut u64) = argv_ptrs.len() as u64; }
 
     rsp
 }
