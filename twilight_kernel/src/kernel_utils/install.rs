@@ -41,7 +41,7 @@ pub fn main() {
                     indirect_zones: 0,
                     double_indirect_zones: 0,
                 };
-                root_inode.zones[0] = root_zone as u16;
+                root_inode.zones[0] = root_zone;
                 
                 fs.write_inode(root_inode_num + 1, &root_inode).expect("TODO: panic message");
                 
@@ -72,6 +72,8 @@ pub fn main() {
         copy_file!("/bin/bc", true);
         copy_file!("/bin/hello", true);
         copy_file!("/bin/echo", true);
+        copy_file!("/bin/cat", true);
+        copy_file!("/bin/ls", true);
         copy_file!("/bin/uname", true);
     }
 }

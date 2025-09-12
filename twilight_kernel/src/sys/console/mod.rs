@@ -3,7 +3,7 @@ extern crate alloc;
 use crate::arch::x86_64::halt;
 use crate::sys::console::writer::clear_screen;
 use crate::sys::fs::vfs::VFS;
-use crate::sys::proc::{Process, PROCESS_TABLE};
+use crate::sys::proc::{PROCESS_TABLE, Process};
 use crate::sys::tty::read_char;
 use crate::{print, println, serial_prtinln};
 use alloc::format;
@@ -61,11 +61,7 @@ fn handle_console_input() {
                 }
                 let args: Vec<&str> = cmd_line.split_whitespace().collect();
 
-                if args.len() > 1 {
-                    exec(args[0], &args);
-                } else if !args.is_empty() {
-                    exec(args[0], &[]);
-                }
+                exec(args[0], &args);
                 start_kernel_console();
 
                 // reset history index
@@ -174,7 +170,7 @@ fn exec(cmd: &str, args: &[&str]) {
         }
         "shutdown" => crate::kernel_utils::shutdown::main(),
         "meminfo" => crate::kernel_utils::meminfo::main(),
-        "cat" => crate::kernel_utils::cat::main(args),
+        // "cat" => crate::kernel_utils::cat::main(args),
         "ls" => crate::kernel_utils::ls::main(args),
         "pitch" => {
             println!("{}", crate::sys::framebuffer::get_pitch());
@@ -193,7 +189,9 @@ fn exec(cmd: &str, args: &[&str]) {
             #[allow(static_mut_refs)]
             let fs = unsafe { VFS.get_mut() };
 
-            if let Ok(buf) = fs.read(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str()) {
+            if let Ok(buf) =
+                fs.read(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str())
+            {
                 #[allow(static_mut_refs)]
                 let process = Process::new(buf.clone(), unsafe { DIR.as_str() }, args);
 
@@ -204,7 +202,6 @@ fn exec(cmd: &str, args: &[&str]) {
             } else {
                 println!("{}: not a command", cmd);
             }
-
         }
     }
 }

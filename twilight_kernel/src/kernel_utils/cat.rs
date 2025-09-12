@@ -20,7 +20,7 @@ pub fn main(args: &[&str]) {
             }
         } else {
             #[allow(static_mut_refs)]
-            if let Err(_) = unsafe { VFS.get_mut().touch(pwd, args[2]) } {
+            if let Err(_) = unsafe { VFS.get_mut().touch(pwd, args[2], 0) } {
                 println!("cat: {}: Failed to create", args[2]);
             } else {
                 #[allow(static_mut_refs)]
