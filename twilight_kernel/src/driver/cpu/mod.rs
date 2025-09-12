@@ -1,12 +1,12 @@
-use crate::arch::x86_64::syscall::{rdmsr, wrmsr, IA32_EFER};
+use crate::arch::x86_64::syscall::{IA32_EFER, rdmsr, wrmsr};
 use crate::{driver, extern_sym, println};
 use alloc::string::String;
 use core::alloc::Layout;
 use limine::response::MpResponse;
 use raw_cpuid::CpuId;
+use x86_64::VirtAddr;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::xcontrol::{XCr0, XCr0Flags};
-use x86_64::VirtAddr;
 
 unsafe extern "C" fn ap_main(_cpu: &limine::mp::Cpu) -> ! {
     use x86_64::instructions::{hlt, interrupts};
@@ -15,7 +15,7 @@ unsafe extern "C" fn ap_main(_cpu: &limine::mp::Cpu) -> ! {
     crate::arch::x86_64::gdt::init_after_boot();
 
     crate::arch::x86_64::syscall::init();
-    
+
     interrupts::enable();
 
     loop {
@@ -27,6 +27,12 @@ pub fn init_smp(mp_response: &'static MpResponse) {
     let smp = mp_response;
     let bsp_id = mp_response.bsp_lapic_id();
 
+    crate::arch::x86_64::gdt::init();
+
+    crate::arch::x86_64::gdt::init_after_boot();
+
+    crate::arch::x86_64::syscall::init();
+
     let time = driver::timer::pit::uptime();
 
     for i in 0..smp.cpus().len() {
@@ -34,9 +40,15 @@ pub fn init_smp(mp_response: &'static MpResponse) {
         let apic_id = cpu.lapic_id;
 
         if apic_id == bsp_id {
-            println!("\x1b[93m[{:.6}]\x1b[0m BSP Core {}: APIC ID {}", time, i, apic_id, );
+            println!(
+                "\x1b[93m[{:.6}]\x1b[0m BSP Core {}: APIC ID {}",
+                time, i, apic_id,
+            );
         } else {
-            println!("\x1b[93m[{:.6}]\x1b[0m AP Core {}: APIC ID {}", time, i, apic_id);
+            println!(
+                "\x1b[93m[{:.6}]\x1b[0m AP Core {}: APIC ID {}",
+                time, i, apic_id
+            );
 
             cpu.goto_address.write(ap_main);
         }
