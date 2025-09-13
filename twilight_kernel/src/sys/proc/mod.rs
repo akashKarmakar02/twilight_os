@@ -4,9 +4,7 @@ use crate::kernel_utils::exec::jump_to_user;
 use crate::{println, serial_prtinln};
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
-use crate::sys::memory::{
-    active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset,
-};
+use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset};
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -394,6 +392,7 @@ pub fn init() {
             })
     }
 }
+
 #[repr(C)]
 #[derive(Clone)]
 struct AuxvEntry {
@@ -440,7 +439,6 @@ fn build_initial_stack(
         }
         envp_ptrs.reverse();
     }
-    println!("arg: {:?}", argv);
     if let Some(args) = argv {
         for &a in args.iter() {
             argv_ptrs.push(push_bytes(&mut rsp, a.as_bytes()));

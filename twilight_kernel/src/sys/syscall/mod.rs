@@ -2,7 +2,7 @@ mod service;
 
 use crate::arch::x86_64::idt::{PICS, Registers};
 use crate::driver::timer::cmos::CMOS;
-use crate::{println, serial_print, serial_prtinln};
+use crate::{println, serial_prtinln};
 use crate::sys::syscall::service::read;
 use crate::task::executor::sleep;
 use alloc::string::String;
@@ -17,7 +17,10 @@ pub extern "sysv64" fn syscall_handler(
     regs: &mut Registers,
 ) {
     let syscall_number = regs.rax as usize;
-    serial_prtinln!("syscall: {}", syscall_number);
+    #[allow(static_mut_refs)]
+    let cpu_id_ptr = unsafe { crate::arch::x86_64::cpu_local::CPUID.addr().as_ptr::<usize>() as *mut usize };
+    let cpu_id = unsafe { &mut *cpu_id_ptr };
+    serial_prtinln!("syscall: {} cpu: {}", syscall_number, cpu_id);
     let arg1 = regs.rdi;
     let arg2 = regs.rsi;
     let arg3 = regs.rdx;
