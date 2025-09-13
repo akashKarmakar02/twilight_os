@@ -1,3 +1,3 @@
 [workspace]
-members = ["twilight_common", "twilight_kernel", "userspace", "userspace/libc"]
+members = ["twilight_common", "twilight_kernel", "twilight_proc", "userspace", "userspace/libc"]
 resolver = "2"
