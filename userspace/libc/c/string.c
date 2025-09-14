@@ -21,3 +21,22 @@ char *strncpy(char *dest, const char *src, size_t n) {
 
     return dest;
 }
+char *strncat(char *dest, const char *src, size_t n) {
+    char *d = dest;
+
+    // move d to the end of dest string
+    while (*d) {
+        d++;
+    }
+
+    // append up to n characters from src
+    size_t i;
+    for (i = 0; i < n && src[i] != '\0'; i++) {
+        d[i] = src[i];
+    }
+
+    // always NUL terminate
+    d[i] = '\0';
+
+    return dest;
+}
