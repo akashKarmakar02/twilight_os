@@ -391,40 +391,6 @@ fn dirent64_reclen(name_len: usize) -> u16 {
     aligned as u16
 }
 
-/// Writes one linux_dirent64 at `out[..]`. Returns bytes written, or None if not enough space.
-fn write_dirent64(out: &mut [u8], ino: u64, next_cookie: i64, d_type: u8, name: &str) -> Option<usize> {
-    let name_bytes = name.as_bytes();
-    let reclen = dirent64_reclen(name_bytes.len());
-    if out.len() < reclen as usize { return None; }
-
-    // Offsets within the record
-    let mut p = 0usize;
-
-    // d_ino (u64)
-    out[p..p+8].copy_from_slice(&ino.to_le_bytes()); p += 8;
-
-    // d_off (i64) — cookie to resume at next entry
-    out[p..p+8].copy_from_slice(&next_cookie.to_le_bytes()); p += 8;
-
-    // d_reclen (u16)
-    let r16 = reclen as u16;
-    out[p..p+2].copy_from_slice(&r16.to_le_bytes()); p += 2;
-
-    // d_type (u8)
-    out[p] = d_type; p += 1;
-
-    // d_name (char[]) + NUL
-    out[p..p+name_bytes.len()].copy_from_slice(name_bytes);
-    p += name_bytes.len();
-    out[p] = 0; // NUL
-    p += 1;
-
-    // padding to 8B boundary (already accounted in reclen)
-    for b in &mut out[p..reclen as usize] { *b = 0; }
-
-    Some(reclen as usize)
-}
-
 pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
     if user_buf.is_null() { return -(EFAULT as i64); }
     if buf_len < (size_of::<Dirent64Hdr>() + 2) { // practically can't hold any useful name

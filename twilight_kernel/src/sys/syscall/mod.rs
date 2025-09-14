@@ -1,10 +1,10 @@
 mod service;
 
-use crate::arch::x86_64::idt::{PICS, Registers};
+use crate::arch::x86_64::idt::{Registers, PICS};
 use crate::driver::timer::cmos::CMOS;
-use crate::{println, serial_prtinln};
 use crate::sys::syscall::service::read;
 use crate::task::executor::sleep;
+use crate::serial_prtinln;
 use alloc::string::String;
 use alloc::vec::Vec;
 use twilight_common::syscall::numbers::*;

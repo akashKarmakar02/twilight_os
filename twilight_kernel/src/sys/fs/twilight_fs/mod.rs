@@ -7,7 +7,7 @@ pub mod metadata;
 use crate::driver::disk::BlockDeviceIO;
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode, VfsNodeOps};
-use crate::{driver, println};
+use crate::{driver, println, serial_prtinln};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -60,6 +60,7 @@ unsafe impl Sync for MinixNode {}
 #[allow(dead_code)]
 impl VfsNodeOps for MinixNode {
     fn read(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()> {
+        serial_prtinln!("{:?}", self.inode);
         let mut content = Vec::new();
         let mut remaining = self.inode.size as usize;
         let block_size = 512;
@@ -1189,6 +1190,7 @@ impl FileSystem for MinixFs {
 
     fn read(&mut self, path: &str) -> Result<Vec<u8>, ()> {
         if let Ok(inode) = self.resolve_path(path) {
+            serial_prtinln!("{:?}", inode);
             Ok(self.read_file(inode).unwrap())
         } else {
             Err(())
