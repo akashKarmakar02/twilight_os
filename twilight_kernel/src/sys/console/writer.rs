@@ -7,6 +7,10 @@ use alloc::{vec, vec::Vec};
 use core::fmt;
 use core::fmt::Write;
 
+#[derive(Copy, Clone)]
+enum AnsiState { Normal, Esc, Csi }
+
+
 static mut WRITER: Option<Writer> = None;
 
 #[derive(Clone)]
@@ -125,6 +129,8 @@ pub struct Writer {
     screen_width: u64,
     cursor_visible: bool,
     cursor_timer: usize,
+    ansi_state: AnsiState,
+    ansi_buf: String,
 }
 
 impl Writer {
@@ -139,6 +145,8 @@ impl Writer {
             screen_height: get_framebuffer().height,
             cursor_visible: true,
             cursor_timer: 0,
+            ansi_state: AnsiState::Normal,
+            ansi_buf: String::new(),
         }
     }
 
@@ -314,60 +322,80 @@ impl Writer {
         }
     }
 
-    fn parse_ansi_code(&mut self, code: &str) {
-        let parts: Vec<u8> = code.split(';').filter_map(|s| s.parse().ok()).collect();
-
-        for code in parts {
-            match code {
-                0 => self.color = 0xBFBFBF,  // Reset
-                30 => self.color = 0x000000, // Black
-                31 => self.color = 0xAA0000, // Red
-                32 => self.color = 0x00AA00, // Green
-                33 => self.color = 0xAA5500, // Yellow
-                34 => self.color = 0x0000AA, // Blue
-                35 => self.color = 0xAA00AA, // Magenta
-                36 => self.color = 0x00AAAA, // Cyan
-                37 => self.color = 0xAAAAAA, // White (gray)
-
-                // Bright foreground colors (90–97)
-                90 => self.color = 0x555555, // Bright Black (Dark Gray)
-                91 => self.color = 0xFF5555, // Bright Red
-                92 => self.color = 0x68CB5F, // Bright Green
-                93 => self.color = 0xFFFF55, // Bright Yellow
-                94 => self.color = 0x5555FF, // Bright Blue
-                95 => self.color = 0xFF55FF, // Bright Magenta
-                96 => self.color = 0x55FFFF, // Bright Cyan
-                97 => self.color = 0xFFFFFF, // Bright White
-                _ => {}
+    fn feed_char(&mut self, c: char) {
+        match self.ansi_state {
+            AnsiState::Normal => {
+                if c == '\x1b' {
+                    self.ansi_state = AnsiState::Esc;
+                } else {
+                    self.write_char(c);
+                }
+            }
+            AnsiState::Esc => {
+                if c == '[' {
+                    self.ansi_buf.clear();
+                    self.ansi_state = AnsiState::Csi;
+                } else {
+                    // Not a CSI sequence; print ESC literally and this char
+                    self.write_char('\x1b');
+                    self.write_char(c);
+                    self.ansi_state = AnsiState::Normal;
+                }
+            }
+            AnsiState::Csi => {
+                match c {
+                    // collect params for SGR
+                    '0'..='9' | ';' => self.ansi_buf.push(c),
+                    'm' => { // SGR end
+                        if self.ansi_buf.is_empty() { self.parse_ansi_code("0"); }
+                        else { self.parse_ansi_code(self.ansi_buf.clone().as_str()); }
+                        self.ansi_buf.clear();
+                        self.ansi_state = AnsiState::Normal;
+                    }
+                    _ => {
+                        // unsupported CSI; ignore it and return to normal
+                        self.ansi_buf.clear();
+                        self.ansi_state = AnsiState::Normal;
+                    }
+                }
             }
         }
     }
 
+    // Replace write_string with a streaming version
     pub fn write_string(&mut self, s: &str) {
-        let mut chars = s.chars().peekable();
+        for ch in s.chars() {
+            self.feed_char(ch);
+        }
+    }
 
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                // Try to parse escape sequence: \x1b[31m
-                if chars.peek() == Some(&'[') {
-                    chars.next(); // skip '['
+    // (optional) broaden reset handling:
+    fn parse_ansi_code(&mut self, code: &str) {
+        let parts: Vec<u8> = code.split(';').filter_map(|s| s.parse().ok()).collect();
+        if parts.is_empty() { self.color = 0xBFBFBF; return; } // treat empty as reset
 
-                    let mut code = String::new();
-                    while let Some(&next_c) = chars.peek() {
-                        if next_c == 'm' {
-                            chars.next(); // consume 'm'
-                            break;
-                        }
-                        code.push(next_c);
-                        chars.next();
-                    }
-
-                    self.parse_ansi_code(&code);
-                    continue;
-                }
+        for code in parts {
+            match code {
+                0 | 39 => self.color = 0xBFBFBF, // reset/default fg
+                30 => self.color = 0x000000,
+                31 => self.color = 0xAA0000,
+                32 => self.color = 0x00AA00,
+                33 => self.color = 0xAA5500,
+                34 => self.color = 0x0000AA,
+                35 => self.color = 0xAA00AA,
+                36 => self.color = 0x00AAAA,
+                37 => self.color = 0xAAAAAA,
+                90 => self.color = 0x555555,
+                91 => self.color = 0xFF5555,
+                92 => self.color = 0x68CB5F,
+                93 => self.color = 0xFFFF55,
+                94 => self.color = 0x5555FF,
+                95 => self.color = 0xFF55FF,
+                96 => self.color = 0x55FFFF,
+                97 => self.color = 0xFFFFFF,
+                // ignore attributes like 1 (bold), 4 (underline) for now
+                _ => {}
             }
-
-            self.write_char(c);
         }
     }
 }

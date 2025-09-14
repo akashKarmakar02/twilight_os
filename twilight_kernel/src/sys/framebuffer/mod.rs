@@ -85,7 +85,7 @@ impl VfsNode for TwilightFrameBuffer {
             let fb_u32_ptr = fb_ptr.cast::<u32>();
             for i in 0..(buffer.len() / 4) {
                 let color = self.extract_color(&buffer[i * 4..(i + 1) * 4]);
-                fb_u32_ptr.add(i + offset as usize).write(color);
+                fb_u32_ptr.add(i + offset as usize).write_volatile(color);
             }
         }
 
