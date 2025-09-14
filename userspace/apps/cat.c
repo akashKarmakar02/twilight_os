@@ -3,6 +3,7 @@
 
 // ---- tiny libc shims (safe if your headers are not ready) ----
 #include "unistd.h"
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -55,19 +56,6 @@ static void err2(const char *a, const char *b) {
 // ---- cat core ----
 static int out_fd = 1;
 
-static int cat_fd(int fd) {
-  unsigned char buf[16 * 1024];
-  for (;;) {
-    ssize_t r = read(fd, buf, sizeof buf);
-    if (r == 0)
-      return 0;
-    if (r < 0)
-      return -1;
-    if (write_all(out_fd, buf, (size_t)r) < 0)
-      return -1;
-  }
-}
-
 // Remove argv[i] and argv[i+1]
 static void remove_two(char **argv, int *argc, int i) {
   for (int j = i; j + 2 <= *argc; ++j)
@@ -75,17 +63,89 @@ static void remove_two(char **argv, int *argc, int i) {
   *argc -= 2;
 }
 
-int main(int argc, char **argv) {
-    printf("argc: %d\n", argc);
+// change signature to accept argv cleanly
+char *join_strings(char *result, size_t size, char *const arr[], size_t count) {
+  result[0] = '\0';
+  int first = 1;
 
-    for (int i = 0; i < argc; i++) {
-        printf("argv[%d] @ %p = \"%s\"\n", i, (void*)argv[i], argv[i]);
+  for (size_t i = 3; i < count; i++) {
+    if (!first) {
+      size_t rem = (size > 0) ? size - strlen(result) - 1 : 0;
+      strncat(result, " ", rem);
     }
+    {
+      size_t rem = (size > 0) ? size - strlen(result) - 1 : 0;
+      strncat(result, arr[i], rem);
+    }
+    first = 0;
+  }
 
-    // Also show the NULL terminator after argv
-    printf("argv[%d] @ %p = %p (terminator)\n",
-           argc, (void*)&argv[argc], (void*)argv[argc]);
-
-    return 0;
+  return result;
 }
 
+int main(int argc, char **argv) {
+  if (argc < 2) {
+    printf("usage: cat [file]...\n       cat > file [text...]\n");
+    return 1;
+  }
+
+  char *file_path;
+
+  if (strcmp(argv[1], ">") == 0 && argc >= 3) {
+    file_path = argv[2];
+  } else if (strcmp(argv[1], ">") == 0 && argc == 2) {
+    printf("usage: cat > file [text...]\n");
+    return 1;
+  } else {
+    file_path = argv[1];
+  }
+
+  if (strcmp(argv[1], ">") == 0) {
+    int fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);  // add mode
+    if (fd < 0) {
+      err2(file_path, ": cannot open");
+      return 1; // don't close on failure
+    }
+
+    if (argc == 3) { // only create/truncate then exit
+      close(fd);
+      return 0;
+    }
+
+    char buf[512];
+    join_strings(buf, sizeof(buf), argv, (size_t)argc);
+    if (write_all(fd, buf, strlen(buf)) < 0) {
+      err2("write error", 0);
+      close(fd);
+      return 1;
+    }
+    close(fd);
+    return 0;
+  } else {
+    int fd = open(file_path, O_RDONLY);
+    if (fd < 0) {
+      err2(file_path, ": cannot open");
+      return 1;
+    }
+
+    unsigned char buf[512];
+    for (;;) {
+      ssize_t r = read(fd, buf, sizeof buf);
+      if (r == 0) { // EOF
+        close(fd);
+        return 0;
+      }
+      if (r < 0) {
+        // no fstat: just report a generic read error
+        err2("read error", 0);
+        close(fd);
+        return 1;
+      }
+      if (write_all(out_fd, buf, (size_t)r) < 0) {
+        err2("write error", 0);
+        close(fd);
+        return 1;
+      }
+    }
+  }
+}
