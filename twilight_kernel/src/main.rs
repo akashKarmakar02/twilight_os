@@ -1,13 +1,26 @@
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
+#![feature(alloc_error_handler)]
+#![feature(let_chains)]
+#![feature(decl_macro)]
+
 extern crate alloc;
+
+#[macro_use]
+extern crate twilight_proc;
+
+pub mod arch;
+pub mod driver;
+pub mod kernel_utils;
+pub mod task;
+pub mod sys;
 
 use core::arch::asm;
 use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
 use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest, StackSizeRequest};
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
-use twilight_kernel::{println, serial_print, serial_prtinln};
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -41,7 +54,7 @@ unsafe extern "C" fn kmain() -> ! {
         core::ptr::read_volatile(STACK.get_response().unwrap());
     }
 
-    twilight_kernel::driver::cpu::init_cpu_x86_64();
+    driver::cpu::init_cpu_x86_64();
 
     let mut framebuffer: Option<Framebuffer> = None;
     let mut hhdm_response: Option<&HhdmResponse> = None;
@@ -66,7 +79,7 @@ unsafe extern "C" fn kmain() -> ! {
         mp_response = Some(mpr);
     }
 
-    twilight_kernel::init(
+    init(
         &framebuffer.unwrap(),
         hhdm_response.unwrap(),
         memory_map_response.unwrap(),
@@ -91,7 +104,7 @@ unsafe extern "C" fn kmain() -> ! {
     println!(r"  |____|    \/\_/ |__|____/__\___  /|___|  /__|   \_______  /_______  / ");
     println!(r"                            /_____/      \/               \/        \/  ");
 
-    twilight_kernel::sys::console::init_console();
+    sys::console::init_console();
 
     hcf()
 }
@@ -113,4 +126,69 @@ fn hcf() -> ! {
             asm!("idle 0");
         }
     }
+}
+use x86_64::VirtAddr;
+use sys::{fs, memory};
+use crate::sys::console::writer::init_writer;
+use sys::framebuffer::init_framebuffer;
+use crate::task::executor;
+
+pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static MemoryMapResponse, mp_response: &'static MpResponse) {
+    driver::uart::init();
+    arch::x86_64::gdt::init();
+    arch::x86_64::idt::init();
+    arch::x86_64::idt::init_pics();
+    init_framebuffer(fb);
+
+    let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
+
+    memory::init(phys_mem_offset, memory_map_response.entries());
+
+    executor::init_executor();
+    fs::init_fs();
+
+    init_writer();
+    sys::pci::init();
+
+    // depends on pci initialization
+    driver::nic::init();
+    driver::usb::init();
+    driver::cpu::init(mp_response);
+    driver::disk::ata::init();
+    fs::init(true);
+
+
+    arch::x86_64::gdt::init_after_boot();
+
+    arch::x86_64::syscall::init();
+
+    sys::proc::init();
+
+    x86_64::instructions::interrupts::enable();
+}
+
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => ({
+        let time = $crate::driver::timer::pit::uptime();
+        $crate::println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
+    });
+}
+
+#[macro_export]
+macro_rules! extern_sym {
+    ($sym:ident) => {{
+        unsafe extern "C" {
+            static $sym: ::core::ffi::c_void;
+        }
+
+        // The value is not accessed, we only take its address. The `addr_of!()` ensures
+        // that no intermediate references is created.
+        ::core::ptr::addr_of!($sym)
+    }};
+}
+
+#[alloc_error_handler]
+fn alloc_error(layout: alloc::alloc::Layout) -> ! {
+    panic!("allocation error: {:?}", layout);
 }

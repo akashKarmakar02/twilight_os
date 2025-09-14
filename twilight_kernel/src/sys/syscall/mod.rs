@@ -77,6 +77,14 @@ pub extern "sysv64" fn syscall_handler(
 
             0i64
         }
+        SYS_GETDENTS64 => {
+            let fd = arg1 as i32;
+            let buf = arg2 as *mut u8;
+            let buf_len = arg3;
+
+
+            service::getdent64(fd, buf, buf_len)
+        }
         SYS_EXIT_GROUP => service::exit(),
         SYS_OPENAT => {
             let upath = UserPtr(arg2 as *const u8);
@@ -112,7 +120,7 @@ pub extern "sysv64" fn syscall_handler(
             service::pr_limit64(pid as i32, resource, new_limit, old_limit)
         }
         _ => {
-            println!("Unknown syscall number: {}", syscall_number);
+            serial_prtinln!("Unknown syscall number: {}", syscall_number);
             0
         }
     };

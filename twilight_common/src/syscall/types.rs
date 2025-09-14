@@ -86,3 +86,14 @@ pub const RLIMIT_MSGQUEUE:   u32 = 12;
 pub const RLIMIT_NICE:       u32 = 13;
 pub const RLIMIT_RTPRIO:     u32 = 14;
 pub const RLIMIT_RTTIME:     u32 = 15;
+
+#[repr(C, packed)]
+pub struct Dirent64Hdr {
+    pub d_ino:   u64,  // inode
+    pub d_off:   i64,  // cookie to next entry
+    pub d_reclen:u16,  // total size of this record
+    pub d_type:  u8,   // DT_*
+    // d_name[] follows (NUL-terminated), then padding to 8-byte boundary
+}
+
+pub const EFAULT: u32 = 14;

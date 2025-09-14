@@ -25,5 +25,10 @@ pub fn syscall6(n: usize, a: usize, b: usize, c: usize, d: usize, e: usize, f: u
     ret
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn syscall(n: usize, a: usize, b: usize, c: usize) -> SizeT {
+    syscall6(n, a, b, c, 0, 0, 0)
+}
+
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { _exit(127) }

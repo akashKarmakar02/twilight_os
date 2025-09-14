@@ -9,6 +9,7 @@ pub const SYS_UNAME: usize = 63;
 pub const SYS_ARCH_PRCTL: usize = 158;
 pub const SYS_GET_TID: usize = 186;
 pub const SYS_TIME: usize = 201;
+pub const SYS_GETDENTS64: usize = 217;
 pub const SYS_EXIT_GROUP: usize = 231;
 pub const SYS_OPENAT: usize = 257;
 pub const SYS_PR_LIMIT64: usize = 302;

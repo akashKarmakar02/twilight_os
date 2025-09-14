@@ -22,7 +22,7 @@ pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
-pub const USER_STACK_SIZE: usize = 0x4000;
+pub const USER_STACK_SIZE: usize = 0x32000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
 

@@ -34,8 +34,10 @@ pub enum VfsError {
     Invalid,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Metadata {
+    pub ino: u32,
+    pub name: String,
     pub file_type: FileType,
     pub size: usize,
 }
@@ -86,7 +88,7 @@ pub trait FileSystem: Send + Sync + 'static {
     fn write(&mut self, path: &str, data: &[u8]) -> Result<(), ()>;
     fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()>;
     fn rmdir(&mut self, path: &str) -> Result<(), ()>;
-    fn ls(&mut self, path: &str) -> Result<Vec<String>, ()>;
+    fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()>;
     fn rm(&mut self, path: &str) -> Result<(), ()>;
     fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()>;
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()>;
@@ -154,7 +156,7 @@ impl Vfs {
         guard.rmdir(rel)
     }
 
-    pub fn ls(&self, path: &str) -> Result<Vec<String>, ()> {
+    pub fn ls(&self, path: &str) -> Result<Vec<Metadata>, ()> {
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
         guard.ls(rel)
@@ -166,7 +168,7 @@ impl Vfs {
         guard.rm(rel)
     }
 
-    pub fn touch(&self, parent_path: &str, filename: &str, mode: u32) -> Result<(), ()> {
+    pub fn touch(&self, parent_path: &str, filename: &str, _mode: u32) -> Result<(), ()> {
         let (rel, fs) = self.route(parent_path).ok_or(())?;
         let mut guard = fs.lock();
         guard.touch(rel, filename)

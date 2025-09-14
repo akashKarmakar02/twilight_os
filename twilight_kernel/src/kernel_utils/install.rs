@@ -75,6 +75,7 @@ pub fn main() {
         copy_file!("/bin/cat", true);
         copy_file!("/bin/ls", true);
         copy_file!("/bin/uname", true);
+        copy_file!("/bin/demo", true);
     }
 }
 

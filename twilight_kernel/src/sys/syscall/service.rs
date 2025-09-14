@@ -7,6 +7,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::arch::asm;
 use spin::mutex::Mutex;
 use twilight_common::syscall::types::*;
@@ -193,6 +194,8 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
         }
     };
 
+    serial_prtinln!("{}", full_path);
+
     // Try open existing
     let mut existed = true;
     #[allow(static_mut_refs)]
@@ -361,4 +364,174 @@ pub fn pr_limit64(pid: i32, resource: u32, _new_limit_ptr: Option<&Rlimit64>, ol
     }
 
     0
+}
+
+
+struct DirentItem {
+    ino: u64,
+    dtype: u8,
+    name: String,
+    reclen: u16,   // computed record length including name+NUL+padding
+    next_cookie: i64,
+}
+#[inline(always)]
+fn dt_from_filetype(ft: FileType) -> u8 {
+    // DT_* values (Linux): UNKNOWN=0,FIFO=1,CHR=2,DIR=4,BLK=6,REG=8,LNK=10,SOCK=12, WHT=14
+    match ft {
+        FileType::Dir  => 4,  // DT_DIR
+        FileType::File => 8,  // DT_REG
+    }
+}
+#[inline(always)]
+fn dirent64_reclen(name_len: usize) -> u16 {
+    // the header is 19 bytes (packed), then name + NUL, then 8B align
+    let base = size_of::<Dirent64Hdr>(); // 19
+    let need = base + name_len + 1;
+    let aligned = (need + 7) & !7;
+    aligned as u16
+}
+
+/// Writes one linux_dirent64 at `out[..]`. Returns bytes written, or None if not enough space.
+fn write_dirent64(out: &mut [u8], ino: u64, next_cookie: i64, d_type: u8, name: &str) -> Option<usize> {
+    let name_bytes = name.as_bytes();
+    let reclen = dirent64_reclen(name_bytes.len());
+    if out.len() < reclen as usize { return None; }
+
+    // Offsets within the record
+    let mut p = 0usize;
+
+    // d_ino (u64)
+    out[p..p+8].copy_from_slice(&ino.to_le_bytes()); p += 8;
+
+    // d_off (i64) — cookie to resume at next entry
+    out[p..p+8].copy_from_slice(&next_cookie.to_le_bytes()); p += 8;
+
+    // d_reclen (u16)
+    let r16 = reclen as u16;
+    out[p..p+2].copy_from_slice(&r16.to_le_bytes()); p += 2;
+
+    // d_type (u8)
+    out[p] = d_type; p += 1;
+
+    // d_name (char[]) + NUL
+    out[p..p+name_bytes.len()].copy_from_slice(name_bytes);
+    p += name_bytes.len();
+    out[p] = 0; // NUL
+    p += 1;
+
+    // padding to 8B boundary (already accounted in reclen)
+    for b in &mut out[p..reclen as usize] { *b = 0; }
+
+    Some(reclen as usize)
+}
+
+pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
+    if user_buf.is_null() { return -(EFAULT as i64); }
+    if buf_len < (size_of::<Dirent64Hdr>() + 2) { // practically can't hold any useful name
+        return -(EINVAL as i64);
+    }
+
+    // Get process and FD
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else { return -(ESRCH as i64); };
+    if fd < 3 { return -(EBADF as i64); }
+
+    let h = match process.handler.get_mut(fd as usize - 3) {
+        Some(h) => h,
+        None => return -(EBADF as i64),
+    };
+
+    if h.handler.lock().metadata.file_type != FileType::Dir {
+        return -(ENOTDIR as i64);
+    }
+
+    // Read directory entries from VFS (adjust API if yours differs)
+    #[allow(static_mut_refs)]
+    let entries = match unsafe { VFS.get_mut().ls(&h.path) } {
+        Ok(v) => v,  // Vec<DirEntry { name:String, inode:u64, file_type:FileType }>
+        Err(_) => return -(EIO as i64),
+    };
+
+    // Current position (use as entry index 'cookie')
+    let mut idx = h.seek;
+    if idx >= entries.len() {
+        return 0; // EOF
+    }
+
+    // 1) Build a struct list with sizes precomputed
+    let mut items: Vec<DirentItem> = Vec::new(); // or Vec if you prefer
+    let mut total_needed = 0usize;
+
+    for (i, e) in entries.iter().enumerate().skip(idx) {
+        let dtype = dt_from_filetype(e.file_type);
+        let reclen = dirent64_reclen(e.name.len());
+        let reclen_usize = reclen as usize;
+
+        if total_needed + reclen_usize > buf_len {
+            break; // stop when buffer would overflow
+        }
+
+        items.push(DirentItem {
+            ino: e.ino as u64,
+            dtype,
+            name: e.name.clone(),
+            reclen,
+            next_cookie: (i as i64) + 1, // “position cookie” to next entry
+        }); // ignore overflow if you swap heapless for Vec
+
+        total_needed += reclen_usize;
+    }
+
+    if items.is_empty() {
+        // Buffer too small to fit the next entry -> return 0 only at EOF,
+        // otherwise userspace will retry with a bigger buffer or next loop.
+        if idx >= entries.len() { return 0; }
+        return 0; // Behave like Linux: 0 can also mean “no more for now”
+    }
+
+    // 2) Serialize struct list into user buffer
+    let out = unsafe { core::slice::from_raw_parts_mut(user_buf, buf_len) };
+    let mut off = 0usize;
+
+    for it in &items {
+        // header
+        let hdr = Dirent64Hdr {
+            d_ino:    it.ino,
+            d_off:    it.next_cookie,
+            d_reclen: it.reclen,
+            d_type:   it.dtype,
+        };
+        let hdr_bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&hdr as *const Dirent64Hdr) as *const u8,
+                size_of::<Dirent64Hdr>(),
+            )
+        };
+        out[off .. off + hdr_bytes.len()].copy_from_slice(hdr_bytes);
+        off += hdr_bytes.len();
+
+        // name + NUL
+        let nb = it.name.as_bytes();
+        out[off .. off + nb.len()].copy_from_slice(nb);
+        off += nb.len();
+        out[off] = 0;
+        off += 1;
+
+        // padding to 8 bytes (reclen accounts for it)
+        let pad = (it.reclen as usize) - (size_of::<Dirent64Hdr>() + nb.len() + 1);
+        if pad > 0 {
+            for b in &mut out[off .. off + pad] { *b = 0; }
+            off += pad;
+        }
+
+        idx += 1; // consumed this entry
+    }
+
+    // 3) Advance directory position
+    h.seek = idx;
+
+    off as i64
 }
