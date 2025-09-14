@@ -6,6 +6,7 @@ use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use core::fmt;
 use core::fmt::Write;
+use crate::serial_prtinln;
 
 #[derive(Copy, Clone)]
 enum AnsiState { Normal, Esc, Csi }
@@ -221,7 +222,9 @@ impl Writer {
     }
 
     fn new_line(&mut self) {
-        self.clear_cursor();
+        if self.column_position < (self.screen_width / 8) as usize {
+            self.clear_cursor();
+        }
         self.column_position = 0;
         self.row_position += 1;
 

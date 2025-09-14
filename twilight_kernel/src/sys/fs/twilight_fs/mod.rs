@@ -228,6 +228,7 @@ pub struct DirEntry {
 
 #[derive(Debug)]
 pub enum FsError {
+    NotSupported,
     FileAlreadyExists,
     FileNotFound,
     InvalidPath,
