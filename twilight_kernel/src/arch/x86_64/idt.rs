@@ -55,11 +55,34 @@ pub fn init() {
     IDT.load();
 }
 
+#[inline]
+fn from_user(sf: &InterruptStackFrame) -> bool {
+    (sf.code_segment.0 & 0b11) == 3
+}
+
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+    if from_user(&stack_frame) {
+        println!(
+            "[PROC {}] Divide-by-zero at RIP={:#x}. Killing.",
+            crate::sys::proc::id(),
+            stack_frame.instruction_pointer.as_u64()
+        );
+        crate::sys::proc::exit();
+        unreachable!()
+    }
     println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame, err: u64) -> ! {
+    if from_user(&stack_frame) {
+        println!(
+            "[PROC {}] Segment Fault at RIP={:#x}. Killing.",
+            crate::sys::proc::id(),
+            stack_frame.instruction_pointer.as_u64()
+        );
+        crate::sys::proc::exit();
+        unreachable!()
+    }
     panic!(
         "EXCEPTION: DOUBLE FAULT\n{:#?}\nERROR CODE: {:#?}",
         stack_frame.instruction_pointer, err
@@ -127,6 +150,15 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
+    if from_user(&stack_frame) {
+        println!(
+            "[PROC {}] Page Fault at RIP={:#x}. Killing.",
+            crate::sys::proc::id(),
+            stack_frame.instruction_pointer.as_u64()
+        );
+        crate::sys::proc::exit();
+        unreachable!()
+    }
     panic!("page fault");
 }
 extern "x86-interrupt" fn stack_segment_fault_handler(

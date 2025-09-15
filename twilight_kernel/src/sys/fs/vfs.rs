@@ -15,6 +15,16 @@ pub enum FileType {
     Dir,
 }
 
+impl PartialEq for FileType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FileType::File, FileType::File) => true,
+            (FileType::Dir, FileType::Dir) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum VfsError {
     NotFound,
@@ -24,13 +34,27 @@ pub enum VfsError {
     Invalid,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Metadata {
+    pub ino: u32,
+    pub name: String,
     pub file_type: FileType,
     pub size: usize,
 }
 
 pub type BlockDev = Arc<Mutex<Box<dyn BlockDeviceIO + Send>>>;
+
+
+pub trait FsCtx {
+    fn block_size(&self) -> usize;
+
+    fn read_block(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()>;
+    fn write_block(&mut self, lba: u32, buf: &[u8]) -> Result<(), ()>;
+
+    fn alloc_zone(&mut self) -> Result<u32, &'static str>;
+    fn free_zone(&mut self, zone: u32) -> Result<(), &'static str>;
+    fn write_inode_minix(&mut self, ino: u32, inode: &crate::sys::fs::twilight_fs::Inode) -> Result<(), &'static str>;
+}
 
 #[allow(dead_code)]
 pub struct VfsNode {
@@ -55,7 +79,7 @@ impl VfsNode {
 
 pub trait VfsNodeOps: Send + Sync + 'static {
     fn read(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()>;
-    fn write(&self, device: &mut BlockDev, data: &[u8]) -> Result<(), ()>;
+    fn write(&mut self, device: &mut BlockDev, data: &[u8]) -> Result<(), ()>;
 }
 
 pub trait FileSystem: Send + Sync + 'static {
@@ -64,7 +88,7 @@ pub trait FileSystem: Send + Sync + 'static {
     fn write(&mut self, path: &str, data: &[u8]) -> Result<(), ()>;
     fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()>;
     fn rmdir(&mut self, path: &str) -> Result<(), ()>;
-    fn ls(&mut self, path: &str) -> Result<Vec<String>, ()>;
+    fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()>;
     fn rm(&mut self, path: &str) -> Result<(), ()>;
     fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()>;
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()>;
@@ -132,7 +156,7 @@ impl Vfs {
         guard.rmdir(rel)
     }
 
-    pub fn ls(&self, path: &str) -> Result<Vec<String>, ()> {
+    pub fn ls(&self, path: &str) -> Result<Vec<Metadata>, ()> {
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
         guard.ls(rel)
@@ -144,7 +168,7 @@ impl Vfs {
         guard.rm(rel)
     }
 
-    pub fn touch(&self, parent_path: &str, filename: &str) -> Result<(), ()> {
+    pub fn touch(&self, parent_path: &str, filename: &str, _mode: u32) -> Result<(), ()> {
         let (rel, fs) = self.route(parent_path).ok_or(())?;
         let mut guard = fs.lock();
         guard.touch(rel, filename)

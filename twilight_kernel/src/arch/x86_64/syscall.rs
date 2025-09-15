@@ -1,7 +1,9 @@
+use crate::arch::x86_64::gdt::GdtEntryIndex;
+use crate::arch::x86_64::gdt::Tss;
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::sys::syscall::syscall_handler;
-use crate::arch::x86_64::gdt::GdtEntryIndex;
 use core::arch::{asm, naked_asm};
+use core::mem::offset_of;
 use raw_cpuid::CpuId;
 
 pub const IA32_EFER: u32 = 0xc0000080;
@@ -47,8 +49,8 @@ pub fn init() {
     // Enable support for `syscall` and `sysret` instructions if the current
     // CPU supports them and the target pointer width is 64.
 
-    let syscall_base = (GdtEntryIndex::KERNEL_CODE << 3) as u64;
-    let sysret_base = (GdtEntryIndex::USER_CODE << 3) | 3;
+    let syscall_base = GdtEntryIndex::KERNEL_CODE << 3;
+    let sysret_base = (GdtEntryIndex::KERNEL_TLS << 3) | 3;
 
     let star_hi = syscall_base as u32 | (sysret_base as u32) << 16;
 
@@ -59,7 +61,7 @@ pub fn init() {
 
     // FMASK -> which RFLAGS bits to clear on syscall entry. Usually clear IF (bit 9).
     // Clear IF only:
-    wrmsr(IA32_FMASK, 0x300);
+    wrmsr(IA32_FMASK, 0x300); // 0x40700
 
     // Enable EFER.SCE
     let efer = rdmsr(IA32_EFER);
@@ -72,11 +74,12 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     naked_asm!(
     "swapgs",
 
-    "mov gs:[8], rsp",
-    "mov rsp, gs:[0]",
-
+    "mov qword ptr gs:{tss_temp_ustack_off}, rsp",
+    // restore kernel stack
+    "mov rsp, qword ptr gs:{tss_rsp0_off}",
     "push {userland_ss}",
-    "push gs:[8]",
+    // push userspace stack ptr
+    "push qword ptr gs:{tss_temp_ustack_off}",
     "push r11",
     "push {userland_cs}",
     "push rcx",
@@ -90,6 +93,7 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "push r9",
     "push r10",
     "push r11",
+
     "mov rsi, rsp", // Arg #2: register list
     "mov rdi, rsp", // Arg #1: interupt frame
     "add rdi, 9 * 8", // 9 registers * 8 bytes
@@ -111,7 +115,8 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "pop rcx",
     "add rsp, 8",
     "pop r11",
-    "mov rsp, gs:[8]",
+    // "pop rsp",
+    "mov rsp, qword ptr gs:{tss_temp_ustack_off}",
 
     // restore user stack register
     "swapgs",
@@ -120,6 +125,8 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     // constants:
     userland_cs = const USER_CS.bits(),
     userland_ss = const USER_SS.bits(),
+    tss_temp_ustack_off = const offset_of!(Tss, reserved2) + core::mem::size_of::<usize>(),
+    tss_rsp0_off = const offset_of!(Tss, rsp) + core::mem::size_of::<usize>(),
     x86_64_do_syscall = sym syscall_handler,
     )
 }

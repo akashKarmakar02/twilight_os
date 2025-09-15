@@ -4,6 +4,9 @@ fn main() {
     println!("cargo:rerun-if-changed=c/printf.c");
     println!("cargo:rerun-if-changed=c/scanf.c");
     println!("cargo:rerun-if-changed=c/stdio.c");
+    println!("cargo:rerun-if-changed=c/string.c");
+    println!("cargo:rerun-if-changed=c/stdlib.c");
+    println!("cargo:rerun-if-changed=c/ctype.c");
     println!("cargo:rerun-if-changed=include/unistd.h");
 
     cc::Build::new()

@@ -25,3 +25,7 @@ object = { version = "0.37.1", default-features = false, features = ["read"] }
 smoltcp = { version = "0.12.0", default-features = false, features = ["alloc", "medium-ethernet", "socket-tcp", "socket-udp", "socket-dhcpv4", "proto-ipv4", "proto-dhcpv4"] }
 
 twilight_common = { path = "../twilight_common" }
+twilight_proc = { path = "../twilight_proc" }
+
+[profile.release]
+debug = true

@@ -4,13 +4,13 @@ pub mod inode;
 pub mod dir_entry;
 pub mod metadata;
 
-use crate::driver::disk::{BlockDeviceIO};
+use crate::driver::disk::BlockDeviceIO;
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
-use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, Metadata, VfsNode, VfsNodeOps};
-use crate::{driver, println};
+use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode, VfsNodeOps};
+use crate::{driver, println, serial_prtinln};
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -43,20 +43,30 @@ pub struct Inode {
     pub time: u32,
     pub gid: u8,
     pub nlinks: u8,
-    pub zones: [u16; 9],
-    pub indirect_zones: u16,
-    pub double_indirect_zones: u16,
+    pub zones: [u32; 9],
+    pub indirect_zones: u32,
+    pub double_indirect_zones: u32,
 }
 
+struct MinixNode {
+    pub inode_no: u32,
+    pub inode: Inode,
+    pub ctx: Arc<Mutex<dyn FsCtx>>,
+}
+
+unsafe impl Send for MinixNode {}
+unsafe impl Sync for MinixNode {}
+
 #[allow(dead_code)]
-impl VfsNodeOps for Inode {
+impl VfsNodeOps for MinixNode {
     fn read(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()> {
+        serial_prtinln!("{:?}", self.inode);
         let mut content = Vec::new();
-        let mut remaining = self.size as usize;
+        let mut remaining = self.inode.size as usize;
         let block_size = 512;
         let mut buffer = [0u8; 512];
 
-        let zones = self.zones;
+        let zones = self.inode.zones;
         for &zone in zones.iter() {
             if zone == 0 {
                 break;
@@ -64,7 +74,7 @@ impl VfsNodeOps for Inode {
 
             let to_read = core::cmp::min(remaining, block_size);
 
-            device.lock().read(zone as u32, &mut buffer)?;
+            device.lock().read(zone, &mut buffer)?;
             content.extend_from_slice(&buffer[..to_read]);
 
             remaining -= to_read;
@@ -73,8 +83,8 @@ impl VfsNodeOps for Inode {
             }
         }
 
-        if self.indirect_zones != 0 {
-            device.lock().read(self.indirect_zones as u32, &mut buffer)?;
+        if self.inode.indirect_zones != 0 {
+            device.lock().read(self.inode.indirect_zones, &mut buffer)?;
             let zone_size = 512 / 4;
             for i in 0..(zone_size-1) {
                 let zone_id_buf: [u8; 4] = buffer[i*4..(i+1)*4].try_into().expect("invalid zone id size");
@@ -87,7 +97,7 @@ impl VfsNodeOps for Inode {
 
                 let mut indirect_content_buf = [0u8; 512];
 
-                device.lock().read(zone_id as u32, &mut indirect_content_buf)?;
+                device.lock().read(zone_id, &mut indirect_content_buf)?;
                 content.extend_from_slice(&indirect_content_buf[..to_read]);
 
                 remaining -= to_read;
@@ -97,8 +107,8 @@ impl VfsNodeOps for Inode {
             }
         }
 
-        if self.double_indirect_zones != 0 {
-            device.lock().read(self.double_indirect_zones as u32, &mut buffer)?;
+        if self.inode.double_indirect_zones != 0 {
+            device.lock().read(self.inode.double_indirect_zones, &mut buffer)?;
             let zone_size = 512 / 4;
             for i in 0..(zone_size - 1) {
                 let zone_id_buf: [u8; 4] = buffer[i*4..(i+1)*4].try_into().expect("invalid zone id size");
@@ -120,7 +130,7 @@ impl VfsNodeOps for Inode {
                     let to_read = core::cmp::min(remaining, block_size);
 
                     let mut indirect_content_buf = [0u8; 512];
-                    device.lock().read(zone_id as u32, &mut indirect_content_buf)?;
+                    device.lock().read(zone_id, &mut indirect_content_buf)?;
                     content.extend_from_slice(&indirect_content_buf);
 
                     remaining -= to_read;
@@ -134,15 +144,85 @@ impl VfsNodeOps for Inode {
         Ok(content)
     }
 
-    fn write(&self, _device: &mut BlockDev, _data: &[u8]) -> Result<(), ()> {
-        todo!()
+    fn write(&mut self, device: &mut BlockDev, data: &[u8]) -> Result<(), ()> {
+        let block_size = 512;
+        let mut bytes_written = 0;
+        let mut remaining = data.len();
+
+        let zones = self.inode.zones;
+
+        for i in 0..zones.len() {
+            if remaining == 0 {
+                break;
+            }
+
+            if self.inode.zones[i] == 0 {
+                let zones = self.ctx.lock().alloc_zone().unwrap();
+                self.inode.zones[i] = zones;
+            }
+            
+            let block = self.inode.zones[i];
+            let mut buffer = [0u8; 512];
+            
+            let copy_size = core::cmp::min(remaining, block_size);
+            buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+            device.lock().write(block, &buffer)?;
+            
+            bytes_written += copy_size;
+            remaining -= copy_size;
+        }
+        
+        if remaining > 0 {
+            if self.inode.indirect_zones == 0 {
+                let zones = self.ctx.lock().alloc_zone().unwrap();
+                self.inode.indirect_zones = zones;
+                let zero_buf = [0u8; 512];
+                device.lock().write(zones, &zero_buf)?;
+            }
+            
+            let mut indirect_block = [0u8; 512];
+            self.ctx.lock().read_block(self.inode.indirect_zones, &mut indirect_block)?;
+            
+            let zone_entries = 512 / 4;
+            for i in 0..(zone_entries - 1) {
+                if remaining == 0 {
+                    break;
+                }
+                
+                let entry = u16::from_le_bytes([
+                    indirect_block[i * 4],
+                    indirect_block[i * 4 + 1],
+                ]);
+                
+                let zone = if entry == 0 {
+                    let zones = self.ctx.lock().alloc_zone().unwrap();
+                    indirect_block[i * 4..i * 4 + 4].copy_from_slice(&zones.to_le_bytes());
+                    zones
+                } else {
+                    entry as u32
+                };
+                
+                let mut buffer = [0u8; 512];
+                let copy_size = core::cmp::min(remaining, block_size);
+                buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                device.lock().write(zone, &buffer)?;
+                
+                bytes_written += copy_size;
+                remaining -= copy_size;
+            }
+        }
+        
+        self.inode.size = bytes_written as u32;
+        self.ctx.lock().write_inode_minix(self.inode_no, &self.inode).unwrap();
+
+        Ok(())
     }
 }
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct DirEntry {
-    pub inode: u16,
+    pub inode: u32,
     pub name: [u8; 60], // MINIX v2 uses fixed 60-byte names
 }
 
@@ -255,7 +335,7 @@ pub struct MinixFs {
 }
 
 impl MinixFs {
-    pub fn resolve_path(&mut self, path: &str) -> Result<u16, FsError> {
+    pub fn resolve_path(&mut self, path: &str) -> Result<u32, FsError> {
         if path.is_empty() {
             return Err(FsError::InvalidPath);
         }
@@ -280,7 +360,7 @@ impl MinixFs {
         let mut buf = [0u8; 512];
 
         // Try to read block 0 (superblock)
-        if crate::driver::disk::ata::read(bus, dsk, 0, &mut buf).is_err() {
+        if driver::disk::ata::read(bus, dsk, 0, &mut buf).is_err() {
             return Err("Failed to read block 0");
         }
 
@@ -336,7 +416,7 @@ impl MinixFs {
         Err("No free Zone")
     }
 
-    pub fn allocate_inode(&mut self) -> Result<u16, &'static str> {
+    pub fn allocate_inode(&mut self) -> Result<u32, &'static str> {
         let bits_per_block = self.superblock.block_size as usize * 8;
         let total_inodes = self.superblock.ninodes as usize;
 
@@ -362,7 +442,7 @@ impl MinixFs {
                             if self.device.lock().write(imap_block_lba as u32, &buf).is_err() {
                                 return Err("Failed to write inode bitmap");
                             }
-                            return Ok(inode_idx as u16);
+                            return Ok(inode_idx as u32);
                         }
                     }
                 }
@@ -407,7 +487,7 @@ impl MinixFs {
         Ok(())
     }
 
-    pub fn free_inode(&mut self, inode: u16) -> Result<(), &'static str> {
+    pub fn free_inode(&mut self, inode: u32) -> Result<(), &'static str> {
         if inode == 0 || inode as usize > self.superblock.ninodes as usize {
             return Err("Invalid inode number");
         }
@@ -435,7 +515,7 @@ impl MinixFs {
         Ok(())
     }
 
-    pub fn write_inode(&mut self, inode_num: u16, inode: &Inode) -> Result<(), &'static str> {
+    pub fn write_inode(&mut self, inode_num: u32, inode: &Inode) -> Result<(), &'static str> {
         if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
             return Err("Invalid inode number");
         }
@@ -470,7 +550,7 @@ impl MinixFs {
         Ok(())
     }
     
-    pub fn read_inode(&mut self, inode_num: u16) -> Result<Inode, &'static str> {        
+    pub fn read_inode(&mut self, inode_num: u32) -> Result<Inode, &'static str> {        
         if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
             return Err("Invalid inode number");
         }
@@ -504,9 +584,9 @@ impl MinixFs {
 
     pub fn create_dir_entry(
         &mut self,
-        parent_inode_num: u16,
+        parent_inode_num: u32,
         name: &str,
-        child_inode_num: u16,
+        child_inode_num: u32,
     ) -> Result<(), &'static str> {
         let mut parent_inode = self.read_inode(parent_inode_num)?;
 
@@ -532,7 +612,7 @@ impl MinixFs {
         for i in 0..zones.len() {
             if parent_inode.zones[i] == 0 {
                 let zone = self.allocate_zone()?;
-                parent_inode.zones[i] = zone as u16;
+                parent_inode.zones[i] = zone;
                 self.write_inode(parent_inode_num, &parent_inode)?;
             }
 
@@ -593,7 +673,7 @@ impl MinixFs {
             for i in 0..entries_per_block {
                 let offset = i * dir_entry_size;
                 let raw = &buf[offset..offset + dir_entry_size];
-                let inode = u16::from_le_bytes([raw[0], raw[1]]);
+                let inode = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
                 if inode == 0 {
                     continue;
                 }
@@ -608,7 +688,7 @@ impl MinixFs {
         Ok(entries)
     }
 
-    pub fn create_file(&mut self, parent_inode_num: u16, name: &str) -> Result<u16, FsError> {
+    pub fn create_file(&mut self, parent_inode_num: u32, name: &str) -> Result<u32, FsError> {
         if name.len() > 60 {
             return Err(FileNotFound);
         }
@@ -643,7 +723,7 @@ impl MinixFs {
             indirect_zones: 0,
             double_indirect_zones: 0,
         };
-        inode.zones[0] = new_zone as u16;
+        inode.zones[0] = new_zone;
 
         self.write_inode(new_inode_num, &inode).unwrap();
 
@@ -652,7 +732,7 @@ impl MinixFs {
         Ok(new_inode_num)
     }
 
-   pub fn list_dir(&mut self, dir_inode_num: u16) -> Result<Vec<String>, &'static str> {
+   pub fn list_dir(&mut self, dir_inode_num: u32) -> Result<Vec<Metadata>, &'static str> {
         let dir_inode = self.read_inode(dir_inode_num)?;
         let mut entries = Vec::new();
 
@@ -670,7 +750,7 @@ impl MinixFs {
                 break;
             }
 
-            if self.device.lock().read(zone_num as u32, &mut buffer).is_err() {
+            if self.device.lock().read(zone_num, &mut buffer).is_err() {
                 return Err("Failed to read directory data block");
             }
 
@@ -687,13 +767,26 @@ impl MinixFs {
                     continue;
                 }
 
+                let inode = self.read_inode(entry.inode)?;
+
+                let file_type = if inode.mode != 0o040777 {
+                    FileType::File
+                } else {
+                    FileType::Dir
+                };
+
                 let name_end = entry.name.iter().position(|&b| b == 0).unwrap_or(entry.name.len());
                 let name_bytes = &entry.name[..name_end];
 
                 match core::str::from_utf8(name_bytes) {
                     Ok(name) => {
                         if !name.is_empty() {
-                            entries.push(String::from(name));
+                            entries.push(Metadata {
+                                name: String::from(name),
+                                ino: entry.inode,
+                                size: inode.size as usize,
+                                file_type,
+                            });
                         }
                     }
                     Err(_) => {
@@ -706,7 +799,7 @@ impl MinixFs {
         Ok(entries)
     }
 
-    pub fn create_dir(&mut self, parent_inode_num: u16, name: &str) -> Result<u16, FsError> {
+    pub fn create_dir(&mut self, parent_inode_num: u32, name: &str) -> Result<u32, FsError> {
         if name.len() > 60 {
             return Err(FileNameTooLong);
         }
@@ -741,7 +834,7 @@ impl MinixFs {
             indirect_zones: 0,
             double_indirect_zones: 0,
         };
-        inode.zones[0] = new_zone as u16;
+        inode.zones[0] = new_zone;
         self.write_inode(new_inode_num, &inode).unwrap();
 
         self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
@@ -752,7 +845,7 @@ impl MinixFs {
         Ok(new_inode_num)
     }
 
-    pub fn write_file(&mut self, inode_num: u16, data: &[u8]) -> Result<(), FsError> {
+    pub fn write_file(&mut self, inode_num: u32, data: &[u8]) -> Result<(), FsError> {
         if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
             return Err(InvalidInode);
         }
@@ -772,10 +865,10 @@ impl MinixFs {
 
             if inode.zones[i] == 0 {
                 let zone = self.allocate_zone().unwrap();
-                inode.zones[i] = zone as u16;
+                inode.zones[i] = zone;
             }
 
-            let block = inode.zones[i] as u32;
+            let block = inode.zones[i];
             let mut buffer = [0u8; 512]; // assumes 512-byte blocks
 
             let copy_size = core::cmp::min(block_size, remaining);
@@ -787,17 +880,17 @@ impl MinixFs {
             remaining -= copy_size;
         }
 
-        // if space in direct zones is filled use indirect nodes
+        // if space in direct zones is filled, use indirect nodes
         if remaining > 0 {
             if inode.indirect_zones == 0 {
                 let zone = self.allocate_zone().unwrap();
-                inode.indirect_zones = zone as u16;
+                inode.indirect_zones = zone;
                 let zero_block = [0u8; 512];
-                self.device.lock().write(zone as u32, &zero_block).unwrap();
+                self.device.lock().write(zone, &zero_block).unwrap();
             }
 
             let mut indirect_block = [0u8; 512];
-            self.device.lock().read(inode.indirect_zones as u32, &mut indirect_block).unwrap();
+            self.device.lock().read(inode.indirect_zones, &mut indirect_block).unwrap();
 
             let zone_entries = 512 / 4;
             for i in 0..(zone_entries-1) {
@@ -829,14 +922,14 @@ impl MinixFs {
             }
 
             // store updated indirect block
-            self.device.lock().write(inode.indirect_zones as u32, &indirect_block).unwrap();
+            self.device.lock().write(inode.indirect_zones, &indirect_block).unwrap();
         }
 
         if remaining > 0 {
             if inode.double_indirect_zones == 0 {
-                inode.double_indirect_zones = self.allocate_zone().unwrap() as u16;
+                inode.double_indirect_zones = self.allocate_zone().unwrap();
                 let zero_block = [0u8; 512];
-                self.device.lock().write(inode.double_indirect_zones as u32, &zero_block).unwrap();
+                self.device.lock().write(inode.double_indirect_zones, &zero_block).unwrap();
             }
 
 
@@ -850,9 +943,9 @@ impl MinixFs {
 
     pub fn find_dir_entry(
         &mut self,
-        parent_inode_num: u16,
+        parent_inode_num: u32,
         name: &str,
-    ) -> Result<Option<u16>, &'static str> {
+    ) -> Result<Option<u32>, &'static str> {
         let parent_inode = self.read_inode(parent_inode_num)?;
 
         if parent_inode.zones[0] == 0 {
@@ -870,7 +963,7 @@ impl MinixFs {
                 continue;
             }
 
-            self.device.lock().read(zone as u32, &mut buffer).unwrap();
+            self.device.lock().read(zone, &mut buffer).unwrap();
 
             for i in 0..entries_per_block {
                 let offset = i * dir_entry_size;
@@ -893,7 +986,7 @@ impl MinixFs {
         Ok(None)
     }
 
-    pub fn read_file(&mut self, inode_num: u16) -> Result<Vec<u8>, &'static str> {
+    pub fn read_file(&mut self, inode_num: u32) -> Result<Vec<u8>, &'static str> {
         let inode = self.read_inode(inode_num)?;
 
         let mut content = Vec::new();
@@ -909,7 +1002,7 @@ impl MinixFs {
 
             let to_read = core::cmp::min(remaining, block_size);
 
-            self.device.lock().read(zone as u32, &mut buffer).unwrap();
+            self.device.lock().read(zone, &mut buffer).unwrap();
             content.extend_from_slice(&buffer[..to_read]);
 
             remaining -= to_read;
@@ -919,7 +1012,7 @@ impl MinixFs {
         }
 
         if inode.indirect_zones != 0 {
-            self.device.lock().read(inode.indirect_zones as u32, &mut buffer).unwrap();
+            self.device.lock().read(inode.indirect_zones, &mut buffer).unwrap();
             let zone_size = 512 / 4;
             for i in 0..(zone_size - 1) {
                 let zone_id_buf: [u8; 4] = buffer[i*4..(i+1)*4].try_into().expect("invalid zone id size");
@@ -945,7 +1038,7 @@ impl MinixFs {
         }
 
         if inode.double_indirect_zones != 0 {
-            self.device.lock().read(inode.double_indirect_zones as u32, &mut buffer).unwrap();
+            self.device.lock().read(inode.double_indirect_zones, &mut buffer).unwrap();
             let zone_size = 512 / 4;
             for i in 0..(zone_size - 1) {
                 let zone_id_buf: [u8; 4] = buffer[i*4..(i+1)*4].try_into().expect("invalid zone id size");
@@ -977,7 +1070,7 @@ impl MinixFs {
         };
 
         let mut parent_inode = self.read_inode(parent_inode_num).unwrap();
-        let dir_entry_size = core::mem::size_of::<DirEntry>();
+        let dir_entry_size = size_of::<DirEntry>();
         let entries_per_block = self.superblock.block_size as usize / dir_entry_size;
         
         let zones = parent_inode.zones;
@@ -988,7 +1081,7 @@ impl MinixFs {
             }
 
             let mut buf = [0u8; 512];
-            if self.device.lock().read(zone as u32, &mut buf).is_err() {
+            if self.device.lock().read(zone, &mut buf).is_err() {
                 return Err(InvalidInode);
             }
 
@@ -1011,7 +1104,7 @@ impl MinixFs {
                     // Free all zones
                     for &z in i_zones.iter() {
                         if z != 0 {
-                            self.free_zone(z as u32).unwrap();
+                            self.free_zone(z).unwrap();
                         }
                     }
 
@@ -1019,7 +1112,7 @@ impl MinixFs {
                     self.free_inode(inode_num).unwrap();
 
                     buf[offset..offset + dir_entry_size].fill(0);
-                    self.device.lock().write(zone as u32, &buf).unwrap();
+                    self.device.lock().write(zone, &buf).unwrap();
 
                     // Update parent inode size if large enough
                     if parent_inode.size >= dir_entry_size as u32 {
@@ -1037,18 +1130,60 @@ impl MinixFs {
 
 }
 
+impl FsCtx for MinixFs {
+    fn block_size(&self) -> usize {
+        self.superblock.block_size as usize
+    }
+
+    fn read_block(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()> {
+        self.device.lock().read(lba, buf)
+    }
+
+    fn write_block(&mut self, lba: u32, buf: &[u8]) -> Result<(), ()> {
+        self.device.lock().write(lba, buf)
+    }
+
+    fn alloc_zone(&mut self) -> Result<u32, &'static str> {
+        self.allocate_zone()
+    }
+
+    fn free_zone(&mut self, zone: u32) -> Result<(), &'static str> {
+        self.free_zone(zone)
+    }
+
+    fn write_inode_minix(&mut self, ino: u32, inode: &Inode) -> Result<(), &'static str> {
+        self.write_inode(ino, inode)
+    }
+}
+
 impl FileSystem for MinixFs {
     fn open(&mut self, path: &str) -> Result<VfsNode, ()> {
-        if let Ok(inode) = self.resolve_path(path) {
-            if let Ok(inode) = self.read_inode(inode) {
-                Ok(VfsNode::new(
-                    self.device.clone(),
-                    Metadata { file_type: FileType::File, size: inode.size as usize }, 
-                    Box::new(inode))
-                )
+        let inode_no = if path == "/" {
+            1
+        } else {
+            self.resolve_path(path).or_else(|_| Err(()))?
+        };
+
+        if let Ok(inode) = self.read_inode(inode_no) {
+            let file_type = if inode.mode == 0o100777 {
+                FileType::File
             } else {
-                Err(())
-            }
+                FileType::Dir
+            };
+            let node = VfsNode::new(
+                self.device.clone(),
+                Metadata { file_type, size: inode.size as usize, name: path.split("/").last().unwrap().to_string(), ino: inode_no },
+                Box::new(MinixNode {
+                    inode,
+                    ctx: Arc::new(
+                        Mutex::new(
+                            MinixFs { device: self.device.clone(), superblock: self.superblock.clone() }
+                        )
+                    ),
+                    inode_no
+                })
+            );
+            Ok(node)
         } else {
             Err(())
         }
@@ -1056,6 +1191,7 @@ impl FileSystem for MinixFs {
 
     fn read(&mut self, path: &str) -> Result<Vec<u8>, ()> {
         if let Ok(inode) = self.resolve_path(path) {
+            serial_prtinln!("{:?}", inode);
             Ok(self.read_file(inode).unwrap())
         } else {
             Err(())
@@ -1096,7 +1232,7 @@ impl FileSystem for MinixFs {
         }
     }
 
-    fn ls(&mut self, path: &str) -> Result<Vec<String>, ()> {
+    fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
         if let Ok(inode) = self.resolve_path(path) {
             match self.list_dir(inode) {
                 Ok(entries) => Ok(entries),
@@ -1132,11 +1268,12 @@ impl FileSystem for MinixFs {
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
         if let Ok(inode_num) = self.resolve_path(path) {
             let inode = self.read_inode(inode_num).unwrap();
+            let name = path.split('/').last().unwrap();
 
             if inode.mode & 0xF000 == 0x4000 {
-                Ok(Metadata { file_type: FileType::Dir, size: inode.size as usize })
+                Ok(Metadata { file_type: FileType::Dir, size: inode.size as usize, name: name.to_string(), ino: inode_num })
             } else {
-                Ok(Metadata { file_type: FileType::File, size: inode.size as usize })
+                Ok(Metadata { file_type: FileType::File, size: inode.size as usize, name: name.to_string(), ino: inode_num })
             }
         } else {
             Err(())

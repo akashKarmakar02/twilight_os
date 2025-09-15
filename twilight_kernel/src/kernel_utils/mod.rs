@@ -1,11 +1,9 @@
-pub mod cat;
 pub mod cd;
 pub mod df;
 pub mod dhcp;
 pub mod exec;
 pub mod gs;
 pub mod install;
-pub mod ls;
 pub mod meminfo;
 pub mod mkdir;
 pub mod readelf;

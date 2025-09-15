@@ -7,7 +7,7 @@ pub fn main(args: &[&str]) {
     let pwd = unsafe { DIR.as_str() };
 
     #[allow(static_mut_refs)]
-    if let Err(_) = unsafe { VFS.get_mut().touch(pwd, args[1]) } {
+    if let Err(_) = unsafe { VFS.get_mut().touch(pwd, args[1], 0) } {
         println!("touch: {}: File exists", args[1]);
     }
 }

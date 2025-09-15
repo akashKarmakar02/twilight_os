@@ -1,27 +1,28 @@
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
-use crate::arch::x86_64::io::{set_fsbase, set_inactive_gsbase};
+use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, set_fsbase, set_inactive_gsbase, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
+use crate::{println, serial_prtinln};
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
 use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset};
-use crate::println;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
-use spin::mutex::Mutex;
 use spin::Once;
+use spin::mutex::Mutex;
+use x86_64::VirtAddr;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame};
-use x86_64::VirtAddr;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
-const STACK_SIZE: usize = 0x4000;
+pub const USER_STACK_SIZE: usize = 0x32000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
 
@@ -53,6 +54,41 @@ pub struct TrapFrame {
     pub error_code: u64,
 }
 
+#[repr(C, packed)]
+#[derive(Debug)]
+struct Elf64Ehdr {
+    e_ident: [u8; 16],
+    e_type: u16,
+    e_machine: u16,
+    e_version: u32,
+    e_entry: u64,
+    e_phoff: u64,
+    e_shoff: u64,
+    e_flags: u32,
+    e_ehsize: u16,
+    e_phentsize: u16,
+    e_phnum: u16,
+    e_shentsize: u16,
+    e_shnum: u16,
+    e_shstrndx: u16,
+}
+
+#[repr(C, packed)]
+#[derive(Debug)]
+struct Elf64Phdr {
+    p_type: u32,
+    p_flags: u32,
+    p_offset: u64,
+    p_vaddr: u64,
+    p_paddr: u64,
+    p_filesz: u64,
+    p_memsz: u64,
+    p_align: u64,
+}
+
+const PT_LOAD: u32 = 1;
+const PT_PHDR: u32 = 6;
+
 // ================== Process ==================
 
 #[repr(C)]
@@ -72,7 +108,9 @@ unsafe impl Send for ProcessTable {}
 
 impl ProcessTable {
     fn new() -> ProcessTable {
-        ProcessTable { proc_list: VecDeque::new() }
+        ProcessTable {
+            proc_list: VecDeque::new(),
+        }
     }
 }
 
@@ -97,8 +135,11 @@ impl ProcessTable {
 }
 pub struct Handler {
     pub handler: Arc<Mutex<VfsNode>>,
-    pub seek: usize
+    pub seek: usize,
+    pub path: String,
+    pub flags: i32,
 }
+
 #[repr(C)]
 pub struct Process {
     // pub frame: TrapFrame,
@@ -118,7 +159,6 @@ pub struct Process {
 
 impl Process {
     pub fn new(content_buf: Vec<u8>, pwd: &str, args: &[&str]) -> Self {
-
         let (_, flags) = Cr3::read();
 
         let page_table_frame = frame_allocator().allocate_frame().unwrap();
@@ -140,22 +180,67 @@ impl Process {
         };
 
         let _entry_point_addr: u64 = 0;
-        let mut mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+        let mut mapper =
+            unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
         let code_addr = 0x000000000000;
         let user_stack_top = VirtAddr::new(USER_STACK_TOP);
 
         let mut entry_point_addr: u64 = 0;
-        let _phdr_addr: u64 = 0;
-        let _phent: u64 = 0;
-        let _phnum: u64 = 0;
-
-        let mut ph_count = 0;
+        let mut phdr_va: u64 = 0;
+        let mut phent: u64 = 0;
+        let mut phnum: u64 = 0;
 
         if content_buf.get(0..4) == Some(&ELF_MAGIC) {
             if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
-                entry_point_addr = obj.entry();
-                ph_count = obj.segments().count();
+                let eh = unsafe { &*(content_buf.as_ptr() as *const Elf64Ehdr) };
+                let e_phoff = eh.e_phoff;
+                let e_phentsize = eh.e_phentsize as u64; // 56
+                let e_phnum = eh.e_phnum as u64;
+
+                let load_bias: u64 = if eh.e_type == 3 /* ET_DYN */ { 0x400000 } else { 0 };
+                phdr_va = 0;
+
+                // Try PT_PHDR first
+                for i in 0..e_phnum {
+                    let ph = unsafe {
+                        &*(content_buf
+                            .as_ptr()
+                            .add((e_phoff + i * e_phentsize) as usize)
+                            as *const Elf64Phdr)
+                    };
+                    if ph.p_type == PT_PHDR {
+                        phdr_va = load_bias + ph.p_vaddr;
+                        break;
+                    }
+                }
+
+                // Fallback: translate file offset via containing PT_LOAD
+                if phdr_va == 0 {
+                    let ph_tbl_start = e_phoff;
+                    let ph_tbl_end = e_phoff + e_phentsize * e_phnum;
+                    for i in 0..e_phnum {
+                        let ph = unsafe {
+                            &*(content_buf
+                                .as_ptr()
+                                .add((e_phoff + i * e_phentsize) as usize)
+                                as *const Elf64Phdr)
+                        };
+                        if ph.p_type == PT_LOAD {
+                            let seg_start = ph.p_offset;
+                            let seg_end = ph.p_offset + ph.p_filesz;
+                            if ph_tbl_start >= seg_start && ph_tbl_end <= seg_end {
+                                phdr_va = load_bias + ph.p_vaddr + (e_phoff - ph.p_offset);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                entry_point_addr = eh.e_entry + load_bias;
+                phent = e_phentsize;
+                phnum = e_phnum;
+
                 for segment in obj.segments() {
                     if let Ok(data) = segment.data() {
                         let addr = code_addr + segment.address();
@@ -185,19 +270,31 @@ impl Process {
                     }
                 }
 
-                let user_stack_base = user_stack_top.as_u64() - STACK_SIZE as u64 ;
+                let user_stack_base = user_stack_top.as_u64() - USER_STACK_SIZE as u64;
 
-                if let Ok(_) = alloc_pages(&mut mapper, user_stack_base, STACK_SIZE, true,false) {
-                    addr_size_vec.push((user_stack_base, STACK_SIZE));
+                if let Ok(_) =
+                    alloc_pages(&mut mapper, user_stack_base, USER_STACK_SIZE, true, false)
+                {
+                    addr_size_vec.push((user_stack_base, USER_STACK_SIZE));
                 }
             }
         }
         // Some(virt_to_phys(VirtAddr::new(0x400000)).unwrap().as_u64())
-        let user_rsp = build_initial_stack(user_stack_top.as_u64(), entry_point_addr, Some(args), None, None, None, Some(ph_count as u64));
+        let user_rsp = build_initial_stack(
+            user_stack_top.as_u64(),
+            entry_point_addr,
+            Some(args),
+            None,
+            phdr_va,
+            phent,
+            phnum,
+            None,
+            None,
+        );
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let p = Process {
             stack: user_rsp,
-            stack_size: STACK_SIZE,
+            stack_size: USER_STACK_SIZE,
             entry_point: entry_point_addr,
             pid,
             mapper,
@@ -207,12 +304,14 @@ impl Process {
             pwd: pwd.to_string(),
             fs_base: VirtAddr::zero(),
             gs_base: VirtAddr::zero(),
-            handler: Vec::new()
+            handler: Vec::new(),
         };
         p
     }
 
     pub fn exec(&self) {
+        wrmsr(IA32_FS_BASE, VirtAddr::zero().as_u64());
+        wrmsr(IA32_GS_BASE, VirtAddr::zero().as_u64());
         jump_to_user(
             0x000000000000,
             self.entry_point,
@@ -260,7 +359,9 @@ pub fn exit() {
 pub fn init() {
     #[allow(static_mut_refs)]
     unsafe {
-        PROCESS_TABLE.try_call_once(|| Ok::<_, ()>(ProcessTable::new())).unwrap();
+        PROCESS_TABLE
+            .try_call_once(|| Ok::<_, ()>(ProcessTable::new()))
+            .unwrap();
     }
     let (page_table_frame, _) = Cr3::read();
     let page_table = crate::memory::create_page_table(page_table_frame);
@@ -271,8 +372,11 @@ pub fn init() {
 
     #[allow(static_mut_refs)]
     unsafe {
-        PROCESS_TABLE.get_mut().unwrap().proc_list.push_back(
-            Process {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .proc_list
+            .push_back(Process {
                 pid,
                 addr_size_vec: Vec::new(),
                 stack: 0,
@@ -285,92 +389,136 @@ pub fn init() {
                 handler: Vec::new(),
                 gs_base: VirtAddr::zero(),
                 fs_base: VirtAddr::zero(),
-            }
-        )
+            })
     }
 }
+
 #[repr(C)]
+#[derive(Clone)]
 struct AuxvEntry {
     key: u64,
     value: u64,
 }
 
 fn build_initial_stack(
-    mut stack_top: u64,
+    mut rsp: u64,
     entry_point: u64,
     argv: Option<&[&str]>,
     envp: Option<&[&str]>,
-    phdr_addr: Option<u64>,
-    phent: Option<u64>,
-    phnum: Option<u64>,
+    phdr_addr: u64, // runtime VA (load_base + e_phoff)
+    phent: u64,     // 56 for Elf64_Phdr
+    phnum: u64,
+    execfn_ptr: Option<u64>,   // usually argv[0]
+    random16_ptr: Option<u64>, // 16 bytes placed on stack
 ) -> u64 {
-    let mut argv_ptrs: Vec<u64> = Vec::new();
-    let mut envp_ptrs: Vec<u64> = Vec::new();
-
-    fn push_bytes_on_stack(rsp: &mut u64, bytes: &[u8]) -> u64 {
-        *rsp = rsp.wrapping_sub(bytes.len() as u64 + 1);
-        let dst = *rsp as *mut u8;
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len()) };
-        unsafe { *dst.add(bytes.len()) = 0 };
+    // helper: push null-terminated bytes, return ptr
+    fn push_bytes(rsp: &mut u64, bytes: &[u8]) -> u64 {
+        *rsp -= (bytes.len() as u64) + 1;
+        let p = *rsp as *mut u8;
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+            *p.add(bytes.len()) = 0;
+        }
+        *rsp
+    }
+    // helper: push raw bytes without a trailing NUL (for AT_RANDOM)
+    fn push_raw(rsp: &mut u64, bytes: &[u8]) -> u64 {
+        *rsp -= bytes.len() as u64;
+        let p = *rsp as *mut u8;
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len()); }
         *rsp
     }
 
+    // place strings first (argv/envp), record their pointers in-order
+    let mut argv_ptrs: Vec<u64> = Vec::new();
+    let mut envp_ptrs: Vec<u64> = Vec::new();
+
     if let Some(envs) = envp {
-        for &env in envs.iter().rev() {
-            envp_ptrs.push(push_bytes_on_stack(&mut stack_top, env.as_bytes()));
+        for &e in envs.iter().rev() {
+            envp_ptrs.push(push_bytes(&mut rsp, e.as_bytes()));
         }
         envp_ptrs.reverse();
     }
-
     if let Some(args) = argv {
-        for &arg in args.iter().rev() {
-            argv_ptrs.push(push_bytes_on_stack(&mut stack_top, arg.as_bytes()));
+        for &a in args.iter() {
+            argv_ptrs.push(push_bytes(&mut rsp, a.as_bytes()));
         }
         argv_ptrs.reverse();
     }
 
-    // keep a clean 16B boundary before auxv/tables (optional)
-    stack_top &= !0xFu64;
+    // optional: place 16 random bytes and execfn string if you haven't already
+    let rand_ptr = if let Some(p) = random16_ptr {
+        p
+    } else {
+        // simple deterministic bytes if you don't have RNG yet (acceptable to start)
+        let bytes = [0u8; 16];
+        push_raw(&mut rsp, &bytes)
+    };
+    let execfn = execfn_ptr
+        .or_else(|| argv_ptrs.get(0).copied())
+        .unwrap_or(0);
+    serial_prtinln!("{}", execfn);
 
-    let auxv_entries = [
-        AuxvEntry { key: 3, value: phdr_addr.unwrap_or(0) }, // AT_PHDR
-        AuxvEntry { key: 4, value: phent.unwrap_or(0) },     // AT_PHENT
-        AuxvEntry { key: 5, value: phnum.unwrap_or(0) },     // AT_PHNUM
-        AuxvEntry { key: 6, value: 4096 },                   // AT_PAGESZ
-        AuxvEntry { key: 9, value: entry_point },            // AT_ENTRY
-        AuxvEntry { key: 0, value: 0 },                      // AT_NULL
+
+    // ---- write auxv (topmost among these tables) ----
+    let aux_vec: Vec<AuxvEntry> = vec![
+        AuxvEntry { key: 3, value: phdr_addr }, // AT_PHDR
+        AuxvEntry { key: 4, value: phent     }, // AT_PHENT
+        AuxvEntry { key: 5, value: phnum     }, // AT_PHNUM
+        AuxvEntry { key: 6, value: 4096      }, // AT_PAGESZ
+        AuxvEntry { key: 9, value: entry_point }, // AT_ENTRY
+        AuxvEntry { key: 25, value: rand_ptr }, // AT_RANDOM
+        AuxvEntry { key: 31, value: execfn   }, // AT_EXECFN
+        AuxvEntry { key: 17, value: 0 }, // AT_UID
+        AuxvEntry { key: 18, value: 0 }, // AT_EUID
+        AuxvEntry { key: 19, value: 0 }, // AT_GID
+        AuxvEntry { key: 20, value: 0 }, // AT_EGID
+        AuxvEntry { key: 23, value: 100 }, // AT_CLKTCK
+        AuxvEntry { key: 0, value: 0 }, // AT_NULL
     ];
 
-    stack_top -= (core::mem::size_of::<AuxvEntry>() * auxv_entries.len()) as u64;
+    rsp -= (core::mem::size_of::<AuxvEntry>() * aux_vec.len()) as u64;
     unsafe {
-        let dst = stack_top as *mut AuxvEntry;
-        core::ptr::copy_nonoverlapping(auxv_entries.as_ptr(), dst, auxv_entries.len());
+        core::ptr::copy_nonoverlapping(aux_vec.as_ptr(), rsp as *mut AuxvEntry, aux_vec.len());
     }
 
-    // envp NULL, then envp pointers
-    stack_top -= 8;
-    unsafe { *(stack_top as *mut u64) = 0; }
-    for &p in envp_ptrs.iter().rev() {
-        stack_top -= 8;
-        unsafe { *(stack_top as *mut u64) = p; }
+    rsp -= 8;
+    unsafe {
+        *(rsp as *mut u64) = 0;
     }
 
-    // argv NULL, then argv pointers
-    stack_top -= 8;
-    unsafe { *(stack_top as *mut u64) = 0; }
-    if let Some(args) = argv {
-        for &p in argv_ptrs.iter().rev() {
-            stack_top -= 8;
-            unsafe { *(stack_top as *mut u64) = p; }
+    // ---- envp pointers then NULL ----
+    for &p in &envp_ptrs {
+        rsp -= 8;
+        unsafe {
+            *(rsp as *mut u64) = p;
         }
-        // argc
-        stack_top -= 8;
-        unsafe { *(stack_top as *mut u64) = args.len() as u64; }
-    } else {
-        stack_top -= 8;
-        unsafe { *(stack_top as *mut u64) = 0; }
     }
 
-    // No extra padding here!
-    stack_top
+    // envp termintor
+    rsp -= 8;
+    unsafe {
+        *(rsp as *mut u64) = 0;
+    }
+
+
+    // ---- argv pointers then NULL ----
+    for &p in &argv_ptrs {
+        serial_prtinln!("ptr: {:#X}", p);
+        rsp -= 8; 
+        unsafe {
+            *(rsp as *mut u64) = p; 
+        }
+    }
+
+    // ---- padding BEFORE argc to ensure final %rsp == 8 ----
+    // We want (rsp_after_argc % 16 == 8). After we push argc (8 bytes),
+    // rsp will be (current_rsp - 8). So we need (current_rsp % 16 == 0).
+    // If it's 8, push a padding 0 to flip it to 0.
+
+    // ---- argc ----
+    rsp -= 8;
+    unsafe { *(rsp as *mut u64) = argv_ptrs.len() as u64; }
+
+    rsp
 }
