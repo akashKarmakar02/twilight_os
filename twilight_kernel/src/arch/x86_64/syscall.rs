@@ -1,9 +1,9 @@
-use crate::arch::x86_64::gdt::Tss;
-use core::mem::offset_of;
 use crate::arch::x86_64::gdt::GdtEntryIndex;
+use crate::arch::x86_64::gdt::Tss;
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::sys::syscall::syscall_handler;
 use core::arch::{asm, naked_asm};
+use core::mem::offset_of;
 use raw_cpuid::CpuId;
 
 pub const IA32_EFER: u32 = 0xc0000080;
@@ -115,8 +115,8 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "pop rcx",
     "add rsp, 8",
     "pop r11",
-    "pop rsp",
-    // "mov rsp, qword ptr gs:[8]",
+    // "pop rsp",
+    "mov rsp, qword ptr gs:{tss_temp_ustack_off}",
 
     // restore user stack register
     "swapgs",

@@ -1,6 +1,6 @@
 mod service;
 
-use crate::arch::x86_64::idt::{Registers, PICS};
+use crate::arch::x86_64::idt::{Registers};
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::syscall::service::read;
 use crate::task::executor::sleep;
@@ -127,7 +127,7 @@ pub extern "sysv64" fn syscall_handler(
 
     regs.rax = res;
 
-    unsafe { PICS.lock().notify_end_of_interrupt(0x80) };
+    // unsafe { PICS.lock().notify_end_of_interrupt(0x80) };
 }
 
 #[repr(transparent)]
