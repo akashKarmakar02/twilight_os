@@ -15,6 +15,7 @@ fn main() {
             "c/scanf.c",
             "c/stdio.c",
             "c/string.c",
+            "c/unistd.c",
             "c/ctype.c",
             "c/stdlib.c",
         ])
