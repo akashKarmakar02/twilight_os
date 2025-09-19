@@ -6,7 +6,6 @@ use alloc::string::String;
 use alloc::{vec, vec::Vec};
 use core::fmt;
 use core::fmt::Write;
-use crate::serial_prtinln;
 
 #[derive(Copy, Clone)]
 enum AnsiState { Normal, Esc, Csi }
