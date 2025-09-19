@@ -93,6 +93,17 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    let index = (error_code >> 3) & 0x1fff;
+    let ti    = (error_code >> 2) & 1;
+    let rpl   = error_code & 0b11;
+    crate::serial_prtinln!(
+        "#GP err: selector=0x{:04x} index={} TI={}({}) RPL={}",
+        error_code,
+        index,
+        ti,
+        if ti == 0 { "GDT" } else { "LDT" },
+        rpl
+    );
     panic!(
         "[GP FAULT] at {:#x}, Error Code: {:#x}",
         stack_frame.instruction_pointer.as_u64(),

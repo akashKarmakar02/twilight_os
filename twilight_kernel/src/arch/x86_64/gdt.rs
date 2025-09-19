@@ -185,7 +185,7 @@ impl Tss {
     }
 }
 
-#[cpu_local(subsection = "tss")]
+// #[cpu_local(subsection = "tss")]
 pub static mut TSS: Tss = {
     let tss = Tss {
         reserved: 0,

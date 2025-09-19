@@ -74,12 +74,12 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     naked_asm!(
     "swapgs",
 
-    "mov qword ptr gs:{tss_temp_ustack_off}, rsp",
+    "mov qword ptr gs:[0x08], rsp",
     // restore kernel stack
-    "mov rsp, qword ptr gs:{tss_rsp0_off}",
+    "mov rsp, qword ptr gs:[0x00]",
     "push {userland_ss}",
     // push userspace stack ptr
-    "push qword ptr gs:{tss_temp_ustack_off}",
+    "push qword ptr gs:[0x08]",
     "push r11",
     "push {userland_cs}",
     "push rcx",
@@ -115,8 +115,8 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "pop rcx",
     "add rsp, 8",
     "pop r11",
-    // "pop rsp",
-    "mov rsp, qword ptr gs:{tss_temp_ustack_off}",
+    "pop rsp",
+    // "mov rsp, qword ptr gs:[0x08]",
 
     // restore user stack register
     "swapgs",
@@ -125,8 +125,8 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     // constants:
     userland_cs = const USER_CS.bits(),
     userland_ss = const USER_SS.bits(),
-    tss_temp_ustack_off = const offset_of!(Tss, reserved2) + core::mem::size_of::<usize>(),
-    tss_rsp0_off = const offset_of!(Tss, rsp) + core::mem::size_of::<usize>(),
+    // tss_temp_ustack_off = const offset_of!(Tss, reserved2) + core::mem::size_of::<usize>(),
+    // tss_rsp0_off = const offset_of!(Tss, rsp) + core::mem::size_of::<usize>(),
     x86_64_do_syscall = sym syscall_handler,
     )
 }
