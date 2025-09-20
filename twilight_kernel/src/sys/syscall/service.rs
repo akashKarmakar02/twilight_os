@@ -273,7 +273,7 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         return -1;
     };
     #[allow(static_mut_refs)]
-    let Ok(elf_buf) = (unsafe { VFS.read().read(path.as_str()) }) else {
+    let Ok(_elf_buf) = (unsafe { VFS.read().read(path.as_str()) }) else {
         return -2;
     };
 
@@ -283,9 +283,6 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
     };
 
     println!("execve path={} argv={:?}", path, argv);
-
-
-    // let p = Process::new(elf_buf, )
 
     0
 }
