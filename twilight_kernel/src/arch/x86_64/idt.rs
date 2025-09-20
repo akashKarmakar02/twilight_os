@@ -6,19 +6,17 @@ use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
-#[repr(align(8), C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[repr(C, align(8))]
 pub struct Registers {
-    // Saved scratch registers
-    pub r11: usize,
-    pub r10: usize,
-    pub r9: usize,
-    pub r8: usize,
-    pub rdi: usize,
-    pub rsi: usize,
-    pub rdx: usize,
-    pub rcx: usize,
-    pub rax: i64,
+    pub r11: u64, // clobbered by SYSCALL
+    pub r10: u64, // 4th arg (Linux ABI)
+    pub r9:  u64, // 6th arg
+    pub r8:  u64, // 5th arg
+    pub rdi: u64, // 1st arg
+    pub rsi: u64, // 2nd
+    pub rdx: u64, // 3rd
+    pub rcx: u64, // clobbered by SYSCALL (not an arg)
+    pub rax: u64, // syscall nr on entry, return value on exit
 }
 
 // Translate IRQ into system interrupt

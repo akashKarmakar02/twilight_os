@@ -2,11 +2,6 @@
 #include <stdarg.h>
 #include <stddef.h>
 
-// Provide glibc/musl compatibility symbols
-int __isoc99_scanf(const char *fmt, ...) __attribute__((alias("scanf")));
-int __isoc23_scanf(const char *fmt, ...) __attribute__((alias("scanf")));
-
-
 #ifndef EOF
 #define EOF (-1)
 #endif
@@ -118,18 +113,28 @@ static int read_hex(unsigned *out) {
     return 1;
 }
 
-static int read_word(char *dst) {
+// add near the other helpers
+static int read_word_width(char *dst, int width) {
+    if (width <= 0) return 0;           // nothing to store
     int c = skip_ws();
     if (c == EOF) return 0;
+
     int n = 0;
     while (c != EOF && !isspace_c(c)) {
-        dst[n++] = (char)c;
+        if (n < width - 1) {            // leave room for '\0'
+            dst[n++] = (char)c;
+        }
         c = getch();
     }
     dst[n] = '\0';
-    if (c != EOF) ungetch(c);
+
+    // If we stopped because of whitespace, push it back so the format controls it
+    if (c != EOF && isspace_c(c)) ungetch(c);
+
+    // If input token was longer than width-1, we already consumed the overflow
     return 1;
 }
+
 
 static int read_char(int *outc) {
     int c = getch();
@@ -138,7 +143,6 @@ static int read_char(int *outc) {
     return 1;
 }
 
-/* very small scanf: %s %d %u %x %c %%  (no width/precision/floats) */
 int scanf(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     int assigned = 0;
@@ -146,23 +150,23 @@ int scanf(const char *fmt, ...) {
 
     while ((c = *fmt++) != '\0') {
         if (c == ' ') {
-            // absorb any amount of whitespace in input
-            int ch;
-            do { ch = getch(); } while (isspace_c(ch));
+            int ch; do { ch = getch(); } while (isspace_c(ch));
             if (ch != EOF) ungetch(ch);
             continue;
         }
         if (c != '%') {
-            // literal match
             int ch = getch();
-            if (ch != c) { // mismatch
-                if (ch != EOF) ungetch(ch);
-                goto done;
-            }
+            if (ch != c) { if (ch != EOF) ungetch(ch); goto done; }
             continue;
         }
 
-        // conversion
+        // --- parse optional width ---
+        int width = -1;            // -1 = unspecified
+        while (*fmt >= '0' && *fmt <= '9') {
+            width = (width < 0 ? 0 : width) * 10 + (*fmt - '0');
+            fmt++;
+        }
+
         c = *fmt++;
         if (c == '\0') break;
 
@@ -173,8 +177,9 @@ int scanf(const char *fmt, ...) {
         } break;
 
         case 'c': {
+            // (kept simple; no width handling here)
             int ch;
-            if (!read_char(&ch)) goto done; // EOF before assignment
+            if (!read_char(&ch)) goto done;
             char *out = va_arg(ap, char*);
             *out = (char)ch;
             assigned++;
@@ -182,7 +187,8 @@ int scanf(const char *fmt, ...) {
 
         case 's': {
             char *out = va_arg(ap, char*);
-            if (!read_word(out)) goto done;
+            int effw = (width > 0 ? width : 0x7fffffff); // if no width, allow very long (caller must ensure buffer)
+            if (!read_word_width(out, effw)) goto done;
             assigned++;
         } break;
 
@@ -205,7 +211,6 @@ int scanf(const char *fmt, ...) {
         } break;
 
         default:
-            // unsupported specifier → stop parsing like real scanf would
             goto done;
         }
     }
@@ -214,3 +219,8 @@ done:
     va_end(ap);
     return assigned;
 }
+
+
+extern int scanf(const char *fmt, ...);
+int __isoc99_scanf(const char *fmt, ...) __attribute__((alias("scanf")));
+int __isoc23_scanf(const char *fmt, ...) __attribute__((alias("scanf")));

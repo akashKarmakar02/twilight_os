@@ -1,14 +1,17 @@
-use alloc::vec::Vec;
-use crate::{println};
+use crate::println;
 use crate::sys::fs::init;
 use crate::sys::fs::twilight_fs::Inode;
+use alloc::vec::Vec;
 
 macro_rules! copy_file {
     ($path:expr, $verbose:expr) => {{
-        copy_file($path, include_bytes!(concat!("../../../rootfs", $path)), $verbose);
+        copy_file(
+            $path,
+            include_bytes!(concat!("../../../rootfs", $path)),
+            $verbose,
+        );
     }};
 }
-
 
 pub fn main() {
     let disk_size;
@@ -24,7 +27,12 @@ pub fn main() {
             inode = disk_size / (disk.block_size() * 16);
             block_size = disk.block_size();
 
-            if let Ok(mut fs) = crate::fs::twilight_fs::format_superblock(&mut **disk, disk_size, inode as u16, block_size as u16) {
+            if let Ok(mut fs) = crate::fs::twilight_fs::format_superblock(
+                &mut **disk,
+                disk_size,
+                inode as u16,
+                block_size as u16,
+            ) {
                 let root_inode_num = fs.allocate_inode().unwrap();
                 let root_zone = fs.allocate_zone().unwrap();
 
@@ -42,12 +50,15 @@ pub fn main() {
                     double_indirect_zones: 0,
                 };
                 root_inode.zones[0] = root_zone;
-                
-                fs.write_inode(root_inode_num + 1, &root_inode).expect("TODO: panic message");
-                
+
+                fs.write_inode(root_inode_num + 1, &root_inode)
+                    .expect("TODO: panic message");
+
                 // Add '.' and '..'
-                fs.create_dir_entry(root_inode_num + 1, ".", root_inode_num + 1).expect("TODO: panic message");
-                fs.create_dir_entry(root_inode_num + 1, "..", root_inode_num + 1).expect("TODO: panic message");
+                fs.create_dir_entry(root_inode_num + 1, ".", root_inode_num + 1)
+                    .expect("TODO: panic message");
+                fs.create_dir_entry(root_inode_num + 1, "..", root_inode_num + 1)
+                    .expect("TODO: panic message");
 
                 init(false);
 
@@ -75,22 +86,16 @@ pub fn main() {
         copy_file!("/bin/cat", true);
         copy_file!("/bin/ls", true);
         copy_file!("/bin/uname", true);
+        copy_file!("/bin/tsh", true);
     }
 }
 
-
-
 fn copy_file(path: &str, data: &[u8], verbose: bool) {
     use crate::sys::fs::twilight_fs::FsError;
-    
-    let mut fs = unsafe {
-        crate::fs::MFS.get_unchecked().lock()
-    };
 
-    let components: Vec<&str> = path
-        .split('/')
-        .filter(|c| !c.is_empty())
-        .collect();
+    let mut fs = unsafe { crate::fs::MFS.get_unchecked().lock() };
+
+    let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
 
     if components.is_empty() {
         println!("Invalid file path: {}", path);
@@ -101,15 +106,13 @@ fn copy_file(path: &str, data: &[u8], verbose: bool) {
     for &part in &components[..components.len() - 1] {
         match fs.find_dir_entry(cur_inode, part) {
             Ok(Some(inode)) => cur_inode = inode,
-            Ok(None) => {
-                match fs.create_dir(cur_inode, part) {
-                    Ok(new_inode) => cur_inode = new_inode,
-                    Err(e) => {
-                        println!("Failed to create dir '{}': {:?}", part, e);
-                        return;
-                    }
+            Ok(None) => match fs.create_dir(cur_inode, part) {
+                Ok(new_inode) => cur_inode = new_inode,
+                Err(e) => {
+                    println!("Failed to create dir '{}': {:?}", part, e);
+                    return;
                 }
-            }
+            },
             Err(e) => {
                 println!("Failed to lookup '{}': {:?}", part, e);
                 return;
@@ -125,7 +128,10 @@ fn copy_file(path: &str, data: &[u8], verbose: bool) {
             if let Err(e) = fs.write_file(file_inode, data) {
                 println!("Failed to write to '{}': {:?}", path, e);
             } else if verbose {
-                println!("\x1b[93m[DEBUG] \x1b[0mcopied: {} inode: {}", path, file_inode);
+                println!(
+                    "\x1b[93m[DEBUG] \x1b[0mcopied: {} inode: {}",
+                    path, file_inode
+                );
             }
         }
         Err(FsError::FileAlreadyExists) => {

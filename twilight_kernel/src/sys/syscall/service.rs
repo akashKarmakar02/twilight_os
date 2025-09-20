@@ -2,7 +2,7 @@ use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
 use crate::sys::fs::vfs::{FileType, VFS};
 use crate::sys::proc::{Handler, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::tty::{read_char, read_line};
-use crate::{print, serial_prtinln};
+use crate::{print, println, serial_prtinln};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use spin::mutex::Mutex;
 use twilight_common::syscall::types::*;
+use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
 
 pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     let file_descriptor = arg1;
@@ -267,11 +268,31 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
     new_fd as i64
 }
 
+pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
+    let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
+        return -1;
+    };
+    #[allow(static_mut_refs)]
+    let Ok(elf_buf) = (unsafe { VFS.read().read(path.as_str()) }) else {
+        return -2;
+    };
+
+    let argv = match copy_user_ptr_array(UserPtr(arg2 as *const usize), 128, 4096) {
+        Ok(v) => v,
+        Err(_) => return -1, // EFAULT
+    };
+
+    println!("execve path={} argv={:?}", path, argv);
+
+
+    // let p = Process::new(elf_buf, )
+
+    0
+}
+
 pub fn exit() -> i64 {
     serial_prtinln!("exiting process with pid {}", crate::sys::proc::id());
-    unsafe {
-        asm!("swapgs")
-    };
+    unsafe { asm!("swapgs") };
 
     crate::sys::proc::exit();
 
@@ -350,7 +371,12 @@ pub fn writev(fd: i32, iov_ptr: u64, iovcnt: i32) -> i64 {
     total
 }
 
-pub fn pr_limit64(pid: i32, resource: u32, _new_limit_ptr: Option<&Rlimit64>, old_limit_ptr: Option<&mut Rlimit64>) -> i64 {
+pub fn pr_limit64(
+    pid: i32,
+    resource: u32,
+    _new_limit_ptr: Option<&Rlimit64>,
+    old_limit_ptr: Option<&mut Rlimit64>,
+) -> i64 {
     if pid != 0 {
         return -ESRCH as i64;
     }
@@ -366,20 +392,19 @@ pub fn pr_limit64(pid: i32, resource: u32, _new_limit_ptr: Option<&Rlimit64>, ol
     0
 }
 
-
 struct DirentItem {
     ino: u64,
     dtype: u8,
     name: String,
-    reclen: u16,   // computed record length including name+NUL+padding
+    reclen: u16, // computed record length including name+NUL+padding
     next_cookie: i64,
 }
 #[inline(always)]
 fn dt_from_filetype(ft: FileType) -> u8 {
     // DT_* values (Linux): UNKNOWN=0,FIFO=1,CHR=2,DIR=4,BLK=6,REG=8,LNK=10,SOCK=12, WHT=14
     match ft {
-        FileType::Dir  => 4,  // DT_DIR
-        FileType::File => 8,  // DT_REG
+        FileType::Dir => 4,  // DT_DIR
+        FileType::File => 8, // DT_REG
     }
 }
 #[inline(always)]
@@ -392,18 +417,28 @@ fn dirent64_reclen(name_len: usize) -> u16 {
 }
 
 pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
-    if user_buf.is_null() { return -(EFAULT as i64); }
-    if buf_len < (size_of::<Dirent64Hdr>() + 2) { // practically can't hold any useful name
+    if user_buf.is_null() {
+        return -(EFAULT as i64);
+    }
+    if buf_len < (size_of::<Dirent64Hdr>() + 2) {
+        // practically can't hold any useful name
         return -(EINVAL as i64);
     }
 
     // Get process and FD
     #[allow(static_mut_refs)]
     let proc_opt = unsafe {
-        PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id())
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
     };
-    let Some(process) = proc_opt else { return -(ESRCH as i64); };
-    if fd < 3 { return -(EBADF as i64); }
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+    if fd < 3 {
+        return -(EBADF as i64);
+    }
 
     let h = match process.handler.get_mut(fd as usize - 3) {
         Some(h) => h,
@@ -417,7 +452,7 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
     // Read directory entries from VFS (adjust API if yours differs)
     #[allow(static_mut_refs)]
     let entries = match unsafe { VFS.get_mut().ls(&h.path) } {
-        Ok(v) => v,  // Vec<DirEntry { name:String, inode:u64, file_type:FileType }>
+        Ok(v) => v, // Vec<DirEntry { name:String, inode:u64, file_type:FileType }>
         Err(_) => return -(EIO as i64),
     };
 
@@ -454,7 +489,9 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
     if items.is_empty() {
         // Buffer too small to fit the next entry -> return 0 only at EOF,
         // otherwise userspace will retry with a bigger buffer or next loop.
-        if idx >= entries.len() { return 0; }
+        if idx >= entries.len() {
+            return 0;
+        }
         return 0; // Behave like Linux: 0 can also mean “no more for now”
     }
 
@@ -465,10 +502,10 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
     for it in &items {
         // header
         let hdr = Dirent64Hdr {
-            d_ino:    it.ino,
-            d_off:    it.next_cookie,
+            d_ino: it.ino,
+            d_off: it.next_cookie,
             d_reclen: it.reclen,
-            d_type:   it.dtype,
+            d_type: it.dtype,
         };
         let hdr_bytes = unsafe {
             core::slice::from_raw_parts(
@@ -476,12 +513,12 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
                 size_of::<Dirent64Hdr>(),
             )
         };
-        out[off .. off + hdr_bytes.len()].copy_from_slice(hdr_bytes);
+        out[off..off + hdr_bytes.len()].copy_from_slice(hdr_bytes);
         off += hdr_bytes.len();
 
         // name + NUL
         let nb = it.name.as_bytes();
-        out[off .. off + nb.len()].copy_from_slice(nb);
+        out[off..off + nb.len()].copy_from_slice(nb);
         off += nb.len();
         out[off] = 0;
         off += 1;
@@ -489,7 +526,9 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
         // padding to 8 bytes (reclen accounts for it)
         let pad = (it.reclen as usize) - (size_of::<Dirent64Hdr>() + nb.len() + 1);
         if pad > 0 {
-            for b in &mut out[off .. off + pad] { *b = 0; }
+            for b in &mut out[off..off + pad] {
+                *b = 0;
+            }
             off += pad;
         }
 
