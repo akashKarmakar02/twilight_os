@@ -179,11 +179,9 @@ impl Process {
             Cr3::write(page_table_frame, flags);
         };
 
-        let _entry_point_addr: u64 = 0;
         let mut mapper =
             unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
-        let code_addr = 0x000000000000;
         let user_stack_top = VirtAddr::new(USER_STACK_TOP);
 
         let mut entry_point_addr: u64 = 0;
@@ -243,7 +241,7 @@ impl Process {
 
                 for segment in obj.segments() {
                     if let Ok(data) = segment.data() {
-                        let addr = code_addr + segment.address();
+                        let addr = segment.address();
                         let size = segment.size() as usize;
 
                         let flags = segment.flags();
@@ -313,7 +311,6 @@ impl Process {
         wrmsr(IA32_FS_BASE, VirtAddr::zero().as_u64());
         wrmsr(IA32_GS_BASE, VirtAddr::zero().as_u64());
         jump_to_user(
-            0x000000000000,
             self.entry_point,
             self.stack,
             USER_CS.bits() as u64,

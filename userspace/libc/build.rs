@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-changed=c/string.c");
     println!("cargo:rerun-if-changed=c/stdlib.c");
     println!("cargo:rerun-if-changed=c/ctype.c");
+    println!("cargo:rerun-if-changed=c/errno.c");
     println!("cargo:rerun-if-changed=include/unistd.h");
 
     cc::Build::new()
@@ -15,6 +16,8 @@ fn main() {
             "c/scanf.c",
             "c/stdio.c",
             "c/string.c",
+            "c/unistd.c",
+            "c/errno.c",
             "c/ctype.c",
             "c/stdlib.c",
         ])

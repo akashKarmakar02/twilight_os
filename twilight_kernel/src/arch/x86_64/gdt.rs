@@ -185,7 +185,6 @@ impl Tss {
     }
 }
 
-// #[cpu_local(subsection = "tss")]
 pub static mut TSS: Tss = {
     let tss = Tss {
         reserved: 0,
@@ -379,10 +378,6 @@ pub fn init_after_boot() {
 
 
     unsafe {
-        TSS.rsp[0] = {
-            static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-            (VirtAddr::from_ptr(addr_of!(STACK)) + STACK_SIZE as u64).as_u64()
-        };
         TSS.ist[DOUBLE_FAULT_IST_INDEX as usize] = {
             static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
             (VirtAddr::from_ptr(addr_of!(STACK)) + STACK_SIZE as u64).as_u64()

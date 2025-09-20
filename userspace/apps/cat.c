@@ -136,6 +136,7 @@ int main(int argc, char **argv) {
         return 0;
       }
       if (r < 0) {
+          printf("error: %d\n", r);
         // no fstat: just report a generic read error
         err2("read error", 0);
         close(fd);

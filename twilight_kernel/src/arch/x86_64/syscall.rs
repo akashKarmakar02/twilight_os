@@ -1,9 +1,7 @@
 use crate::arch::x86_64::gdt::GdtEntryIndex;
-use crate::arch::x86_64::gdt::Tss;
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::sys::syscall::syscall_handler;
 use core::arch::{asm, naked_asm};
-use core::mem::offset_of;
 use raw_cpuid::CpuId;
 
 pub const IA32_EFER: u32 = 0xc0000080;

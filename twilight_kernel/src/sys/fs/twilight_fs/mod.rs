@@ -19,7 +19,7 @@ use spin::Mutex;
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct Superblock {
-    pub ninodes: u16,
+    pub ninodes: u32,
     pub pad1: u16,
     pub imap_blocks: u16,
     pub zmap_blocks: u16,
@@ -275,7 +275,7 @@ fn calculate_superblock(
     let first_data_zone = (reserved_fixed + imap_blocks + zmap_blocks + inode_blocks) as u16;
 
     Superblock {
-        ninodes: ninodes as u16,
+        ninodes: ninodes as u32,
         pad1: 0,
         imap_blocks: imap_blocks as u16,
         zmap_blocks: zmap_blocks as u16,
@@ -284,7 +284,7 @@ fn calculate_superblock(
         pad2: 0,
         max_size: 0x7FFF_FFFF,
         zones: zones as u32,
-        magic: 0x138F,
+        magic: 0x4d5a,
         pad3: 0,
         block_size: block_size as u16,
         subversion: 0,
@@ -323,7 +323,7 @@ pub fn read_superblock(device: &mut dyn BlockDeviceIO) -> Result<Superblock, &'s
     } // Superblock is usually at block 0
     let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
 
-    if sb.magic != 0x137F && sb.magic != 0x138F {
+    if sb.magic != 0x137F && sb.magic != 0x4d5a {
         return Err("Invalid MINIX magic");
     }
     Ok(sb)
@@ -368,7 +368,7 @@ impl MinixFs {
         let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
 
         // Validate magic number
-        if sb.magic != 0x137F && sb.magic != 0x138F {
+        if sb.magic != 0x137F && sb.magic != 0x4d5a {
             return Err("Invalid MINIX superblock magic");
         }
 
