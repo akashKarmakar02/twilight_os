@@ -4,14 +4,17 @@ use crate::sys::proc::mem::align_up;
 use crate::sys::proc::PROCESS_TABLE;
 
 // minimal flag bits
-const PROT_READ:  usize = 1;
-const PROT_WRITE: usize = 2;
-const PROT_EXEC:  usize = 4;
+#[allow(dead_code)]
+pub const PROT_READ:  usize = 1;
+pub const PROT_WRITE: usize = 2;
+#[allow(dead_code)]
+pub const PROT_EXEC:  usize = 4;
 
-const MAP_SHARED:    usize = 0x01;
-const MAP_PRIVATE:   usize = 0x02;
-const MAP_FIXED:     usize = 0x10;
-const MAP_ANONYMOUS: usize = 0x20;
+#[allow(dead_code)]
+pub const MAP_SHARED:    usize = 0x01;
+pub const MAP_PRIVATE:   usize = 0x02;
+pub const MAP_FIXED:     usize = 0x10;
+pub const MAP_ANONYMOUS: usize = 0x20;
 
 const EINVAL: i64 = -22;
 const ENOMEM: i64 = -12;
@@ -50,4 +53,23 @@ pub(crate) fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, o
     }
     logger!("mmap: addr=0x{:x}, size=0x{:x}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}", addr, size, prot, flags, fd, offset, va);
     va as i64
+}
+
+
+pub fn brk(addr: usize) -> i64 {
+    #[allow(static_mut_refs)]
+    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()) };
+    let process = match proc { Some(p) => p, None => return -3 /* -ESRCH */ };
+
+    if addr == 0 {
+        logger!("brk:- addr: {:#X} => {:#X}", addr, process.proc_mm.curr_brk());
+        return process.proc_mm.curr_brk() as i64; // report current break
+    }
+    let res = match process.proc_mm.set_brk(&mut process.mapper, addr) {
+        Ok(end) => end as i64,         // success: return new break
+        Err(_)  => process.proc_mm.curr_brk() as i64, // failure: return current break
+    };
+
+    logger!("brk:- addr: {:#X} => {:#X}", addr, res);
+    res
 }

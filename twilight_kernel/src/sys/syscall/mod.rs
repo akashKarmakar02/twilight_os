@@ -46,7 +46,7 @@ pub extern "sysv64" fn syscall_handler(
             service::open(&path, flags, mode as u32)
         }
         SYS_MMAP => memory::mmap(arg1, arg2 as usize, arg3 as usize, arg4 as usize, arg5, arg6),
-        SYS_BRK => service::brk(arg1 as usize),
+        SYS_BRK => memory::brk(arg1 as usize),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
         SYS_EXECVE => service::execev(arg1 as usize, arg2 as usize, arg3 as usize),
         SYS_EXIT => service::exit(),
