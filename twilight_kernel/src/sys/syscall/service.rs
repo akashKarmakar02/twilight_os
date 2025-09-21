@@ -2,7 +2,7 @@ use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
 use crate::sys::fs::vfs::{FileType, VFS};
 use crate::sys::proc::{Handler, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::tty::{read_char, read_line};
-use crate::{print, println, serial_prtinln};
+use crate::{logger, print, println, serial_prtinln};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use spin::mutex::Mutex;
 use twilight_common::syscall::types::*;
+use crate::sys::memory::alloc_pages;
 use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
 
 pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
@@ -171,6 +172,41 @@ fn split_parent_name(path: &str) -> (&str, &str) {
 
 pub fn open(path: &str, flags: i32, mode: u32) -> i64 {
     openat(AT_FDCWD, path, flags, mode)
+}
+
+pub(crate) fn mmap(addr: u64, size: usize, p2: usize, p3: usize, p4: u64, p5: u64) -> i64 {
+    serial_prtinln!("mmap:- addr: {:#X} size:- {}", addr, size);
+    #[allow(static_mut_refs)]
+    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()) };
+
+    let process = match proc {
+        Some(p) => p,
+        None => return -(ESRCH as i64),
+    };
+
+    if let Ok(()) = alloc_pages(&mut process.mapper, addr, size, true, true) {
+        addr as i64
+    } else {
+        -1
+    }
+}
+
+pub fn brk(addr: usize) -> i64 {
+    #[allow(static_mut_refs)]
+    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()) };
+    let process = match proc { Some(p) => p, None => return -3 /* -ESRCH */ };
+
+    if addr == 0 {
+        logger!("brk:- addr: {:#X} => {:#X}", addr, process.proc_mm.curr_brk());
+        return process.proc_mm.curr_brk() as i64; // report current break
+    }
+    let res = match process.proc_mm.set_brk(&mut process.mapper, addr) {
+        Ok(end) => end as i64,         // success: return new break
+        Err(_)  => process.proc_mm.curr_brk() as i64, // failure: return current break
+    };
+
+    logger!("brk:- addr: {:#X} => {:#X}", addr, res);
+    res
 }
 
 pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {

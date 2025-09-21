@@ -1,7 +1,7 @@
 pub mod allocator;
 pub mod phys;
 
-use crate::{log, serial_prtinln};
+use crate::{log};
 use conquer_once::spin::OnceCell;
 use core::sync::atomic::Ordering::SeqCst;
 use core::sync::atomic::{AtomicU64, AtomicUsize};
@@ -161,7 +161,7 @@ pub fn alloc_pages(
 
     for page in pages {
         if let Some(frame) = frame_allocator.allocate_frame() {
-            serial_prtinln!("{:?} to {:?} with flags {:?}", page, frame, flags);
+            // serial_prtinln!("{:?} to {:?} with flags {:?}", page, frame, flags);
             let res = unsafe { mapper.map_to(page, frame, flags, &mut frame_allocator) };
             if let Ok(mapping) = res {
                 mapping.flush();
@@ -191,9 +191,9 @@ pub fn dealloc_pages(
     let pages = Page::range_inclusive(start_page, end_page);
     
     for page in pages {
-        if let Ok((frame, mapping)) = mapper.unmap(page) {
+        if let Ok((_frame, mapping)) = mapper.unmap(page) {
             mapping.flush();
-            serial_prtinln!("unmapped page {:?} to frame {:?}", page, frame);
+            // serial_prtinln!("unmapped page {:?} to frame {:?}", page, frame);
         }
     }
     

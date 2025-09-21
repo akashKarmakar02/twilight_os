@@ -738,12 +738,13 @@ impl MinixFs {
 
         const DIR_ENTRY_SIZE: usize = size_of::<DirEntry>();
 
-        const BLOCK_SIZE: usize = 512;
-        let mut buffer = [0u8; BLOCK_SIZE];
-        
+       const BLOCK_SIZE: usize = 512;
+       let mut buffer = [0u8; BLOCK_SIZE];
+
         let mut bytes_processed = 0;
         let total_size = dir_inode.size as usize;
         let zones = dir_inode.zones;
+
 
         for &zone_num in zones.iter() {
             if zone_num == 0 {
@@ -1209,6 +1210,9 @@ impl FileSystem for MinixFs {
 
     fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
         if let Ok(inode_num) =  self.resolve_path(parent_dir) {
+            if let Ok(_) = self.resolve_path(format!("{}/{}", parent_dir, path).as_str()) {
+                return Err(());
+            }
             let inode = self.read_inode(inode_num).unwrap();
             if inode.mode & 0xF000 == 0x4000 {
                 if let Err(_) = self.create_dir(inode_num, path) {
@@ -1253,6 +1257,9 @@ impl FileSystem for MinixFs {
 
     fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
         if let Ok(inode_num) =  self.resolve_path(parent_path) {
+            if let Ok(_) = self.resolve_path(format!("{}/{}", parent_path, filename).as_str()) {
+                return Err(());
+            }
             let inode = self.read_inode(inode_num).unwrap();
             if inode.mode & 0xF000 == 0x4000 {
                 self.create_file(inode_num, filename).unwrap();
