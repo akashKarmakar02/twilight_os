@@ -189,9 +189,11 @@ impl VfsNodeOps for MinixNode {
                     break;
                 }
                 
-                let entry = u16::from_le_bytes([
+                let entry = u32::from_le_bytes([
                     indirect_block[i * 4],
                     indirect_block[i * 4 + 1],
+                    indirect_block[i * 4 + 2],
+                    indirect_block[i * 4 + 3],
                 ]);
                 
                 let zone = if entry == 0 {
@@ -199,7 +201,7 @@ impl VfsNodeOps for MinixNode {
                     indirect_block[i * 4..i * 4 + 4].copy_from_slice(&zones.to_le_bytes());
                     zones
                 } else {
-                    entry as u32
+                    entry
                 };
                 
                 let mut buffer = [0u8; 512];
@@ -624,7 +626,7 @@ impl MinixFs {
 
             for j in 0..entries_per_block {
                 let offset = j * dir_entry_size;
-                let inode_field = u16::from_le_bytes([buf[offset], buf[offset + 1]]);
+                let inode_field = u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset+3]]);
                 if inode_field == 0 {
                     // Found empty slot
                     let entry_bytes = unsafe {
@@ -899,9 +901,11 @@ impl MinixFs {
                     break;
                 }
 
-                let entry = u16::from_le_bytes([
+                let entry = u32::from_le_bytes([
                     indirect_block[i * 4],
                     indirect_block[i * 4 + 1],
+                    indirect_block[i * 4 + 2],
+                    indirect_block[i * 4 + 3],
                 ]);
 
                 let zone = if entry == 0 {
@@ -909,7 +913,7 @@ impl MinixFs {
                     indirect_block[i * 4..i * 4 + 4].copy_from_slice(&new_zone.to_le_bytes());
                     new_zone
                 } else {
-                    entry as u32
+                    entry
                 };
 
                 let mut buffer = [0u8; 512];
@@ -933,7 +937,66 @@ impl MinixFs {
                 self.device.lock().write(inode.double_indirect_zones, &zero_block).unwrap();
             }
 
+            let mut double_indirect_block = [0u8; 512];
+            self.device.lock().read(inode.double_indirect_zones, &mut double_indirect_block).unwrap();
 
+            let zone_entries = 512 / 4;
+            for i in 0..(zone_entries-1) {
+                if remaining == 0 {
+                    break;
+                }
+
+                let indirect_zone = {
+                    let entry = u32::from_le_bytes([double_indirect_block[i*4], double_indirect_block[i*4+1], double_indirect_block[i*4+2], double_indirect_block[i*4+3]]);
+                    if entry == 0 {
+                        let new_zone = self.allocate_zone().unwrap();
+                        double_indirect_block[i*4..i*4+4].copy_from_slice(&new_zone.to_le_bytes());
+                        let zero_block = [0u8; 512];
+                        self.device.lock().write(new_zone, &zero_block).unwrap();
+                        new_zone
+                    } else {
+                        entry
+                    }
+                };
+
+                let mut indirect_block = [0u8; 512];
+                self.device.lock().read(indirect_zone, &mut indirect_block).unwrap();
+
+                let zone_entries = 512 / 4;
+                for j in 0..(zone_entries-1) {
+                    if remaining == 0 {
+                        break;
+                    }
+
+                    let zone = {
+                        let entry = u32::from_le_bytes([indirect_block[j*4], indirect_block[j*4+1], indirect_block[j*4+2], indirect_block[j*4+3]]);
+                        if entry == 0 {
+                            let new_zone = self.allocate_zone().unwrap();
+                            indirect_block[j*4..j*4+4].copy_from_slice(&new_zone.to_le_bytes());
+                            let zero_block = [0u8; 512];
+                            self.device.lock().write(new_zone, &zero_block).unwrap();
+                            new_zone
+                        } else {
+                            entry
+                        }
+                    };
+
+                    let mut buffer = [0u8; 512];
+                    let copy_size = core::cmp::min(block_size, remaining);
+
+                    buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                    self.device.lock().write(zone, &buffer).unwrap();
+
+                    bytes_written += copy_size;
+                    remaining -= copy_size;
+                }
+
+                // store updated indirect block
+                self.device.lock().write(indirect_zone, &indirect_block).unwrap();
+            }
+
+            // store updated double indirect block
+            self.device.lock().write(inode.double_indirect_zones, &double_indirect_block).unwrap();
         }
 
         inode.size = bytes_written as u32;
@@ -1042,6 +1105,9 @@ impl MinixFs {
             self.device.lock().read(inode.double_indirect_zones, &mut buffer).unwrap();
             let zone_size = 512 / 4;
             for i in 0..(zone_size - 1) {
+                if remaining == 0 {
+                    break;
+                }
                 let zone_id_buf: [u8; 4] = buffer[i*4..(i+1)*4].try_into().expect("invalid zone id size");
                 let zone_id = u32::from_le_bytes(zone_id_buf);
                 if zone_id == 0 {
@@ -1050,6 +1116,29 @@ impl MinixFs {
 
                 let mut indirect_zones_buf = [0u8; 512];
                 self.device.lock().read(zone_id, &mut indirect_zones_buf).unwrap();
+
+                let zone_entries = 512 / 4;
+                for j in 0..(zone_entries - 1) {
+                    let zone_id_buf: [u8; 4] = indirect_zones_buf[j*4..(j+1)*4].try_into().expect("invalid zone id size");
+                    let zone_id = u32::from_le_bytes(zone_id_buf);
+                    if zone_id == 0 {
+                        break;
+                    }
+
+                    let to_read = core::cmp::min(remaining, block_size);
+
+                    let mut zone_buf = [0u8; 512];
+                    self.device.lock().read(zone_id, &mut zone_buf).unwrap();
+
+                    content.extend_from_slice(zone_buf.as_slice());
+
+
+
+                    remaining -= to_read;
+                    if remaining == 0 {
+                        break;
+                    }
+                }
             }
         }
 
