@@ -1,6 +1,7 @@
 pub mod twilight_fs;
 pub mod ram_fs;
 pub mod vfs;
+mod devfs;
 
 use crate::println;
 use crate::sys::fs::twilight_fs::MinixFs;
@@ -10,6 +11,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
+use crate::sys::fs::devfs::DevFs;
 use crate::sys::fs::vfs::VFS;
 
 pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
@@ -41,6 +43,10 @@ pub fn init(show_log: bool) {
                 unsafe {
                     VFS.get_mut().mount("/", Arc::new(Mutex::new(MinixFs::check_ata(bus, dsk).unwrap())));
                 }
+                #[allow(static_mut_refs)]
+                unsafe {
+                    VFS.get_mut().mount("/dev", Arc::new(Mutex::new(DevFs::new())));
+                }
                 if show_log {
                     println!(
                         "\x1b[93m[{:.6}]\x1b[0m MinixFS Superblock found in ATA {}:{}",
@@ -50,6 +56,10 @@ pub fn init(show_log: bool) {
                 return;
             }
         }
+    }
+    #[allow(static_mut_refs)]
+    unsafe {
+        VFS.get_mut().mount("/dev", Arc::new(Mutex::new(DevFs::new())));
     }
     println!("\x1b[93m[{:.6}]\x1b[0m No MinixFS Superblock found", uptime);
     println!("\x1b[93mWarning\x1b[0m Trying running 'install' to install Twilight OS");

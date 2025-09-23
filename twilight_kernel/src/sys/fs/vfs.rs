@@ -13,6 +13,8 @@ pub static mut VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
 pub enum FileType {
     File,
     Dir,
+    CharDevice,
+    BlockDevice,
 }
 
 impl PartialEq for FileType {
@@ -40,8 +42,35 @@ pub struct Metadata {
     pub name: String,
     pub file_type: FileType,
     pub size: usize,
+    pub created_time: u32,
+    pub access_time: u32,
+    pub modified_time: u32,
 }
 
+impl Metadata {
+    pub(crate) fn dir(ino: u32, name: &str) -> Self {
+        Metadata {
+            ino,
+            name: name.into(),
+            file_type: FileType::Dir,
+            size: 0,
+            access_time: 0,
+            created_time: 0,
+            modified_time: 0,
+        }
+    }
+    pub(crate) fn chr(ino: u32, name: &str) -> Self {
+        Metadata {
+            ino,
+            name: name.into(),
+            file_type: FileType::CharDevice,
+            size: 0,
+            access_time: 0,
+            created_time: 0,
+            modified_time: 0,
+        }
+    }
+}
 pub type BlockDev = Arc<Mutex<Box<dyn BlockDeviceIO + Send>>>;
 
 
@@ -60,20 +89,20 @@ pub trait FsCtx {
 pub struct VfsNode {
     pub device: BlockDev,
     pub metadata: Metadata,
-    pub node: Box<dyn VfsNodeOps>,
+    pub node: Arc<RwLock<dyn VfsNodeOps>>,
 }
 
 impl VfsNode {
-    pub fn new(device: BlockDev, metadata: Metadata, node: Box<dyn VfsNodeOps>) -> Self {
+    pub fn new(device: BlockDev, metadata: Metadata, node: Arc<RwLock<dyn VfsNodeOps>>) -> Self {
         Self { device, metadata, node }
     }
 
     pub fn read(&mut self) -> Result<Vec<u8>, ()> {
-        self.node.read(&mut self.device)
+        self.node.read().read(&mut self.device)
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<(), ()> {
-        self.node.write(&mut self.device, data)
+        self.node.write().write(&mut self.device, data)
     }
 }
 

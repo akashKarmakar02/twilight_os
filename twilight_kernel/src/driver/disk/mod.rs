@@ -1,7 +1,10 @@
 use crate::sys;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use spin::mutex::Mutex;
+use crate::sys::fs::vfs::BlockDev;
 
 pub mod ata;
 
@@ -9,7 +12,24 @@ pub const BLOCK_SIZE: usize = 512;
 
 pub static mut BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
 
+struct DummyBlockDev;
 
+impl BlockDeviceIO for DummyBlockDev {
+    fn read(&mut self, _addr: u32, _buf: &mut [u8]) -> Result<(), ()> {
+        Err(())
+    }
+    fn write(&mut self, _addr: u32, _buf: &[u8]) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn block_size(&self) -> usize {
+        0
+    }
+
+    fn block_count(&self) -> usize {
+        0
+    }
+}
 pub trait BlockDeviceIO: Send + Sync + 'static {
     fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()>;
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), ()>;
@@ -145,4 +165,9 @@ pub fn mount_ata(bus: u8, dsk: u8) {
     unsafe {
         BLOCK_DEVICE = Some(block_dev)
     };
+}
+
+
+pub fn dummy_blockdev() -> BlockDev {
+    Arc::new(Mutex::new(Box::new(DummyBlockDev)))
 }
