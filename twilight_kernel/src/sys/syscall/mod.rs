@@ -1,4 +1,4 @@
-mod service;
+pub mod service;
 mod utils;
 mod memory;
 
@@ -45,8 +45,17 @@ pub extern "sysv64" fn syscall_handler(
             let mode = arg3 as i32;
             service::open(&path, flags, mode as u32)
         }
+        SYS_STAT => service::stat(arg1 as usize, arg2 as usize),
+        SYS_POLL => {
+            // mock implementation of poll
+            1
+        }
         SYS_MMAP => memory::mmap(arg1, arg2 as usize, arg3 as usize, arg4 as usize, arg5, arg6),
         SYS_BRK => memory::brk(arg1 as usize),
+        SYS_IOCTL => {
+            // this is a mock implementation for ioctl
+            0
+        }
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
         SYS_EXECVE => service::execev(arg1 as usize, arg2 as usize, arg3 as usize),
         SYS_EXIT => service::exit(),
@@ -85,6 +94,10 @@ pub extern "sysv64" fn syscall_handler(
 
 
             service::getdent64(fd, buf, buf_len as usize)
+        }
+        SYS_SETTID_ADDR => {
+            // this is a demo implementation of settid_addr
+            arg1 as i64
         }
         SYS_EXIT_GROUP => service::exit(),
         SYS_OPENAT => {

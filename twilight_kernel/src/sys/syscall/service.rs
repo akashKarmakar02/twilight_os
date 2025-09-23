@@ -1,9 +1,10 @@
-use crate::arch::x86_64::io::{rdmsr, wrmsr, IA32_FS_BASE, IA32_GS_BASE};
+use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
+use crate::sys::console::DIR;
 use crate::sys::fs::vfs::{FileType, VFS};
-use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
-use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
+use crate::sys::proc::{Handler, PROCESS_TABLE, Process, USER_STACK_SIZE};
+use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array};
 use crate::sys::tty::{read_char, read_line};
-use crate::{print, println, serial_prtinln};
+use crate::{print, serial_prtinln};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -282,7 +283,23 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         Err(_) => return -1, // EFAULT
     };
 
-    println!("execve path={} argv={:?}", path, argv);
+    let argv = argv.iter().map(|p| p.as_str()).collect::<Vec<&str>>();
+
+    #[allow(static_mut_refs)]
+    let process_table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+
+    let pwd = process_table
+        .get_process(crate::sys::proc::id())
+        .unwrap()
+        .pwd
+        .clone();
+
+    if let Ok(p) = Process::new(_elf_buf, pwd.as_str(), argv.as_slice()) {
+        unsafe { asm!("swapgs") };
+        process_table.run(p);
+    } else {
+        return -1;
+    }
 
     0
 }
@@ -400,8 +417,10 @@ struct DirentItem {
 fn dt_from_filetype(ft: FileType) -> u8 {
     // DT_* values (Linux): UNKNOWN=0,FIFO=1,CHR=2,DIR=4,BLK=6,REG=8,LNK=10,SOCK=12, WHT=14
     match ft {
-        FileType::Dir => 4,  // DT_DIR
-        FileType::File => 8, // DT_REG
+        FileType::Dir => 4, // DT_DIR
+        FileType::File => 8,
+        FileType::CharDevice => 2,
+        FileType::BlockDevice => 6, // DT_REG
     }
 }
 #[inline(always)]
@@ -536,4 +555,42 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
     h.seek = idx;
 
     off as i64
+}
+
+pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
+    let file_name_ptr = UserPtr(file_name_ptr as *const u8);
+    let Ok(mut file_path) = copy_cstr_from_user(file_name_ptr, 4096) else {
+        return -1;
+    };
+    
+    if file_path.starts_with("./") {
+        #[allow(static_mut_refs)]
+        let pwd = unsafe { DIR.as_str() };
+        let calnonical_pwd = if pwd.ends_with("/") { pwd.to_string() } else { format!("{}/", pwd) };
+        file_path = file_path.replace("./", &calnonical_pwd.as_str());
+    }
+
+    #[allow(static_mut_refs)]
+    let Ok(metadata) = (unsafe { VFS.get_mut().metadata(&file_path) }) else {
+        return -1;
+    };
+
+    let user_stat = unsafe { &mut *(stat_ptr as *mut Stat) };
+
+    user_stat.st_size = metadata.size as i64;
+    user_stat.st_mode = match metadata.file_type {
+        FileType::File | FileType::Dir => 0100755,
+        FileType::CharDevice => 020666,
+        FileType::BlockDevice => 060660,
+    };
+    user_stat.st_uid = 0;
+    user_stat.st_gid = 0;
+    user_stat.st_ino = metadata.ino as u64;
+    user_stat.st_nlink = 1;
+    user_stat.st_rdev = 0;
+    user_stat.st_atim = Timespec { tv_sec: metadata.access_time as i64, tv_nsec: 0 };
+    user_stat.st_ctim = Timespec { tv_sec: metadata.created_time as i64, tv_nsec: 0 };
+    user_stat.st_mtim = Timespec { tv_sec: metadata.modified_time as i64, tv_nsec: 0 };
+
+    0
 }
