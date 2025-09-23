@@ -64,41 +64,21 @@ fn main() {
         if path.extension().and_then(|s| s.to_str()) == Some("c") {
             let filename = path.file_stem().unwrap().to_str().unwrap();
 
-            let obj_path = obj_out_dir.join(format!("{filename}.o"));
             let bin_path = bin_out_dir.join(filename);
             println!("cargo:rerun-if-changed={}", path.display());
 
-            let c_status = Command::new("gcc")
+            let c_status = Command::new("musl-gcc")
                 .args([
-                    "-ffreestanding",
-                    "-fno-pie",
-                    "-mno-red-zone",
-                    "-c",
+                    "-static",
                     path.to_str().unwrap(),
                     "-o",
-                    obj_path.to_str().unwrap(),
+                    bin_path.to_str().unwrap(),
                 ])
                 .status()
                 .unwrap();
 
             if !c_status.success() {
                 panic!("GCC failed for file: {}", path.display());
-            }
-
-            let ld_status = Command::new("ld")
-                .args([
-                    "-nostdlib",
-                    "-static",
-                    "libc/crt/crt0.o",
-                    obj_path.to_str().unwrap(),
-                    "twilight_c.a",
-                    "-o", bin_path.to_str().unwrap()
-                ])
-                .status()
-                .unwrap();
-
-            if !ld_status.success() {
-                panic!("LD failed");
             }
         }
     }
