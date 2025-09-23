@@ -1,13 +1,14 @@
 pub mod mem;
 
-use alloc::boxed::Box;
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
-use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, set_fsbase, set_inactive_gsbase, wrmsr};
+use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::kernel_utils::exec::jump_to_user;
-use crate::{println, serial_prtinln};
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
 use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset};
+use crate::sys::proc::mem::ProcMM;
+use crate::println;
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -15,12 +16,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
-use spin::Once;
 use spin::mutex::Mutex;
-use x86_64::VirtAddr;
+use spin::Once;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame};
-use crate::sys::proc::mem::ProcMM;
+use x86_64::VirtAddr;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -174,8 +174,10 @@ impl Process {
 
         let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
 
-        for (page, kernel_page) in pages {
-            *page = kernel_page.clone();
+        for (idx, (page, kernel_page)) in pages.enumerate() {
+            if idx > 135 {
+                *page = kernel_page.clone();
+            }
         }
 
         let mut addr_size_vec: Vec<(u64, usize)> = Vec::new();
@@ -356,14 +358,12 @@ pub fn exit() {
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
     let mut process = table.proc_list.pop_back().unwrap();
 
-    if let Some(k_process) = table.get_process(0) {
+    if let Some(k_process) = table.get_process(1) {
         let page_table_frame = k_process.page_table_frame;
         let (_, flags) = Cr3::read();
         unsafe {
             Cr3::write(page_table_frame, flags);
         }
-        set_fsbase()(k_process.fs_base);
-        set_inactive_gsbase()(k_process.gs_base);
     }
 
     process.cleanup();
@@ -520,7 +520,6 @@ fn build_initial_stack(
 
     // ---- argv pointers then NULL ----
     for &p in &argv_ptrs {
-        serial_prtinln!("ptr: {:#X}", p);
         rsp -= 8;
         unsafe {
             *(rsp as *mut u64) = p;

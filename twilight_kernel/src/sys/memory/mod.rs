@@ -166,9 +166,9 @@ pub fn alloc_pages(
             if let Ok(mapping) = res {
                 mapping.flush();
             } else {
-                log!("Could not map {:?} to {:?}", page, frame);
-                if let Ok(old_frame) = mapper.translate_page(page) {
-                    log!("Already mapped to {:?}", old_frame);
+                // log!("Could not map {:?} to {:?}", page, frame);
+                if let Ok(_old_frame) = mapper.translate_page(page) {
+                    // log!("Already mapped to {:?}", old_frame);
                 }
             }
         } else {
