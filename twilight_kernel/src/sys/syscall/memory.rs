@@ -1,5 +1,5 @@
 use crate::logger;
-use crate::sys::memory::alloc_pages;
+use crate::sys::memory::{alloc_pages, dealloc_pages};
 use crate::sys::proc::mem::align_up;
 use crate::sys::proc::PROCESS_TABLE;
 
@@ -21,7 +21,7 @@ const ENOMEM: i64 = -12;
 const ENOSYS: i64 = -38;
 const ESRCH:  i64 = -3;
 
-pub(crate) fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: u64) -> i64 {
+pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: u64) -> i64 {
     #[allow(static_mut_refs)]
     let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()) };
     let process = match proc { Some(p) => p, None => return ESRCH };
@@ -72,4 +72,17 @@ pub fn brk(addr: usize) -> i64 {
 
     logger!("brk:- addr: {:#X} => {:#X}", addr, res);
     res
+}
+
+pub fn munmap(addr: u64, size: usize) -> i64 {
+    #[allow(static_mut_refs)]
+    let Some(p) = (unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()) }) else {
+        return -1;
+    };
+
+    if let Err(()) = dealloc_pages(&mut p.mapper, addr, size) {
+        return -1;
+    }
+
+    0
 }

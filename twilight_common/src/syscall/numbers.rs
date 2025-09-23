@@ -5,6 +5,7 @@ pub const SYS_CLOSE: usize = 3;
 pub const SYS_STAT: usize = 4;
 pub const SYS_POLL: usize = 7;
 pub const SYS_MMAP: usize = 9;
+pub const SYS_MUNMAP: usize = 11;
 pub const SYS_BRK: usize = 12;
 pub const SYS_IOCTL: usize = 16;
 pub const SYS_WRITEV: usize = 20;

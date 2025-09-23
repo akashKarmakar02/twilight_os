@@ -51,6 +51,7 @@ pub extern "sysv64" fn syscall_handler(
             1
         }
         SYS_MMAP => memory::mmap(arg1, arg2 as usize, arg3 as usize, arg4 as usize, arg5, arg6),
+        SYS_MUNMAP => memory::munmap(arg1, arg2 as usize),
         SYS_BRK => memory::brk(arg1 as usize),
         SYS_IOCTL => {
             // this is a mock implementation for ioctl
