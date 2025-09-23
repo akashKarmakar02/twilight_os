@@ -99,6 +99,7 @@ int main(void){
 
     for(;;){
         printf("> ");
+        fflush(stdout);
         if (!read_line(line, sizeof line)) { puts(""); break; }
         trim(line);
         if (!line[0]) continue;
