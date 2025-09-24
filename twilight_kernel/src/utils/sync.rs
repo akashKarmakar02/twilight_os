@@ -1,6 +1,3 @@
-
-use alloc::sync::Arc;
-use alloc::vec::Vec;
 use x86_64::instructions::interrupts;
 
 pub struct Mutex<T: ?Sized> {
@@ -8,36 +5,32 @@ pub struct Mutex<T: ?Sized> {
 }
 
 impl<T> Mutex<T> {
-    
     pub const fn new(value: T) -> Self {
         Self {
             inner: spin::Mutex::new(value),
         }
     }
-    
+
     pub fn lock(&self) -> MutexGuard<T> {
         MutexGuard {
             guard: core::mem::ManuallyDrop::new(self.inner.lock()),
             irq_lock: false,
         }
     }
-    
+
     pub fn lock_irq(&self) -> MutexGuard<T> {
         let irq_lock = interrupts::are_enabled();
 
-        unsafe {
-            interrupts::disable()
-        }
-        
+        interrupts::disable();
+
         MutexGuard {
             guard: core::mem::ManuallyDrop::new(self.inner.lock()),
             irq_lock,
         }
-        
     }
 
-    pub unsafe fn force_unlock(&self) {
-        self.inner.force_unlock()
+    pub fn force_unlock(&self) {
+        unsafe { self.inner.force_unlock() }
     }
 }
 
@@ -70,9 +63,7 @@ impl<T: ?Sized> Drop for MutexGuard<'_, T> {
         }
 
         if self.irq_lock {
-            unsafe {
-                interrupts::enable();
-            }
+            interrupts::enable();
         }
     }
 }

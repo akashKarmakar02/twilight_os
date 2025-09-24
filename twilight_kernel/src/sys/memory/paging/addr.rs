@@ -1,16 +1,16 @@
+use crate::fs::twilight_fs::FsError;
 use core::fmt;
 use core::iter::Step;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
-use core::sync::atomic::{AtomicU64, Ordering};
-use crate::fs::twilight_fs::FsError;
+use core::sync::atomic::Ordering;
 
-use x86_64::structures::paging::{PageOffset, PageTableIndex, PageSize, Size4KiB};
 use super::frame::VmFrame;
+use x86_64::structures::paging::{PageOffset, PageSize, Size4KiB};
 
+use crate::sys::memory::paging::PageTableIndex;
+use crate::sys::syscall;
 use bit_field::BitField;
 pub(crate) use x86_64::{align_down, align_up};
-use crate::sys::syscall;
-
 
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -99,6 +99,7 @@ impl VirtAddr {
 
     pub fn as_hhdm_phys(&self) -> PhysAddr {
         // TODO: from unsafe { PhysAddr::new(*self - crate::memory::PHYSICAL_MEMORY_OFFSET)} to
+        #[allow(static_mut_refs)]
         unsafe { PhysAddr::new(self.as_u64() - crate::memory::PHYSICAL_MEMORY_OFFSET.load(Ordering::Relaxed))}
     }
 
@@ -344,6 +345,7 @@ impl PhysAddr {
 
     pub fn as_hhdm_virt(&self) -> VirtAddr {
         // TODO: from unsafe { crate::PHYSICAL_MEMORY_OFFSET + self.as_u64() } to
+        #[allow(static_mut_refs)]
         let addr = unsafe { crate::sys::memory::PHYSICAL_MEMORY_OFFSET.load(Ordering::Relaxed) + self.as_u64() };
         VirtAddr(addr)
     }

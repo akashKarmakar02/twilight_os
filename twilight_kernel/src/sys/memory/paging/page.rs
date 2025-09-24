@@ -2,7 +2,6 @@ use super::addr::{PhysAddr, VirtAddr};
 use super::page_table::PageTableIndex;
 
 use core::fmt;
-use core::fmt::Write;
 use core::marker::PhantomData;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 
@@ -11,7 +10,6 @@ pub(crate) use x86_64::structures::paging::{
     Size4KiB,
     Size2MiB,
     Size1GiB,
-    PageTableIndex as X86PageTableIndex,
 };
 
 pub trait NotGiantPageSize: PageSize {}
@@ -40,17 +38,17 @@ impl<S: PageSize> Page<S> {
     }
 
     #[inline]
-    pub fn p5_index(self) -> x86_64::structures::paging::PageTableIndex {
+    pub fn p5_index(self) -> PageTableIndex {
         self.start_address.p5_index()
     }
 
     #[inline]
-    pub fn p4_index(self) -> x86_64::structures::paging::PageTableIndex {
+    pub fn p4_index(self) -> PageTableIndex {
         self.start_address().p4_index()
     }
 
     #[inline]
-    pub fn p3_index(self) -> x86_64::structures::paging::PageTableIndex {
+    pub fn p3_index(self) -> PageTableIndex {
         self.start_address().p3_index()
     }
 
@@ -63,14 +61,14 @@ impl<S: PageSize> Page<S> {
 
 impl<S: NotGiantPageSize> Page<S> {
     #[inline]
-    pub fn p2_index(self) -> x86_64::structures::paging::PageTableIndex {
+    pub fn p2_index(self) -> PageTableIndex {
         self.start_address.p2_index()
     }
 }
 
 impl Page<Size4KiB> {
     #[inline]
-    pub const fn p1_index(self) -> x86_64::structures::paging::PageTableIndex {
+    pub const fn p1_index(self) -> PageTableIndex {
         self.start_address.p1_index()
     }
 }
