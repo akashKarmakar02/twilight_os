@@ -6,7 +6,6 @@ use super::page::{PageSize, PhysFrame, Size4KiB};
 use super::{FrameAllocator, MapToError, FRAME_ALLOCATOR};
 
 use bitflags::bitflags;
-use x86_64::structures::paging::FrameAllocator;
 
 /// The error returned by the `PageTableEntry::frame` method.
 #[derive(Debug, Clone, Copy, PartialEq)]

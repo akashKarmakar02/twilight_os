@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::vec::Vec;
 
 use limine::memory_map;
-use spin::{Mutex, Once};
+use spin::{Once};
 
 use super::mapper::*;
 use super::page::*;
@@ -31,6 +31,7 @@ use super::addr::PhysAddr;
 
 use crate::sys::memory::paging::addr::align_up;
 use crate::utils::bitmap::Bitmap;
+use crate::utils::sync::Mutex;
 
 const BUDDY_SIZE: [u64; 10] = [
     Size4KiB::SIZE,       // 4 KiB
@@ -594,62 +595,5 @@ impl VmFrame {
 
     pub fn ref_count(&self) -> usize {
         self.ref_count.load(Ordering::SeqCst)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::*;
-    use super::*;
-
-    use crate::mem::AddressSpace;
-
-    #[test]
-    fn vm_frame_ref_count() {
-        let mut address_space = AddressSpace::this();
-        let mut offset_table = address_space.offset_page_table();
-
-        let frame: PhysFrame = FRAME_ALLOCATOR.allocate_frame().unwrap();
-
-        assert!(!FRAME_ALLOCATOR
-            .0
-            .get()
-            .unwrap()
-            .lock()
-            .is_free(frame.start_address(), 0));
-
-        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(0xcafebabedea));
-
-        let vm_frame = frame.start_address().as_vm_frame().unwrap();
-
-        // The frame is not mapped yet, so the ref count should be 0.
-        assert_eq!(vm_frame.ref_count(), 0);
-
-        assert!(!FRAME_ALLOCATOR
-            .0
-            .get()
-            .unwrap()
-            .lock()
-            .is_free(frame.start_address(), 0));
-
-        unsafe { offset_table.map_to(page, frame, PageTableFlags::PRESENT) }
-            .unwrap()
-            .flush();
-
-        // We just mapped the frame to `0xcafebabe` so the ref count should be 1.
-        assert_eq!(vm_frame.ref_count(), 1);
-
-        offset_table.unmap(page).unwrap().1.flush();
-
-        // We just unmapped the frame from `0xcafebabe` so the ref count should be 0 and
-        // the frame should be deallocated.
-        assert_eq!(vm_frame.ref_count(), 0);
-
-        assert!(FRAME_ALLOCATOR
-            .0
-            .get()
-            .unwrap()
-            .lock()
-            .is_free(frame.start_address(), 0));
     }
 }

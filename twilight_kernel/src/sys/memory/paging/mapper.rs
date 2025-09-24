@@ -6,8 +6,6 @@ use super::page::{Page, PageSize, Size1GiB, Size2MiB, Size4KiB, AddressNotAligne
 use super::page_table::{FrameError, PageTable, PageTableEntry, PageTableFlags};
 use super::FRAME_ALLOCATOR;
 
-use x86_64::structures::paging::mapper::{ MapperFlush };
-
 pub unsafe trait FrameAllocator<S: PageSize> {
     fn allocate_frame(&self) -> Option<PhysFrame<S>>;
     fn deallocate_frame(&self, frame: PhysFrame<S>);
@@ -123,12 +121,12 @@ pub trait Mapper<S: PageSize> {
 
 #[derive(Debug)]
 #[must_use = "Page Table changes must be flushed or ignored."]
-pub struct MapeprFlush<S: PageSize>(Page<S>);
+pub struct MapperFlush<S: PageSize>(Page<S>);
 
-impl<S: PageSize> MapeprFlush<S> {
+impl<S: PageSize> MapperFlush<S> {
     #[inline]
     fn new(page: Page<S>) -> Self {
-        MapeprFlush(page)
+        MapperFlush(page)
     }
 
     pub fn ignore(self) {}

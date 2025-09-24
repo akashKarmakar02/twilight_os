@@ -1,5 +1,6 @@
 pub mod allocator;
 pub mod phys;
+// pub mod paging;
 
 use crate::{log};
 use conquer_once::spin::OnceCell;

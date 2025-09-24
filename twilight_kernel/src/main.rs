@@ -4,6 +4,8 @@
 #![feature(alloc_error_handler)]
 #![feature(let_chains)]
 #![feature(decl_macro)]
+#![feature(step_trait)]
+#![feature(allocator_api)]
 
 extern crate alloc;
 
@@ -15,6 +17,7 @@ pub mod driver;
 pub mod kernel_utils;
 pub mod task;
 pub mod sys;
+pub mod utils;
 
 use core::arch::asm;
 use limine::BaseRevision;
