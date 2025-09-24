@@ -192,11 +192,10 @@ fn exec(cmd: &str, args: &[&str]) {
 
             if let Ok(buf) = fs.read(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str()) {
                 #[allow(static_mut_refs)]
-                let process = Process::new(buf.clone(), unsafe { DIR.as_str() }, args);
-
-                #[allow(static_mut_refs)]
-                unsafe {
-                    PROCESS_TABLE.get_mut().unwrap().run(process);
+                if let Ok(process) = Process::new(buf.clone(), unsafe { DIR.as_str() }, args) {
+                    unsafe {
+                        PROCESS_TABLE.get_mut().unwrap().run(process);
+                    }
                 }
             } else {
                 println!("{}: not a command", cmd);

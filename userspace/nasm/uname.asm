@@ -1,5 +1,5 @@
 ; uname.asm — Linux-like uname in pure x86-64 NASM (syscall-only)
-; Builds: nasm -felf64 uname.asm -o uname.o && ld -m elf_x86_64 -o uname uname.o
+; Build: nasm -felf64 uname.asm -o uname.o && ld -m elf_x86_64 -o uname uname.o
 
 BITS 64
 default rel
@@ -16,24 +16,22 @@ default rel
 %define U_RELEASE   (UTSLEN*2)
 %define U_VERSION   (UTSLEN*3)
 %define U_MACHINE   (UTSLEN*4)
-%define U_DOMAIN    (UTSLEN*5)
+%define U_DOMAIN    (UTSLEN*5)       ; present in kernel struct; we don't print it
 %define UTS_SIZE    (UTSLEN*6)
 
+; Flags actually supported (Linux-compatible set)
 %define FL_S  (1 << 0)
 %define FL_N  (1 << 1)
 %define FL_R  (1 << 2)
 %define FL_V  (1 << 3)
 %define FL_M  (1 << 4)
-%define FL_P  (1 << 5)
-%define FL_I  (1 << 6)
-%define FL_O  (1 << 7)
+%define FL_O  (1 << 5)               ; GNU extension: operating system name
 
 section .bss
     utsbuf:     resb UTS_SIZE
 
 section .data
-    s_unknown:      db "unknown",0
-    s_gnu_linux:    db "GNU/Linux",0
+    s_gnu_linux:    db "Twilight/Next",0
     spc:            db " "
     nl:             db 10
 
@@ -66,10 +64,10 @@ _start:
     cmp     dl, 0
     je      .next_arg
 
-    ; -a
+    ; -a => s n r v m o
     cmp     dl, 'a'
     jne     .chk_s
-    mov     bl, FL_S | FL_N | FL_R | FL_V | FL_M | FL_P | FL_I | FL_O
+    mov     bl, FL_S | FL_N | FL_R | FL_V | FL_M | FL_O
     jmp     .adv
 
 .chk_s:
@@ -98,22 +96,11 @@ _start:
 
 .chk_m:
     cmp     dl, 'm'
-    jne     .chk_p
+    jne     .chk_o
     or      bl, FL_M
     jmp     .adv
 
-.chk_p:
-    cmp     dl, 'p'
-    jne     .chk_i
-    or      bl, FL_P
-    jmp     .adv
-
-.chk_i:
-    cmp     dl, 'i'
-    jne     .chk_o
-    or      bl, FL_I
-    jmp     .adv
-
+; Only support -o as GNU extension. We DO NOT implement -p/-i.
 .chk_o:
     cmp     dl, 'o'
     jne     .bad_option
@@ -179,45 +166,18 @@ _start:
 
 .chkM:
     test    bl, FL_M
-    jz      .chkP
+    jz      .chkO
     call    maybe_spc
     lea     rdi, [rel utsbuf + U_MACHINE]
     call    write_uts_field
-    mov     edi, 1
-
-.chkP:
-    test    bl, FL_P
-    jz      .chkI
-    call    maybe_spc
-    lea     rdi, [rel s_unknown]
-    call    write_cstr
-    mov     edi, 1
-
-.chkI:
-    test    bl, FL_I
-    jz      .chkO
-    call    maybe_spc
-    lea     rdi, [rel s_unknown]
-    call    write_cstr
     mov     edi, 1
 
 .chkO:
     test    bl, FL_O
     jz      .done_print
     call    maybe_spc
-    lea     rdi, [rel utsbuf + U_SYSNAME]
-    call    is_linux
-    test    eax, eax
-    jz      .print_sysname_os
     lea     rdi, [rel s_gnu_linux]
     call    write_cstr
-    jmp     .after_o
-
-.print_sysname_os:
-    lea     rdi, [rel utsbuf + U_SYSNAME]
-    call    write_uts_field
-
-.after_o:
     mov     edi, 1
 
 .done_print:
@@ -287,30 +247,4 @@ write_uts_field:
     mov     edi, STDOUT
     mov     eax, SYS_WRITE
     syscall
-    ret
-
-is_linux:
-    mov     rsi, rdi
-    mov     al, [rsi]
-    cmp     al, 'L'
-    jne     .no
-    mov     al, [rsi+1]
-    cmp     al, 'i'
-    jne     .no
-    mov     al, [rsi+2]
-    cmp     al, 'n'
-    jne     .no
-    mov     al, [rsi+3]
-    cmp     al, 'u'
-    jne     .no
-    mov     al, [rsi+4]
-    cmp     al, 'x'
-    jne     .no
-    mov     al, [rsi+5]
-    cmp     al, 0
-    jne     .no
-    mov     eax, 1
-    ret
-.no:
-    xor     eax, eax
     ret

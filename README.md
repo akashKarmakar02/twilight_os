@@ -58,6 +58,7 @@ Twilight OS builds require:
 - `ld` (GNU binutils linker)
 - `xorriso` (for ISO creation)
 - `qemu` (for virtualization)
+- `musl-gcc`
 
 ---
 
@@ -69,7 +70,7 @@ Twilight OS builds require:
 
 ```bash
 sudo apt update
-sudo apt install build-essential nasm qemu-system-x86 xorriso
+sudo apt install build-essential nasm qemu-system-x86 xorriso gcc musl-tools
 rustup target add x86_64-unknown-none
 rustup component add llvm-tools-preview
 ```
@@ -77,7 +78,7 @@ rustup component add llvm-tools-preview
 - _Fedora_
 
 ```bash
-sudo dnf install make nasm qemu-system-x86 xorriso
+sudo dnf install make nasm qemu-system-x86 xorriso musl-gcc
 rustup target add x86_64-unknown-none
 rustup component add llvm-tools-preview
 ```
@@ -85,7 +86,7 @@ rustup component add llvm-tools-preview
 - _Arch Linux_
 
 ```bash
-sudo pacman -S base-devel nasm qemu xorriso
+sudo pacman -S base-devel nasm qemu xorriso musl
 rustup target add x86_64-unknown-none
 rustup component add llvm-tools-preview
 ```

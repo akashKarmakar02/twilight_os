@@ -1,5 +1,6 @@
-mod service;
+pub mod service;
 mod utils;
+mod memory;
 
 use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
@@ -18,16 +19,12 @@ pub extern "sysv64" fn syscall_handler(
     regs: &mut Registers,
 ) {
     let syscall_number = regs.rax as usize;
-    #[allow(static_mut_refs)]
-    let cpu_id_ptr = unsafe { crate::arch::x86_64::cpu_local::CPUID.addr().as_ptr::<usize>() as *mut usize };
-    let cpu_id = unsafe { &mut *cpu_id_ptr };
-    serial_prtinln!("syscall: {} cpu: {}", syscall_number, cpu_id);
     let arg1 = regs.rdi;
     let arg2 = regs.rsi;
     let arg3 = regs.rdx;
     let arg4 = regs.r10;
-    let _arg5 = regs.r8;
-    let _arg6 = regs.r9;
+    let arg5 = regs.r8;
+    let arg6 = regs.r9;
 
     let res = match syscall_number {
         SYS_READ => {
@@ -47,6 +44,18 @@ pub extern "sysv64" fn syscall_handler(
             let flags = arg2 as i32;
             let mode = arg3 as i32;
             service::open(&path, flags, mode as u32)
+        }
+        SYS_STAT => service::stat(arg1 as usize, arg2 as usize),
+        SYS_POLL => {
+            // mock implementation of poll
+            1
+        }
+        SYS_MMAP => memory::mmap(arg1, arg2 as usize, arg3 as usize, arg4 as usize, arg5, arg6),
+        SYS_MUNMAP => memory::munmap(arg1, arg2 as usize),
+        SYS_BRK => memory::brk(arg1 as usize),
+        SYS_IOCTL => {
+            // this is a mock implementation for ioctl
+            0
         }
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
         SYS_EXECVE => service::execev(arg1 as usize, arg2 as usize, arg3 as usize),
@@ -87,6 +96,10 @@ pub extern "sysv64" fn syscall_handler(
 
             service::getdent64(fd, buf, buf_len as usize)
         }
+        SYS_SETTID_ADDR => {
+            // this is a demo implementation of settid_addr
+            arg1 as i64
+        }
         SYS_EXIT_GROUP => service::exit(),
         SYS_OPENAT => {
             let upath = UserPtr(arg2 as *const u8);
@@ -126,11 +139,8 @@ pub extern "sysv64" fn syscall_handler(
             0
         }
     };
-    serial_prtinln!("res: {}", res);
 
     regs.rax = res as u64;
-
-    // unsafe { PICS.lock().notify_end_of_interrupt(0x80) };
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]

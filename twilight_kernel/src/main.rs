@@ -176,6 +176,14 @@ macro_rules! log {
 }
 
 #[macro_export]
+macro_rules! logger {
+    ($($arg:tt)*) => ({
+        let time = $crate::driver::timer::pit::uptime();
+        $crate::serial_prtinln!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
+    });
+}
+
+#[macro_export]
 macro_rules! extern_sym {
     ($sym:ident) => {{
         unsafe extern "C" {

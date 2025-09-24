@@ -1,3 +1,4 @@
+use crate::driver::timer::cmos::CMOS;
 use crate::println;
 use crate::sys::fs::init;
 use crate::sys::fs::twilight_fs::Inode;
@@ -36,7 +37,7 @@ pub fn main() {
                 let root_inode_num = fs.allocate_inode().unwrap();
                 let root_zone = fs.allocate_zone().unwrap();
 
-                let now = 0; // set timestamp if available
+                let time = CMOS::new().unix_time();
 
                 let mut root_inode = Inode {
                     mode: 0o040755, // directory
@@ -44,7 +45,9 @@ pub fn main() {
                     uid: 0,
                     gid: 0,
                     size: 0,
-                    time: now,
+                    access_time: time as u32,
+                    created_time: time as u32,
+                    modified_time: time as u32,
                     zones: [0; 9],
                     indirect_zones: 0,
                     double_indirect_zones: 0,

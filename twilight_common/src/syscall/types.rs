@@ -41,7 +41,7 @@ pub struct Iovec {
 }
 
 #[repr(C, packed)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Timespec {
     pub tv_sec: i64,  // time_t: seconds
     pub tv_nsec: i64, // long: nanoseconds
@@ -97,3 +97,24 @@ pub struct Dirent64Hdr {
 }
 
 pub const EFAULT: u32 = 14;
+
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Stat {
+    pub st_dev_id:     u64,
+    pub st_ino:     u64,
+    pub st_nlink:   u64,
+    pub st_mode:    u32,
+    pub st_uid:     u32,
+    pub st_gid:     u32,
+    pub __pad0:     u32,
+    pub st_rdev:    u64,
+    pub st_size:    i64,
+    pub st_blksize: i64,
+    pub st_blocks:  i64,
+    pub st_atim:    Timespec,
+    pub st_mtim:    Timespec,
+    pub st_ctim:    Timespec,
+    pub __unused:   [i64; 3],
+}

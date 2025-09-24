@@ -1,10 +1,14 @@
+pub mod mem;
+
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
-use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, set_fsbase, set_inactive_gsbase, wrmsr};
+use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::kernel_utils::exec::jump_to_user;
-use crate::{println, serial_prtinln};
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
 use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset};
+use crate::sys::proc::mem::ProcMM;
+use crate::println;
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -12,17 +16,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
-use spin::Once;
 use spin::mutex::Mutex;
-use x86_64::VirtAddr;
+use spin::Once;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame};
+use x86_64::VirtAddr;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
-pub const USER_STACK_SIZE: usize = 0x32000;
+pub const USER_STACK_SIZE: usize = 0x64000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
 
@@ -155,10 +159,11 @@ pub struct Process {
     pub gs_base: VirtAddr,
     pub fs_base: VirtAddr,
     pub handler: Vec<&'static mut Handler>,
+    pub proc_mm: Box<ProcMM>,
 }
 
 impl Process {
-    pub fn new(content_buf: Vec<u8>, pwd: &str, args: &[&str]) -> Self {
+    pub fn new(content_buf: Vec<u8>, pwd: &str, args: &[&str]) -> Result<Self, ()> {
         let (_, flags) = Cr3::read();
 
         let page_table_frame = frame_allocator().allocate_frame().unwrap();
@@ -169,8 +174,10 @@ impl Process {
 
         let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
 
-        for (page, kernel_page) in pages {
-            *page = kernel_page.clone();
+        for (idx, (page, kernel_page)) in pages.enumerate() {
+            if idx > 135 {
+                *page = kernel_page.clone();
+            }
         }
 
         let mut addr_size_vec: Vec<(u64, usize)> = Vec::new();
@@ -188,6 +195,7 @@ impl Process {
         let mut phdr_va: u64 = 0;
         let mut phent: u64 = 0;
         let mut phnum: u64 = 0;
+        let mut max_end: u64 = 0;
 
         if content_buf.get(0..4) == Some(&ELF_MAGIC) {
             if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
@@ -244,6 +252,11 @@ impl Process {
                         let addr = segment.address();
                         let size = segment.size() as usize;
 
+                        let seg_end = addr + size as u64;
+                        if seg_end > max_end {
+                            max_end = seg_end;
+                        }
+
                         let flags = segment.flags();
                         match flags {
                             SegmentFlags::Elf { p_flags } => {
@@ -269,14 +282,17 @@ impl Process {
                 }
 
                 let user_stack_base = user_stack_top.as_u64() - USER_STACK_SIZE as u64;
-
                 if let Ok(_) =
                     alloc_pages(&mut mapper, user_stack_base, USER_STACK_SIZE, true, false)
                 {
                     addr_size_vec.push((user_stack_base, USER_STACK_SIZE));
                 }
+            } else {
+                println!("ksh: invalid ELF file");
+                return Err(());
             }
         }
+
         // Some(virt_to_phys(VirtAddr::new(0x400000)).unwrap().as_u64())
         let user_rsp = build_initial_stack(
             user_stack_top.as_u64(),
@@ -289,7 +305,10 @@ impl Process {
             None,
             None,
         );
+
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+        let proc_mm = Box::new(ProcMM::new(max_end as usize));
+
         let p = Process {
             stack: user_rsp,
             stack_size: USER_STACK_SIZE,
@@ -303,8 +322,9 @@ impl Process {
             fs_base: VirtAddr::zero(),
             gs_base: VirtAddr::zero(),
             handler: Vec::new(),
+            proc_mm,
         };
-        p
+        Ok(p)
     }
 
     pub fn exec(&self) {
@@ -338,14 +358,12 @@ pub fn exit() {
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
     let mut process = table.proc_list.pop_back().unwrap();
 
-    if let Some(k_process) = table.get_process(0) {
+    if let Some(k_process) = table.get_process(1) {
         let page_table_frame = k_process.page_table_frame;
         let (_, flags) = Cr3::read();
         unsafe {
             Cr3::write(page_table_frame, flags);
         }
-        set_fsbase()(k_process.fs_base);
-        set_inactive_gsbase()(k_process.gs_base);
     }
 
     process.cleanup();
@@ -367,6 +385,8 @@ pub fn init() {
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     PID.store(pid, Ordering::SeqCst);
 
+    let proc_mm = Box::new(ProcMM::new(0));
+
     #[allow(static_mut_refs)]
     unsafe {
         PROCESS_TABLE
@@ -386,6 +406,7 @@ pub fn init() {
                 handler: Vec::new(),
                 gs_base: VirtAddr::zero(),
                 fs_base: VirtAddr::zero(),
+                proc_mm,
             })
     }
 }
@@ -425,7 +446,7 @@ fn build_initial_stack(
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len()); }
         *rsp
     }
-
+    //
     // place strings first (argv/envp), record their pointers in-order
     let mut argv_ptrs: Vec<u64> = Vec::new();
     let mut envp_ptrs: Vec<u64> = Vec::new();
@@ -454,8 +475,6 @@ fn build_initial_stack(
     let execfn = execfn_ptr
         .or_else(|| argv_ptrs.get(0).copied())
         .unwrap_or(0);
-    serial_prtinln!("{}", execfn);
-
 
     // ---- write auxv (topmost among these tables) ----
     let aux_vec: Vec<AuxvEntry> = vec![
@@ -501,10 +520,9 @@ fn build_initial_stack(
 
     // ---- argv pointers then NULL ----
     for &p in &argv_ptrs {
-        serial_prtinln!("ptr: {:#X}", p);
-        rsp -= 8; 
+        rsp -= 8;
         unsafe {
-            *(rsp as *mut u64) = p; 
+            *(rsp as *mut u64) = p;
         }
     }
 
