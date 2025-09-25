@@ -6,7 +6,8 @@
 #![feature(decl_macro)]
 #![feature(step_trait)]
 #![feature(allocator_api)]
-
+#![feature(stmt_expr_attributes)]
+#![feature(sync_unsafe_cell)]
 extern crate alloc;
 
 #[macro_use]
@@ -20,6 +21,8 @@ pub mod sys;
 pub mod utils;
 
 use core::arch::asm;
+use core::cell::SyncUnsafeCell;
+use core::sync::atomic::Ordering::SeqCst;
 use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
 use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest, StackSizeRequest};
@@ -43,7 +46,7 @@ static STACK: StackSizeRequest = StackSizeRequest::new().with_size(0x1000 * 32);
 
 #[used]
 #[unsafe(link_section = ".requests")]
-static MEMMAP: MemoryMapRequest = MemoryMapRequest::new();
+static MEMMAP: SyncUnsafeCell<MemoryMapRequest> = SyncUnsafeCell::new(MemoryMapRequest::new());
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -61,7 +64,6 @@ unsafe extern "C" fn kmain() -> ! {
 
     let mut framebuffer: Option<Framebuffer> = None;
     let mut hhdm_response: Option<&HhdmResponse> = None;
-    let mut memory_map_response: Option<&MemoryMapResponse> = None;
     let mut mp_response: Option<&MpResponse> = None;
 
     if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
@@ -74,9 +76,8 @@ unsafe extern "C" fn kmain() -> ! {
         hhdm_response = Some(hr);
     }
 
-    if let Some(mmr) = MEMMAP.get_response() {
-        memory_map_response = Some(mmr);
-    }
+    #[allow(static_mut_refs)]
+    let memory_map_response: &mut MemoryMapResponse = unsafe { &mut *MEMMAP.get() }.get_response_mut().unwrap();
 
     if let Some(mpr) = MP.get_response() {
         mp_response = Some(mpr);
@@ -85,7 +86,7 @@ unsafe extern "C" fn kmain() -> ! {
     init(
         &framebuffer.unwrap(),
         hhdm_response.unwrap(),
-        memory_map_response.unwrap(),
+        memory_map_response,
         mp_response.unwrap(),
     );
 
@@ -136,16 +137,26 @@ use crate::sys::console::writer::init_writer;
 use sys::framebuffer::init_framebuffer;
 use crate::task::executor;
 
-pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static MemoryMapResponse, mp_response: &'static MpResponse) {
+pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static mut MemoryMapResponse, mp_response: &'static MpResponse) {
     driver::uart::init();
-    arch::x86_64::gdt::init();
-    arch::x86_64::idt::init();
-    arch::x86_64::idt::init_pics();
-    init_framebuffer(fb);
 
     let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
 
+    #[allow(static_mut_refs)]
+    unsafe {
+        memory::PHYSICAL_MEMORY_OFFSET.store(phys_mem_offset.as_u64(), SeqCst);
+    }
+
+    memory::paging::init(memory_map_response).expect("paging init failed");
+
+    arch::x86_64::gdt::init();
+    arch::x86_64::idt::init();
+    arch::x86_64::idt::init_pics();
+
     memory::init(phys_mem_offset, memory_map_response.entries());
+
+
+    init_framebuffer(fb);
 
     executor::init_executor();
     fs::init_fs();
@@ -168,6 +179,14 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     sys::proc::init();
 
     x86_64::instructions::interrupts::enable();
+
+
+    // #[allow(static_mut_refs)]
+    // if let Some(fb) = unsafe { FRAMEBUFFER.get_mut() } {
+    //     fb.animate_bouncing_rect(3000);
+    //     fb.clear_buf(0x101010);
+    //     fb.sync_full();
+    // }
 }
 
 #[macro_export]

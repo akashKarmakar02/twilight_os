@@ -14,16 +14,12 @@ use x86_64::{PhysAddr, VirtAddr};
 #[allow(static_mut_refs)]
 static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();
 
-static mut PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
+pub(crate) static mut PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
 static ALLOCATED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static MEMORY_MAP: OnceCell<&'static[&Entry]> = OnceCell::uninit();
 
 
 pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static [&Entry]) {
-    #[allow(static_mut_refs)]
-    unsafe {
-        PHYSICAL_MEMORY_OFFSET.store(physical_memory_offset.as_u64(), SeqCst);
-    }
     let level_4_table = unsafe { active_level_4_table() };
     #[allow(static_mut_refs)]
     unsafe {
