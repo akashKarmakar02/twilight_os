@@ -6,4 +6,3 @@ pub mod uart;
 pub mod nic;
 pub mod usb;
 pub mod tty;
-mod framebuffer;
