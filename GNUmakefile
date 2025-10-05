@@ -207,10 +207,14 @@ userspace: libc
 	cd userspace && \
 	cargo build --release
 
-$(IMAGE_NAME).iso: limine/limine kernel
+cpio:
+	cd rootfs && find . | cpio -o -H newc > ../rootfs.cpio
+
+$(IMAGE_NAME).iso: limine/limine kernel cpio
 	rm -rf iso_root
 	mkdir -p iso_root/boot
 	cp -v twilight_kernel/kernel iso_root/boot/
+	cp -v rootfs.cpio iso_root/boot/
 	mkdir -p iso_root/boot/limine
 	cp -v limine.conf iso_root/boot/limine/
 	mkdir -p iso_root/EFI/BOOT

@@ -5,6 +5,7 @@
 /rootfs/bin
 twilight_kernel/kernel
 twilight-os.iso
+rootfs.cpio
 hdd.img
 twilight-os.hdd
 qemu.log
