@@ -255,7 +255,7 @@ impl TwilightFrameBuffer {
         let mut next_tick = t0 + frame_ms;
 
         // helper: logo drawing (block "T")
-        let mut draw_logo = |fb: &mut Self, x: i64, y: i64, w: i64, h: i64, color: u32| {
+        let draw_logo = |fb: &mut Self, x: i64, y: i64, w: i64, h: i64, color: u32| {
             // Outer “badge” with subtle frame
             let pad = (w as f32 * 0.08) as i64;
             fb.fill_rect_buf(x - pad, y - pad, w + 2*pad, h + 2*pad, frame);
@@ -278,7 +278,7 @@ impl TwilightFrameBuffer {
         };
 
         // helper: progress bar (track + fill + thin frame)
-        let mut draw_progress = |fb: &mut Self, x: i64, y: i64, w: i64, h: i64, pct01: f32| {
+        let draw_progress = |fb: &mut Self, x: i64, y: i64, w: i64, h: i64, pct01: f32| {
             // Frame
             fb.fill_rect_buf(x-2, y-2, w+4, h+4, frame);
             // Track
@@ -294,7 +294,7 @@ impl TwilightFrameBuffer {
         };
 
         // helper: 3 pulsing dots
-        let mut draw_dots = |fb: &mut Self, t_ms: u64| {
+        let draw_dots = |fb: &mut Self, t_ms: u64| {
             for i in 0..3 {
                 let phase = ((t_ms / 200) % 3) as i64;
                 let on = i as i64 == phase;

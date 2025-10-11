@@ -64,27 +64,6 @@ impl FileSystem for DevFs {
         Err(())
     }
 
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, ()> {
-        for dev in &mut self.file_structure {
-            if dev.metadata.name == path.to_string() {
-                return dev.node.read().read(&mut dev.device);
-            }
-        }
-
-        Err(())
-    }
-
-    fn write(&mut self, path: &str, _data: &[u8]) -> Result<(), ()> {
-        for dev in &mut self.file_structure {
-            if dev.metadata.name == path.to_string() {
-                dev.node.write().write(&mut dev.device, _data)?;
-                return Ok(());
-            }
-        }
-
-        Err(())
-    }
-
     fn mkdir(&mut self, _parent_dir: &str, _path: &str) -> Result<(), ()> { Err(()) }
     fn rmdir(&mut self, _path: &str) -> Result<(), ()> { Err(()) }
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {

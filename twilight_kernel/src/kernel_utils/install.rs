@@ -48,9 +48,10 @@ pub fn main() {
                     access_time: time as u32,
                     created_time: time as u32,
                     modified_time: time as u32,
-                    zones: [0; 9],
+                    zones: [0; 7],
                     indirect_zones: 0,
                     double_indirect_zones: 0,
+                    triple_indirect_zones: 0,
                 };
                 root_inode.zones[0] = root_zone;
 

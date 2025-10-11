@@ -113,8 +113,6 @@ pub trait VfsNodeOps: Send + Sync + 'static {
 
 pub trait FileSystem: Send + Sync + 'static {
     fn open(&mut self, path: &str) -> Result<VfsNode, ()>;
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, ()>;
-    fn write(&mut self, path: &str, data: &[u8]) -> Result<(), ()>;
     fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()>;
     fn rmdir(&mut self, path: &str) -> Result<(), ()>;
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()>;
@@ -159,18 +157,6 @@ impl Vfs {
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
         guard.open(rel)
-    }
-
-    pub fn read(&self, path: &str) -> Result<Vec<u8>, ()> {
-        let (rel, fs) = self.route(path).ok_or(())?;
-        let mut guard = fs.lock();
-        guard.read(rel)
-    }
-
-    pub fn write(&self, path: &str, data: &[u8]) -> Result<(), ()> {
-        let (rel, fs) = self.route(path).ok_or(())?;
-        let mut guard = fs.lock();
-        guard.write(rel, data)
     }
 
     pub fn mkdir(&self, parent_path: &str, path: &str) -> Result<(), ()> {

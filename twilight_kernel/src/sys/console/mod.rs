@@ -190,7 +190,12 @@ fn exec(cmd: &str, args: &[&str]) {
             #[allow(static_mut_refs)]
             let fs = unsafe { VFS.get_mut() };
 
-            if let Ok(buf) = fs.read(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str()) {
+            if let Ok(mut node) = fs.open(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str()) {
+                let Ok(buf) = node.read() else {
+                    println!("{}: failed to read from file", cmd);
+                    return;
+                };
+
                 #[allow(static_mut_refs)]
                 if let Ok(process) = Process::new(buf.clone(), unsafe { DIR.as_str() }, args) {
                     unsafe {

@@ -47,9 +47,10 @@ pub struct Inode {
     pub access_time: u32,
     pub modified_time: u32,
     pub created_time: u32,
-    pub zones: [u32; 9],
+    pub zones: [u32; 7],
     pub indirect_zones: u32,
     pub double_indirect_zones: u32,
+    pub triple_indirect_zones: u32,
 }
 
 struct MinixNode {
@@ -222,11 +223,11 @@ impl VfsNodeOps for MinixNode {
             if self.inode.double_indirect_zones == 0 {
                 self.inode.double_indirect_zones = self.ctx.lock().alloc_zone().unwrap();
                 let zero_block = [0u8; 512];
-                device.lock().write(self.inode.double_indirect_zones, &zero_block).unwrap();
+                device.lock().write(self.inode.double_indirect_zones, &zero_block)?;
             }
 
             let mut double_indirect_block = [0u8; 512];
-            device.lock().read(self.inode.double_indirect_zones, &mut double_indirect_block).unwrap();
+            device.lock().read(self.inode.double_indirect_zones, &mut double_indirect_block)?;
 
             let zone_entries = 512 / 4;
             for i in 0..(zone_entries-1) {
@@ -240,7 +241,7 @@ impl VfsNodeOps for MinixNode {
                         let new_zone = self.ctx.lock().alloc_zone().unwrap();
                         double_indirect_block[i*4..i*4+4].copy_from_slice(&new_zone.to_le_bytes());
                         let zero_block = [0u8; 512];
-                        device.lock().write(new_zone, &zero_block).unwrap();
+                        device.lock().write(new_zone, &zero_block)?;
                         new_zone
                     } else {
                         entry
@@ -248,7 +249,7 @@ impl VfsNodeOps for MinixNode {
                 };
 
                 let mut indirect_block = [0u8; 512];
-                device.lock().read(indirect_zone, &mut indirect_block).unwrap();
+                device.lock().read(indirect_zone, &mut indirect_block)?;
 
                 let zone_entries = 512 / 4;
                 for j in 0..(zone_entries-1) {
@@ -262,7 +263,7 @@ impl VfsNodeOps for MinixNode {
                             let new_zone = self.ctx.lock().alloc_zone().unwrap();
                             indirect_block[j*4..j*4+4].copy_from_slice(&new_zone.to_le_bytes());
                             let zero_block = [0u8; 512];
-                            device.lock().write(new_zone, &zero_block).unwrap();
+                            device.lock().write(new_zone, &zero_block)?;
                             new_zone
                         } else {
                             entry
@@ -273,18 +274,18 @@ impl VfsNodeOps for MinixNode {
                     let copy_size = core::cmp::min(block_size, remaining);
 
                     buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
-                    device.lock().write(zone, &buffer).unwrap();
+                    device.lock().write(zone, &buffer)?;
 
                     bytes_written += copy_size;
                     remaining -= copy_size;
                 }
 
                 // store updated indirect block
-                device.lock().write(indirect_zone, &indirect_block).unwrap();
+                device.lock().write(indirect_zone, &indirect_block)?;
             }
 
             // store updated double indirect block
-            device.lock().write(self.inode.double_indirect_zones, &double_indirect_block).unwrap();
+            device.lock().write(self.inode.double_indirect_zones, &double_indirect_block)?;
         }
 
         self.inode.size = bytes_written as u32;
@@ -798,9 +799,10 @@ impl MinixFs {
             modified_time: time as u32,
             gid: 0,
             nlinks: 0,
-            zones: [0; 9],
+            zones: [0; 7],
             indirect_zones: 0,
             double_indirect_zones: 0,
+            triple_indirect_zones: 0,
         };
         inode.zones[0] = new_zone;
 
@@ -917,9 +919,10 @@ impl MinixFs {
             modified_time: time as u32,
             gid: 0,
             nlinks: 2, // "." and ".."
-            zones: [0; 9],
+            zones: [0; 7],
             indirect_zones: 0,
             double_indirect_zones: 0,
+            triple_indirect_zones: 0,
         };
         inode.zones[0] = new_zone;
         self.write_inode(new_inode_num, &inode).unwrap();
@@ -1366,24 +1369,6 @@ impl FileSystem for MinixFs {
                 }))
             );
             Ok(node)
-        } else {
-            Err(())
-        }
-    }
-
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, ()> {
-        if let Ok(inode) = self.resolve_path(path) {
-            serial_prtinln!("{:?}", inode);
-            Ok(self.read_file(inode).unwrap())
-        } else {
-            Err(())
-        }
-    }
-
-    fn write(&mut self, path: &str, data: &[u8]) -> Result<(), ()> {
-        if let Ok(inode) = self.resolve_path(path) {
-            self.write_file(inode, data).unwrap();
-            Ok(())
         } else {
             Err(())
         }

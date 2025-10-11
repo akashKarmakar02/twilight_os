@@ -251,10 +251,10 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
     // O_TRUNC (only for regular files)
     if (flags & O_TRUNC) != 0 && node.metadata.file_type == FileType::File {
         // You don't have truncate: emulate by writing empty content
-        #[allow(static_mut_refs)]
-        if unsafe { VFS.get_mut().write(&full_path, &[]) }.is_err() {
-            return -(EOPNOTSUPP as i64);
-        }
+        // #[allow(static_mut_refs)]
+        // if unsafe { VFS.get_mut().write(&full_path, &[]) }.is_err() {
+        //     return -(EOPNOTSUPP as i64);
+        // }
     }
 
     // Install FD
@@ -274,7 +274,11 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         return -1;
     };
     #[allow(static_mut_refs)]
-    let Ok(_elf_buf) = (unsafe { VFS.read().read(path.as_str()) }) else {
+    let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str()) }) else {
+        return -2;
+    };
+
+    let Ok(elf_buf) = elf_node.read() else {
         return -2;
     };
 
@@ -294,7 +298,7 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         .pwd
         .clone();
 
-    if let Ok(p) = Process::new(_elf_buf, pwd.as_str(), argv.as_slice()) {
+    if let Ok(p) = Process::new(elf_buf, pwd.as_str(), argv.as_slice()) {
         unsafe { asm!("swapgs") };
         process_table.run(p);
     } else {
