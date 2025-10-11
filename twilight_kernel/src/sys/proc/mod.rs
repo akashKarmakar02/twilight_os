@@ -91,6 +91,7 @@ struct Elf64Phdr {
 }
 
 const PT_LOAD: u32 = 1;
+const PT_INTERP: u32 = 3;
 const PT_PHDR: u32 = 6;
 
 // ================== Process ==================
@@ -196,7 +197,7 @@ impl Process {
         let mut phent: u64 = 0;
         let mut phnum: u64 = 0;
         let mut max_end: u64 = 0;
-
+        let mut interp_path: Option<String> = None;
         if content_buf.get(0..4) == Some(&ELF_MAGIC) {
             if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
                 let eh = unsafe { &*(content_buf.as_ptr() as *const Elf64Ehdr) };
@@ -217,6 +218,16 @@ impl Process {
                     };
                     if ph.p_type == PT_PHDR {
                         phdr_va = load_bias + ph.p_vaddr;
+                    } else if ph.p_type == PT_INTERP {
+                        println!("dynamic binary is not supported yet...");
+                        let start = ph.p_offset as usize;
+                        let len = ph.p_filesz as usize;
+                        if start + len <= content_buf.len() {
+                            let s = core::str::from_utf8(&content_buf[start..start + len]).unwrap_or("");
+                            interp_path = Some(s.trim_end_matches('\0').to_string());
+                            println!("interp_path: {:?}", interp_path);
+                            return Err(());
+                        }
                         break;
                     }
                 }
