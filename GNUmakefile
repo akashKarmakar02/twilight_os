@@ -203,7 +203,7 @@ kernel: userspace
 	$(MAKE) -C twilight_kernel
 
 .PHONY: userspace
-userspace: libc
+userspace:
 	cd userspace && \
 	cargo build --release
 
@@ -280,12 +280,6 @@ endif
 ifeq ($(KARCH),loongarch64)
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine/BOOTLOONGARCH64.EFI ::/EFI/BOOT
 endif
-
-.PHONY: libc
-libc:
-	cd userspace/libc && cargo build --release
-	cd userspace && as --64 -o libc/crt/crt0.o libc/crt/crt0.s
-	cp $(PROJ_DIR)/target/x86_64-unknown-none/release/libtwilight_c.a $(PROJ_DIR)/userspace/twilight_c.a
 
 .PHONY: clean
 clean:
