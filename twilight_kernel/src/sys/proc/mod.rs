@@ -30,34 +30,6 @@ pub const USER_STACK_SIZE: usize = 0x64000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
 
-// ================== TrapFrame ==================
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct TrapFrame {
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub r11: u64,
-    pub r10: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub rsi: u64,
-    pub rdi: u64,
-    pub rbp: u64,
-    pub rdx: u64,
-    pub rcx: u64,
-    pub rbx: u64,
-    pub rax: u64,
-    pub rip: usize,
-    pub cs: u64,
-    pub rflags: u64,
-    pub rsp: u64,
-    pub ss: u64,
-    pub error_code: u64,
-}
-
 #[repr(C, packed)]
 #[derive(Debug)]
 struct Elf64Ehdr {
@@ -205,7 +177,7 @@ impl Process {
                 let e_phentsize = eh.e_phentsize as u64; // 56
                 let e_phnum = eh.e_phnum as u64;
 
-                let load_bias: u64 = if eh.e_type == 3 /* ET_DYN */ { 0x400000 } else { 0 };
+                let load_bias: u64 = if eh.e_type == 3 /* ET_DYN */ { 0x40000000 } else { 0 };
                 phdr_va = 0;
 
                 // Try PT_PHDR first
@@ -260,10 +232,10 @@ impl Process {
 
                 for segment in obj.segments() {
                     if let Ok(data) = segment.data() {
-                        let addr = segment.address();
+                        let seg_vaddr = segment.address();
                         let size = segment.size() as usize;
-
-                        let seg_end = addr + size as u64;
+                        let base_addr = load_bias + seg_vaddr;
+                        let seg_end = base_addr + size as u64;
                         if seg_end > max_end {
                             max_end = seg_end;
                         }
@@ -273,8 +245,8 @@ impl Process {
                             SegmentFlags::Elf { p_flags } => {
                                 let _is_writable = (p_flags & object::elf::PF_W) != 0;
                                 let _is_executable = (p_flags & object::elf::PF_X) != 0;
-                                if let Ok(_) = alloc_pages(&mut mapper, addr, size, true, true) {
-                                    addr_size_vec.push((addr, size));
+                                if let Ok(_) = alloc_pages(&mut mapper, base_addr, size, true, true) {
+                                    addr_size_vec.push((base_addr, size));
                                 }
                             }
                             _ => {}
@@ -282,7 +254,7 @@ impl Process {
 
                         // copy data after allocating
                         let src = data.as_ptr();
-                        let dst = addr as *mut u8;
+                        let dst = base_addr as *mut u8;
                         unsafe {
                             core::ptr::copy_nonoverlapping(src, dst, data.len());
                             if size > data.len() {
@@ -504,7 +476,7 @@ fn build_initial_stack(
         AuxvEntry { key: 0, value: 0 }, // AT_NULL
     ];
 
-    rsp -= (core::mem::size_of::<AuxvEntry>() * aux_vec.len()) as u64;
+    rsp -= (size_of::<AuxvEntry>() * aux_vec.len()) as u64;
     unsafe {
         core::ptr::copy_nonoverlapping(aux_vec.as_ptr(), rsp as *mut AuxvEntry, aux_vec.len());
     }
