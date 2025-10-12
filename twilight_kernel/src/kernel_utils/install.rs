@@ -1,17 +1,15 @@
 use crate::driver::timer::cmos::CMOS;
-use crate::println;
 use crate::sys::fs::init;
+use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::sys::fs::twilight_fs::Inode;
+use crate::println;
+use alloc::format;
 use alloc::vec::Vec;
+use lazy_static::lazy_static;
+use spin::mutex::Mutex;
 
-macro_rules! copy_file {
-    ($path:expr, $verbose:expr) => {{
-        copy_file(
-            $path,
-            include_bytes!(concat!("../../../rootfs", $path)),
-            $verbose,
-        );
-    }};
+lazy_static! {
+    pub static ref INITRAMFS: Mutex<CpioIterator> = Mutex::new(CpioIterator::default());
 }
 
 pub fn main() {
@@ -78,19 +76,18 @@ pub fn main() {
         }
     }
 
+    let mut initramfs = { INITRAMFS.lock() };
     if need_copy {
-        copy_file!("/init/logo", true);
-        copy_file!("/bin/exit42", true);
-        copy_file!("/bin/greet", true);
-        copy_file!("/bin/sleep", true);
-        copy_file!("/bin/date", true);
-        copy_file!("/bin/bc", true);
-        copy_file!("/bin/hello", true);
-        copy_file!("/bin/echo", true);
-        copy_file!("/bin/cat", true);
-        copy_file!("/bin/ls", true);
-        copy_file!("/bin/uname", true);
-        copy_file!("/bin/tsh", true);
+        while let Some(cpio_res) = initramfs.next() {
+            match cpio_res {
+                Ok(entry) => {
+                    if entry.header.is_regular_file() {
+                        copy_file(format!("/{}", entry.filename().unwrap()).as_str(), entry.data, true);
+                    }
+                }
+                Err(_e) => {}
+            }
+        }
     }
 }
 

@@ -1,3 +1,5 @@
+pub mod initramfs;
+
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
