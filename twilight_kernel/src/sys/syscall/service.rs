@@ -333,9 +333,9 @@ pub fn uname(ptr: usize) -> i64 {
             let uname_s = &mut *uname_ptr;
 
             fill(&mut uname_s.sysname, "TwilightOS");
-            fill(&mut uname_s.nodename, "twilight");
+            fill(&mut uname_s.nodename, "Twilight");
             fill(&mut uname_s.release, "0.1.0-testing-build.x86_64");
-            fill(&mut uname_s.version, "#1 NON-SMP 09-09-2025");
+            fill(&mut uname_s.version, "#1 NON-SMP 12-10-2025");
             fill(&mut uname_s.machine, "x86_64");
             fill(&mut uname_s.domainname, "-");
         }
@@ -345,7 +345,6 @@ pub fn uname(ptr: usize) -> i64 {
 }
 
 pub fn arch_prctl(code: u64, addr: u64) -> i64 {
-    serial_prtinln!("LOG: code: {}, addr: {}", code, addr);
     match code {
         ARCH_SET_FS => {
             wrmsr(IA32_FS_BASE, addr);
