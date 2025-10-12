@@ -8,7 +8,7 @@ use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode, VfsNodeOps};
-use crate::{driver, println, serial_prtinln};
+use crate::{driver, println};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -65,7 +65,6 @@ unsafe impl Sync for MinixNode {}
 #[allow(dead_code)]
 impl VfsNodeOps for MinixNode {
     fn read(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()> {
-        serial_prtinln!("{:?}", self.inode);
         let mut content = Vec::new();
         let mut remaining = self.inode.size as usize;
         let block_size = 512;

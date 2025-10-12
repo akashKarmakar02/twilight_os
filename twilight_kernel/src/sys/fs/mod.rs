@@ -2,6 +2,7 @@ pub mod twilight_fs;
 pub mod ram_fs;
 pub mod vfs;
 mod devfs;
+mod gdt;
 
 use crate::println;
 use crate::sys::fs::twilight_fs::MinixFs;
@@ -38,7 +39,10 @@ pub fn init(show_log: bool) {
     for bus in 0..2 {
         for dsk in 0..2 {
             if let Ok(mfs) = MinixFs::check_ata(bus, dsk) {
-                MFS.try_init_once(|| Mutex::new(mfs)).unwrap();
+                if let Err(_) = MFS.try_init_once(|| Mutex::new(mfs)) {
+                    println!("MFS already initialized");
+                    return;
+                }
                 #[allow(static_mut_refs)]
                 unsafe {
                     VFS.get_mut().mount("/", Arc::new(Mutex::new(MinixFs::check_ata(bus, dsk).unwrap())));

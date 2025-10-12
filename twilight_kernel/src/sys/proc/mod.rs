@@ -197,7 +197,7 @@ impl Process {
         let mut phent: u64 = 0;
         let mut phnum: u64 = 0;
         let mut max_end: u64 = 0;
-        let mut interp_path: Option<String> = None;
+        let interp_path: Option<String>;
         if content_buf.get(0..4) == Some(&ELF_MAGIC) {
             if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
                 let eh = unsafe { &*(content_buf.as_ptr() as *const Elf64Ehdr) };

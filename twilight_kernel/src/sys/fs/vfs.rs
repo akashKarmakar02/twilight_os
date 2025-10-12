@@ -6,7 +6,6 @@ use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
 use crate::driver::disk::BlockDeviceIO;
 
-#[allow(dead_code)]
 pub static mut VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
 
 #[derive(Debug, Clone, Copy)]

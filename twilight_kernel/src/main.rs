@@ -25,7 +25,7 @@ use core::cell::SyncUnsafeCell;
 use core::sync::atomic::Ordering::SeqCst;
 use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
-use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, MpRequest, StackSizeRequest};
+use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, StackSizeRequest};
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
 
 #[used]
@@ -52,6 +52,10 @@ static MEMMAP: SyncUnsafeCell<MemoryMapRequest> = SyncUnsafeCell::new(MemoryMapR
 #[unsafe(link_section = ".requests")]
 static MP: MpRequest = MpRequest::new();
 
+#[used]
+#[unsafe(link_section = ".requests")]
+static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     assert!(BASE_REVISION.is_supported());
@@ -65,6 +69,7 @@ unsafe extern "C" fn kmain() -> ! {
     let mut framebuffer: Option<Framebuffer> = None;
     let mut hhdm_response: Option<&HhdmResponse> = None;
     let mut mp_response: Option<&MpResponse> = None;
+    let mut cpio_response: Option<&&limine::file::File> = None;
 
     if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
         if let Some(fb) = framebuffer_response.framebuffers().next() {
@@ -83,12 +88,25 @@ unsafe extern "C" fn kmain() -> ! {
         mp_response = Some(mpr);
     }
 
+    if let Some(module_response) = MODULE_REQUEST.get_response() {
+        for module in module_response.modules() {
+            if module.path().to_str().unwrap() == "/boot/rootfs.cpio" {
+                // let cpio_buf = unsafe { core::slice::from_raw_parts(module.addr() as *const u8, module.size() as usize) };
+                // let cpio = CpioIterator::new(cpio_buf);
+                cpio_response = Some(module);
+                break;
+            }
+        }
+    }
+
     init(
         &framebuffer.unwrap(),
         hhdm_response.unwrap(),
         memory_map_response,
         mp_response.unwrap(),
+        cpio_response.unwrap(),
     );
+
 
     // println!("\x1b[96m                                                     ,,    ,,    ,,            ,,                                        ");
     // println!("                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd ");
@@ -135,9 +153,11 @@ use x86_64::VirtAddr;
 use sys::{fs, memory};
 use crate::sys::console::writer::init_writer;
 use sys::framebuffer::init_framebuffer;
+use crate::kernel_utils::install::INITRAMFS;
+use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::task::executor;
 
-pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static mut MemoryMapResponse, mp_response: &'static MpResponse) {
+pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static mut MemoryMapResponse, mp_response: &'static MpResponse, cpio_file: && limine::file::File) {
     driver::uart::init();
 
     let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
@@ -180,6 +200,12 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
 
     x86_64::instructions::interrupts::enable();
 
+    let cpio_buf = unsafe { core::slice::from_raw_parts(cpio_file.addr() as *const u8, cpio_file.size() as usize) };
+    let cpio = CpioIterator::new(cpio_buf);
+
+    {
+        *INITRAMFS.lock() = cpio;
+    }
 
     // #[allow(static_mut_refs)]
     // if let Some(fb) = unsafe { FRAMEBUFFER.get_mut() } {
