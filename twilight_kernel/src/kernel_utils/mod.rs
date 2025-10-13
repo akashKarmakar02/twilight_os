@@ -12,3 +12,4 @@ pub mod rmdir;
 pub mod shutdown;
 pub mod touch;
 pub mod vi;
+pub mod anirect;

@@ -186,6 +186,7 @@ fn exec(cmd: &str, args: &[&str]) {
         "install" => crate::kernel_utils::install::main(),
         "dhcp" => crate::kernel_utils::dhcp::main(),
         "vi" => crate::kernel_utils::vi::main(args),
+        "anirect" => crate::kernel_utils::anirect::main(),
         _ => {
             #[allow(static_mut_refs)]
             let fs = unsafe { VFS.get_mut() };
