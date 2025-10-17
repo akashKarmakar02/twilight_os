@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::{format, vec};
 use alloc::string::{String, ToString};
@@ -10,7 +11,7 @@ use smoltcp::time::Instant;
 use smoltcp::wire::IpAddress;
 use crate::driver::nic::NET;
 use crate::driver::timer::cmos::CMOS;
-use crate::println;
+use crate::{println};
 use crate::task::executor::sleep;
 
 use time::{Duration, OffsetDateTime, UtcOffset};
@@ -223,18 +224,31 @@ impl fmt::Display for Response {
 }
 
 
-fn get(_req: &Request, res: &mut Response) {
+fn get(req: &Request, res: &mut Response) {
     res.mime = "text/html".to_string();
-    res.code = 200;
+    let path = req.path.as_str();
+    let mut file = if path.is_empty() || path == "/" {
+        "index.html"
+    } else {
+        path
+    };
+
+    file = file.trim_start_matches("/");
     #[allow(static_mut_refs)]
     let vfs = unsafe { VFS.get_mut() };
-    if let Ok(mut inode) = vfs.open("/var/www/index.html") {
+    let file_path = format!("/var/www/{}", file);
+    println!("file_path: {}", file_path);
+    if let Ok(mut inode) = vfs.open(file_path.as_str()) {
+        res.code = 200;
         let Ok(buf) = inode.read() else {
             res.body.extend_from_slice(b"<h1>Hello World From Twilight OS!</h1>\n");
             return;
         };
 
         res.body.extend_from_slice(buf.as_slice());
+    } else {
+        res.code = 404;
+        res.body.extend_from_slice(b"<h1>404 Not Found</h1>\n");
     }
 }
 
