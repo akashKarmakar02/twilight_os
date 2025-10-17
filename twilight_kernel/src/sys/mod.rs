@@ -8,3 +8,6 @@ pub mod syscall;
 mod tty;
 pub mod proc;
 pub(crate) mod acpi;
+pub mod net;
+pub mod rng;
+mod clk;

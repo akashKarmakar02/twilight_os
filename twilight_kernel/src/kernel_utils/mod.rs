@@ -13,3 +13,5 @@ pub mod shutdown;
 pub mod touch;
 pub mod vi;
 pub mod anirect;
+pub mod curl;
+pub mod serve;

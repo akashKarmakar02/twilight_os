@@ -1,20 +1,21 @@
 use crate::driver::timer::cmos::CMOS;
 use crate::println;
+use crate::sys::net::socket::SOCKETS;
 use crate::task::executor::sleep;
 use alloc::string::ToString;
-use alloc::vec;
 use alloc::vec::Vec;
-use smoltcp::iface::SocketSet;
+use core::str::FromStr;
 use smoltcp::socket::dhcpv4;
 use smoltcp::socket::dhcpv4::Event;
 use smoltcp::time::Instant;
+use smoltcp::wire::IpCidr;
 
 pub fn main() {
     let mut dhcp_config = None;
 
     if let Some((ref mut iface, ref mut device)) = *crate::driver::nic::NET.lock() {
         let dhcp_socket = dhcpv4::Socket::new();
-        let mut sockets = SocketSet::new(vec![]);
+        let mut sockets = SOCKETS.lock();
         let dhcp_handle = sockets.add(dhcp_socket);
 
         let mut cmos = CMOS::new();
@@ -36,6 +37,17 @@ pub fn main() {
             match event {
                 None => {}
                 Some(Event::Configured(config)) => {
+                    iface.update_ip_addrs(|addrs| {
+                        addrs.clear();
+                        addrs.push(IpCidr::from_str(config.address.to_string().as_str()).unwrap()).unwrap();
+                    });
+                    if let Some(gw) = config.router {
+                        if gw.to_string() == "0.0.0.0" {
+                            iface.routes_mut().remove_default_ipv4_route();
+                        } else {
+                            iface.routes_mut().add_default_ipv4_route(gw).unwrap();
+                        }
+                    }
                     dhcp_config = Some((config.address, config.router, config.dns_servers));
                     break;
                 }
@@ -50,6 +62,7 @@ pub fn main() {
     }
 
     if let Some((ip, gw, dns)) = dhcp_config {
+
         let dns: Vec<_> = dns.iter().map(|s| s.to_string()).collect();
         println!("NET DNS: {}", dns.join(", "));
         println!("NET IP: {}", ip);
