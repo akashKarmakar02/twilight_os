@@ -20,7 +20,7 @@ It currently supports x86_64 architecture. future plans include support for ARM/
 - Terminal support (kernel built-in)
 - RTC
 - ACPI - power off
-- VFS, MinixFS V2
+- VFS, Twilight FS
 - basic unix commands (kernel built-in)
 - asynchronous I/O
 - memory management

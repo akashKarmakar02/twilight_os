@@ -6,11 +6,12 @@ pub mod metadata;
 
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
+use crate::driver::timer::pit::uptime;
 use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
-use crate::{driver, println, serial_prtinln};
+use crate::{driver, println};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -19,7 +20,6 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use spin::rwlock::RwLock;
 use spin::Mutex;
-use crate::driver::timer::pit::uptime;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
 pub const FS_BLOCK_OFFSET: usize = 0;
@@ -96,8 +96,8 @@ pub fn read_superblock(device: &mut dyn BlockDeviceIO) -> Result<Superblock, &'s
     } // Superblock is usually at block 0
     let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
 
-    if sb.magic != 0x137F && sb.magic != 0x4d5a {
-        return Err("Invalid MINIX magic");
+    if !sb.is_valid() {
+        return Err("Invalid TwiligtFS magic");
     }
     Ok(sb)
 }

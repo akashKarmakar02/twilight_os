@@ -4,16 +4,16 @@ pub mod vfs;
 mod devfs;
 mod gdt;
 
-use crate::{println, serial_prtinln};
-use crate::sys::fs::twilight_fs::TwilightFs;
+use crate::sys::fs::devfs::DevFs;
 use crate::sys::fs::ram_fs::RamFS;
+use crate::sys::fs::twilight_fs::TwilightFs;
+use crate::sys::fs::vfs::VFS;
+use crate::println;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
-use crate::sys::fs::devfs::DevFs;
-use crate::sys::fs::vfs::VFS;
 
 pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
 pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
@@ -53,7 +53,7 @@ pub fn init(show_log: bool) {
                 }
                 if show_log {
                     println!(
-                        "\x1b[93m[{:.6}]\x1b[0m MinixFS Superblock found in ATA {}:{}",
+                        "\x1b[93m[{:.6}]\x1b[0m TwilightFS Superblock found in ATA {}:{}",
                         uptime, bus, dsk
                     );
                 }
@@ -65,7 +65,7 @@ pub fn init(show_log: bool) {
     unsafe {
         VFS.get_mut().mount("/dev", Arc::new(Mutex::new(DevFs::new())));
     }
-    println!("\x1b[93m[{:.6}]\x1b[0m No MinixFS Superblock found", uptime);
+    println!("\x1b[93m[{:.6}]\x1b[0m No TwilightFS Superblock found", uptime);
     println!("\x1b[93mWarning\x1b[0m Trying running 'install' to install Twilight OS");
 }
 
