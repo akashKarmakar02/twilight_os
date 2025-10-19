@@ -5,6 +5,8 @@ use alloc::vec::Vec;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
 use crate::driver::disk::BlockDeviceIO;
+use crate::sys::fs::twilight_fs::inode::Inode;
+use crate::sys::fs::twilight_fs::TfsError;
 
 pub static mut VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
 
@@ -79,9 +81,9 @@ pub trait FsCtx {
     fn read_block(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), ()>;
     fn write_block(&mut self, lba: u32, buf: &[u8]) -> Result<(), ()>;
 
-    fn alloc_zone(&mut self) -> Result<u32, &'static str>;
-    fn free_zone(&mut self, zone: u32) -> Result<(), &'static str>;
-    fn write_inode_minix(&mut self, ino: u32, inode: &crate::sys::fs::twilight_fs::Inode) -> Result<(), &'static str>;
+    fn alloc_zone(&mut self) -> Result<u32, TfsError>;
+    fn free_zone(&mut self, zone: u32) -> Result<(), TfsError>;
+    fn write_inode_twilight(&mut self, ino: u32, inode: Inode) -> Result<(), &'static str>;
 }
 
 #[allow(dead_code)]
@@ -97,17 +99,19 @@ impl VfsNode {
     }
 
     pub fn read(&mut self) -> Result<Vec<u8>, ()> {
-        self.node.read().read(&mut self.device)
+        self.node.read().read(&mut self.device, 0)
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<(), ()> {
-        self.node.write().write(&mut self.device, data)
+        self.node.write().write(&mut self.device, 0, data)
     }
 }
 
 pub trait VfsNodeOps: Send + Sync + 'static {
-    fn read(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()>;
-    fn write(&mut self, device: &mut BlockDev, data: &[u8]) -> Result<(), ()>;
+    fn read(&self, device: &mut BlockDev, lba: usize) -> Result<Vec<u8>, ()>;
+    fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()>;
+    fn poll(&self, device: &mut BlockDev) -> Result<bool, ()>;
+
 }
 
 pub trait FileSystem: Send + Sync + 'static {

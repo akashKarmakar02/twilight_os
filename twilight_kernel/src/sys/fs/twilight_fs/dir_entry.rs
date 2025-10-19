@@ -1,8 +1,8 @@
-#[allow(dead_code)]
+
 #[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
 pub struct DirEntry {
-    pub inode_id: u32,
-    pub name_len: u8,   // Name length
-    pub file_type: u8,  // File or directory
-    pub name: [u8; 28],
+    pub inode: u32,
+    pub name: [u8; 60], // MINIX v2 uses fixed 60-byte names
 }
+

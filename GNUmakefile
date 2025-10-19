@@ -46,7 +46,7 @@ run-x86_64-uefi: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_N
 run-x86_64: $(IMAGE_NAME).iso
 	@if [ ! -f hdd.img ]; then \
 		echo "Creating hdd.img..."; \
-		qemu-img create -f raw hdd.img 16M; \
+		qemu-img create -f raw hdd.img 1G; \
 	fi
 	qemu-system-$(KARCH) \
 		-m 1024 \

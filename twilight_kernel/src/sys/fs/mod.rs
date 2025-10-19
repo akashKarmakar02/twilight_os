@@ -4,8 +4,8 @@ pub mod vfs;
 mod devfs;
 mod gdt;
 
-use crate::println;
-use crate::sys::fs::twilight_fs::MinixFs;
+use crate::{println, serial_prtinln};
+use crate::sys::fs::twilight_fs::TwilightFs;
 use crate::sys::fs::ram_fs::RamFS;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -16,7 +16,7 @@ use crate::sys::fs::devfs::DevFs;
 use crate::sys::fs::vfs::VFS;
 
 pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
-pub static MFS: OnceCell<Mutex<MinixFs>> = OnceCell::uninit();
+pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
 
 pub const KERNEL_PADDING: usize = 4 * 1024 * 1024;
 
@@ -38,14 +38,14 @@ pub fn init(show_log: bool) {
     let uptime = crate::driver::timer::pit::uptime();
     for bus in 0..2 {
         for dsk in 0..2 {
-            if let Ok(mfs) = MinixFs::check_ata(bus, dsk) {
+            if let Ok(mfs) = TwilightFs::check_ata(bus, dsk) {
                 if let Err(_) = MFS.try_init_once(|| Mutex::new(mfs)) {
                     println!("MFS already initialized");
                     return;
                 }
                 #[allow(static_mut_refs)]
                 unsafe {
-                    VFS.get_mut().mount("/", Arc::new(Mutex::new(MinixFs::check_ata(bus, dsk).unwrap())));
+                    VFS.get_mut().mount("/", Arc::new(Mutex::new(TwilightFs::check_ata(bus, dsk).unwrap())));
                 }
                 #[allow(static_mut_refs)]
                 unsafe {
