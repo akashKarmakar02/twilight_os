@@ -177,7 +177,7 @@ impl TwilightFs {
 
         let mut buf = [0u8; FS_BLOCK_SIZE];
         for i in 0..self.superblock.zmap_blocks {
-            if read_tfs_block(self.device.lock().as_mut(), (zmap_start + i) as u32, &mut buf).is_err() {
+            if read_tfs_block(self.device.lock().as_mut(), zmap_start + i, &mut buf).is_err() {
                 return Err(TfsError::IoError);
             }
 
@@ -186,12 +186,12 @@ impl TwilightFs {
                     for bit in 0..8 {
                         if buf[byte_idx] & (1 << bit) == 0 {
                             buf[byte_idx] |= 1 << bit;
-                            if write_tfs_block(self.device.lock().as_mut(), (zmap_start + i) as u32, &buf).is_err() {
+                            if write_tfs_block(self.device.lock().as_mut(), zmap_start + i, &buf).is_err() {
                                 return Err(TfsError::IoError);
                             }
 
-                            let zone = i as u32 * bits_per_block as u32 + (byte_idx * 8 + bit) as u32;
-                            return Ok(zone + self.superblock.first_data_zone as u32);
+                            let zone = i * bits_per_block as u32 + (byte_idx * 8 + bit) as u32;
+                            return Ok(zone + self.superblock.first_data_zone);
                         }
                     }
                 }
@@ -209,7 +209,7 @@ impl TwilightFs {
         for block_idx in 0..self.superblock.imap_blocks {
             let imap_block_lba = 1 + block_idx;
             let mut buf = [0u8; FS_BLOCK_SIZE];
-            if read_tfs_block(self.device.lock().as_mut(), imap_block_lba as u32, &mut buf).is_err() {
+            if read_tfs_block(self.device.lock().as_mut(), imap_block_lba, &mut buf).is_err() {
                 return Err(TfsError::IoError);
             }
 
@@ -225,7 +225,7 @@ impl TwilightFs {
                             }
 
                             buf[byte_idx] |= 1 << bit;
-                            if write_tfs_block(self.device.lock().as_mut(), imap_block_lba as u32, &buf).is_err() {
+                            if write_tfs_block(self.device.lock().as_mut(), imap_block_lba, &buf).is_err() {
                                 return Err(TfsError::IoError);
                             }
                             return Ok(inode_idx as u32);
@@ -239,7 +239,7 @@ impl TwilightFs {
     }
 
     pub fn dealloc_zone(&mut self, zone: u32) -> Result<(), TfsError> {
-        let first_zone = self.superblock.first_data_zone as u32;
+        let first_zone = self.superblock.first_data_zone;
 
         if zone < first_zone {
             return Err(TfsError::InvalidZone);
@@ -256,7 +256,7 @@ impl TwilightFs {
             return Err(TfsError::InvalidZone);
         }
 
-        let zmap_start = 2 + self.superblock.imap_blocks as u32;
+        let zmap_start = 2 + self.superblock.imap_blocks;
         let zmap_block = zmap_start + block_index as u32;
 
         let mut buf = [0u8; FS_BLOCK_SIZE];
@@ -316,10 +316,10 @@ impl TwilightFs {
         let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 2;
         let block_offset = inode_index / inodes_per_block;
         let byte_offset = (inode_index % inodes_per_block) * inode_size;
-        let block_num = inode_table_start + block_offset as u16;
+        let block_num = inode_table_start + block_offset as u32;
 
         let mut buffer = [0u8; FS_BLOCK_SIZE];
-        if read_tfs_block(self.device.lock().as_mut(), block_num as u32, &mut buffer).is_err() {
+        if read_tfs_block(self.device.lock().as_mut(), block_num, &mut buffer).is_err() {
             return Err("Failed to read inode block");
         }
 
@@ -331,7 +331,7 @@ impl TwilightFs {
         };
         buffer[byte_offset..byte_offset + inode_size].copy_from_slice(inode_bytes);
 
-        if write_tfs_block(self.device.lock().as_mut(), block_num as u32, &buffer).is_err() {
+        if write_tfs_block(self.device.lock().as_mut(), block_num, &buffer).is_err() {
             return Err("Failed to write inode block");
         }
 
@@ -353,10 +353,10 @@ impl TwilightFs {
         let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 2;
         let block_offset = inode_index / inodes_per_block;
         let byte_offset = (inode_index % inodes_per_block) * inode_size;
-        let block_num = inode_table_start + block_offset as u16;
+        let block_num = inode_table_start + block_offset as u32;
 
         let mut buffer = [0u8; FS_BLOCK_SIZE];
-        if read_tfs_block(self.device.lock().as_mut(), block_num as u32, &mut buffer).is_err() {
+        if read_tfs_block(self.device.lock().as_mut(), block_num, &mut buffer).is_err() {
             return Err("Failed to read inode block");
         }
 
@@ -427,7 +427,7 @@ impl TwilightFs {
                     if write_tfs_block(self.device.lock().as_mut(), block.into(), &buf).is_err() {
                         return Err("Failed to write block");
                     }
-                    parent_inode.size += dir_entry_size as u32;
+                    parent_inode.size += dir_entry_size as u64;
                     self.write_inode(parent_inode_num, &parent_inode)?;
 
                     entry_added = true;
@@ -681,7 +681,7 @@ impl TwilightFs {
             write_tfs_block(self.device.lock().as_mut(), inode.double_indirect_zones, &double_indirect_block)?;
         }
 
-        inode.size = bytes_written as u32;
+        inode.size = bytes_written as u64;
         self.write_inode(inode_num, &inode).unwrap();
         let end = uptime();
 
@@ -1013,8 +1013,8 @@ impl TwilightFs {
                     write_tfs_block(self.device.lock().as_mut(), zone, &buf)?;
 
                     // Update parent inode size if large enough
-                    if parent_inode.size >= dir_entry_size as u32 {
-                        parent_inode.size -= dir_entry_size as u32;
+                    if parent_inode.size >= dir_entry_size as u64 {
+                        parent_inode.size -= dir_entry_size as u64;
                     }
                     self.write_inode(parent_inode_num, &parent_inode).unwrap();
 

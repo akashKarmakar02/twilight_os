@@ -11,9 +11,9 @@ pub const VERSION: u32 = 0x000001;
 pub struct Superblock {
     pub ninodes: u32,
     pub pad1: u16,
-    pub imap_blocks: u16,
-    pub zmap_blocks: u16,
-    pub first_data_zone: u16,
+    pub imap_blocks: u32,
+    pub zmap_blocks: u32,
+    pub first_data_zone: u32,
     pub log_zone_size: u16,
     pub pad2: u16,
     pub max_size: u32,
@@ -83,9 +83,9 @@ impl Superblock {
         let sb = Superblock {
             ninodes: ninodes as u32,
             pad1: 0,
-            imap_blocks: imap_blocks as u16,
-            zmap_blocks: zmap_blocks as u16,
-            first_data_zone: first_data_zone as u16,
+            imap_blocks: imap_blocks as u32,
+            zmap_blocks: zmap_blocks as u32,
+            first_data_zone: first_data_zone as u32,
             log_zone_size,
             pad2: 0,
             max_size: 0x7FFF_FFFF,            // keep if that’s your limit
@@ -106,7 +106,7 @@ impl Superblock {
         write_tfs_block(device, 0, &buffer).map_err(|_| "ERROR: write failed while writing superblock")?;
         Ok(sb)
     }
-    
+
     pub fn is_valid(&self) -> bool {
         self.magic == u32::from_le_bytes(MAGIC) && self.subversion == 0
     }

@@ -21,9 +21,9 @@ pub enum FileType {
 pub struct Inode {
     pub mode: u16,
     pub nlinks: u16,
-    pub uid: u16,
-    pub gid: u16,
-    pub size: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
     pub access_time: u32,
     pub modified_time: u32,
     pub created_time: u32,
@@ -357,7 +357,7 @@ impl VfsNodeOps for TFSVfsNode {
             }
         }
 
-        self.inode.size = bytes_written as u32;
+        self.inode.size = bytes_written as u64;
         self.ctx
             .lock()
             .write_inode_twilight(self.inode_no, self.inode)
