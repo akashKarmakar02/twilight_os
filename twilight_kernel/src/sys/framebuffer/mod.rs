@@ -1,11 +1,11 @@
 use crate::arch::x86_64::io::delay;
 use crate::driver::timer::pit::uptime;
+use crate::serial_prtinln;
 use crate::sys::fs::{VfsError, VfsNode};
 use alloc::vec;
 use alloc::vec::Vec;
 use limine::framebuffer::Framebuffer;
 use spin::Once;
-use crate::serial_prtinln;
 
 #[allow(static_mut_refs)]
 pub static mut FRAMEBUFFER: Once<TwilightFrameBuffer> = Once::new();
@@ -51,7 +51,7 @@ impl TwilightFrameBuffer {
         let r = pixels[0] as u32;
         let g = pixels[1] as u32;
         let b = pixels[2] as u32;
-        (r << 16) | (g << 8) | b // Keep the RGB format same as input 
+        (r << 16) | (g << 8) | b // Keep the RGB format same as input
     }
 
     #[inline]
@@ -134,6 +134,61 @@ impl TwilightFrameBuffer {
         }
     }
 
+    pub fn scroll_up(&mut self, lines: u64, fill_color: u32) {
+        let h = self.height as usize;
+        let w = self.width as usize;
+        let scroll = lines.min(self.height as u64) as usize;
+
+        if scroll == 0 {
+            return;
+        }
+
+        if scroll >= h {
+            self.clear_buf(fill_color);
+            return;
+        }
+
+        let src_start = scroll * w;
+        let src_end = h * w;
+        let dst_start = 0;
+
+        // SAFER copy: use a manual copy to avoid overlap issues with copy_within
+        for i in 0..(h - scroll) * w {
+            let val = self.pixel_buf[src_start + i];
+            if val != 0 {}
+            self.pixel_buf[dst_start + i] = self.pixel_buf[src_start + i];
+        }
+
+        // Fill the bottom cleared area
+        let fill_start = (h - scroll) * w;
+        self.pixel_buf[fill_start..].fill(fill_color);
+    }
+
+    /// Scroll the framebuffer content down by `lines` pixels.
+    /// The emptied top region is filled with `fill_color`.
+    pub fn scroll_down(&mut self, lines: u64, fill_color: u32) {
+        if lines == 0 || lines >= self.height {
+            self.clear_buf(fill_color);
+            return;
+        }
+
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let scroll = lines as usize;
+
+        let src_start = 0;
+        let src_end = (h - scroll) * w;
+        let dst_start = scroll * w;
+        let dst_end = h * w;
+
+        // Copy downwards safely to prevent overlap corruption
+        for i in 0..(h - scroll) * w {
+            self.pixel_buf[dst_start + i] = self.pixel_buf[src_start + i];
+        }
+        // Fill top area
+        self.pixel_buf[0..(scroll * w)].fill(fill_color);
+    }
+
     pub fn animate_bouncing_rect(&mut self, duration_ms: u64) {
         // Tweakables
         let bg: u32 = 0x111111;
@@ -211,42 +266,42 @@ impl TwilightFrameBuffer {
 
     pub fn animate_boot_screen(&mut self, duration_ms: u64) {
         // Palette
-        let bg: u32       = 0x0c0e12; // deep charcoal
-        let fg: u32       = 0x35a7ff; // accent cyan
-        let fg_dim: u32   = 0x1f6aa8; // dim accent
-        let frame: u32    = 0x0f131a; // widget frame
-        let bar_bg: u32   = 0x141821; // bar track
+        let bg: u32 = 0x0c0e12; // deep charcoal
+        let fg: u32 = 0x35a7ff; // accent cyan
+        let fg_dim: u32 = 0x1f6aa8; // dim accent
+        let frame: u32 = 0x0f131a; // widget frame
+        let bar_bg: u32 = 0x141821; // bar track
         let dot_idle: u32 = 0x17202a; // idle dots
 
         let w = self.width as i64;
         let h = self.height as i64;
 
         // Layout (scales with resolution)
-        let logo_size    = (h.min(w) / 6).max(60);   // px
-        let logo_w       = logo_size;
-        let logo_h       = (logo_size as f32 * 0.9) as i64;
+        let logo_size = (h.min(w) / 6).max(60); // px
+        let logo_w = logo_size;
+        let logo_h = (logo_size as f32 * 0.9) as i64;
 
-        let bar_w        = (w as f32 * 0.40) as i64; // 40% of width
-        let bar_h        = (h as f32 * 0.022) as i64;
-        let bar_gap      = (h as f32 * 0.04) as i64; // gap under logo
+        let bar_w = (w as f32 * 0.40) as i64; // 40% of width
+        let bar_h = (h as f32 * 0.022) as i64;
+        let bar_gap = (h as f32 * 0.04) as i64; // gap under logo
 
-        let center_x     = w / 2;
-        let center_y     = h / 2;
+        let center_x = w / 2;
+        let center_y = h / 2;
 
-        let logo_x       = center_x - (logo_w / 2);
-        let logo_y       = center_y - (logo_h / 2) - bar_gap;
+        let logo_x = center_x - (logo_w / 2);
+        let logo_y = center_y - (logo_h / 2) - bar_gap;
 
-        let bar_x        = center_x - (bar_w / 2);
-        let bar_y        = center_y + (logo_h / 2) - (bar_h / 2);
+        let bar_x = center_x - (bar_w / 2);
+        let bar_y = center_y + (logo_h / 2) - (bar_h / 2);
 
-        let dots_y       = bar_y + bar_h + (bar_h / 1.max(1)) + 6;
-        let dot_size     = (bar_h as f32 * 0.55) as i64;
-        let dot_gap      = dot_size + 6;
-        let dots_start_x = center_x - (dot_size*3 + dot_gap*2)/2;
+        let dots_y = bar_y + bar_h + (bar_h / 1.max(1)) + 6;
+        let dot_size = (bar_h as f32 * 0.55) as i64;
+        let dot_gap = dot_size + 6;
+        let dots_start_x = center_x - (dot_size * 3 + dot_gap * 2) / 2;
 
         // Timing
         let fps_target = 60u64;
-        let frame_ms   = 1000 / fps_target;
+        let frame_ms = 1000 / fps_target;
 
         self.clear_buf(bg);
         self.sync_full();
@@ -258,29 +313,29 @@ impl TwilightFrameBuffer {
         let draw_logo = |fb: &mut Self, x: i64, y: i64, w: i64, h: i64, color: u32| {
             // Outer “badge” with subtle frame
             let pad = (w as f32 * 0.08) as i64;
-            fb.fill_rect_buf(x - pad, y - pad, w + 2*pad, h + 2*pad, frame);
+            fb.fill_rect_buf(x - pad, y - pad, w + 2 * pad, h + 2 * pad, frame);
 
             // Background inside badge
             fb.fill_rect_buf(x, y, w, h, bg);
 
             // The “T”
             let stem_w = (w as f32 * 0.22) as i64;
-            let cap_h  = (h as f32 * 0.22) as i64;
+            let cap_h = (h as f32 * 0.22) as i64;
 
             // Cap
             fb.fill_rect_buf(x, y, w, cap_h, color);
             // Stem
-            fb.fill_rect_buf(x + (w - stem_w)/2, y, stem_w, h, color);
+            fb.fill_rect_buf(x + (w - stem_w) / 2, y, stem_w, h, color);
 
             // Accent underline
             let ul_h = 2.max((h as f32 * 0.03) as i64);
-            fb.fill_rect_buf(x, y + h + (ul_h*2), w, ul_h, fg_dim);
+            fb.fill_rect_buf(x, y + h + (ul_h * 2), w, ul_h, fg_dim);
         };
 
         // helper: progress bar (track + fill + thin frame)
         let draw_progress = |fb: &mut Self, x: i64, y: i64, w: i64, h: i64, pct01: f32| {
             // Frame
-            fb.fill_rect_buf(x-2, y-2, w+4, h+4, frame);
+            fb.fill_rect_buf(x - 2, y - 2, w + 4, h + 4, frame);
             // Track
             fb.fill_rect_buf(x, y, w, h, bar_bg);
             // Fill
@@ -311,14 +366,16 @@ impl TwilightFrameBuffer {
             // sleep if we're early (leave ~1ms margin)
             if now + 2 < next_tick {
                 let to_sleep = (next_tick - now).saturating_sub(1) as usize;
-                if to_sleep > 0 { delay(to_sleep); }
+                if to_sleep > 0 {
+                    delay(to_sleep);
+                }
                 continue;
             }
 
             // catch up by whole frames
             while next_tick <= now {
                 let elapsed = next_tick.saturating_sub(t0).min(duration_ms) as f32;
-                let total   = duration_ms as f32;
+                let total = duration_ms as f32;
 
                 // Ease the progress a bit (smoothstep)
                 let tlin = if total > 0.0 { elapsed / total } else { 1.0 };
@@ -343,7 +400,7 @@ impl TwilightFrameBuffer {
             }
 
             // Massive delay safeguard (e.g., debugger pause)
-            if now > next_tick + 8*frame_ms {
+            if now > next_tick + 8 * frame_ms {
                 next_tick = now + frame_ms;
             }
         }
@@ -394,6 +451,7 @@ impl VfsNode for TwilightFrameBuffer {
             for i in 0..(buffer.len() / 4) {
                 let color = self.extract_color(&buffer[i * 4..(i + 1) * 4]);
                 fb_u32_ptr.add(i + offset as usize).write_volatile(color);
+                self.pixel_buf[i + offset as usize] = color;
             }
         }
 

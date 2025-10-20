@@ -598,3 +598,7 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
 
     0
 }
+
+pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
+    0
+}

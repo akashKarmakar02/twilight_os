@@ -8,15 +8,18 @@ use core::fmt;
 use core::fmt::Write;
 
 #[derive(Copy, Clone)]
-enum AnsiState { Normal, Esc, Csi }
-
+enum AnsiState {
+    Normal,
+    Esc,
+    Csi,
+}
 
 static mut WRITER: Option<Writer> = None;
 
 #[derive(Clone)]
 pub struct ScreenChar {
-    char: u8,
-    color: u32,
+    pub char: u8,
+    pub color: u32,
 }
 
 // Initialize the kernel shell
@@ -348,9 +351,13 @@ impl Writer {
                 match c {
                     // collect params for SGR
                     '0'..='9' | ';' => self.ansi_buf.push(c),
-                    'm' => { // SGR end
-                        if self.ansi_buf.is_empty() { self.parse_ansi_code("0"); }
-                        else { self.parse_ansi_code(self.ansi_buf.clone().as_str()); }
+                    'm' => {
+                        // SGR end
+                        if self.ansi_buf.is_empty() {
+                            self.parse_ansi_code("0");
+                        } else {
+                            self.parse_ansi_code(self.ansi_buf.clone().as_str());
+                        }
                         self.ansi_buf.clear();
                         self.ansi_state = AnsiState::Normal;
                     }
@@ -374,7 +381,10 @@ impl Writer {
     // (optional) broaden reset handling:
     fn parse_ansi_code(&mut self, code: &str) {
         let parts: Vec<u8> = code.split(';').filter_map(|s| s.parse().ok()).collect();
-        if parts.is_empty() { self.color = 0xBFBFBF; return; } // treat empty as reset
+        if parts.is_empty() {
+            self.color = 0xBFBFBF;
+            return;
+        } // treat empty as reset
 
         for code in parts {
             match code {

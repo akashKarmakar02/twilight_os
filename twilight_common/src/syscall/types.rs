@@ -70,51 +70,68 @@ pub struct Rlimit64 {
 pub const RLIM64_INFINITY: Rlim = u64::MAX;
 
 // resource selectors (same numeric values as Linux)
-pub const RLIMIT_CPU:        u32 = 0;
-pub const RLIMIT_FSIZE:      u32 = 1;
-pub const RLIMIT_DATA:       u32 = 2;
-pub const RLIMIT_STACK:      u32 = 3; // <-- the one Zig/musl touch
-pub const RLIMIT_CORE:       u32 = 4;
-pub const RLIMIT_RSS:        u32 = 5; // ignored on Linux
-pub const RLIMIT_NPROC:      u32 = 6;
-pub const RLIMIT_NOFILE:     u32 = 7;
-pub const RLIMIT_MEMLOCK:    u32 = 8;
-pub const RLIMIT_AS:         u32 = 9;
-pub const RLIMIT_LOCKS:      u32 = 10;
+pub const RLIMIT_CPU: u32 = 0;
+pub const RLIMIT_FSIZE: u32 = 1;
+pub const RLIMIT_DATA: u32 = 2;
+pub const RLIMIT_STACK: u32 = 3; // <-- the one Zig/musl touch
+pub const RLIMIT_CORE: u32 = 4;
+pub const RLIMIT_RSS: u32 = 5; // ignored on Linux
+pub const RLIMIT_NPROC: u32 = 6;
+pub const RLIMIT_NOFILE: u32 = 7;
+pub const RLIMIT_MEMLOCK: u32 = 8;
+pub const RLIMIT_AS: u32 = 9;
+pub const RLIMIT_LOCKS: u32 = 10;
 pub const RLIMIT_SIGPENDING: u32 = 11;
-pub const RLIMIT_MSGQUEUE:   u32 = 12;
-pub const RLIMIT_NICE:       u32 = 13;
-pub const RLIMIT_RTPRIO:     u32 = 14;
-pub const RLIMIT_RTTIME:     u32 = 15;
+pub const RLIMIT_MSGQUEUE: u32 = 12;
+pub const RLIMIT_NICE: u32 = 13;
+pub const RLIMIT_RTPRIO: u32 = 14;
+pub const RLIMIT_RTTIME: u32 = 15;
 
 #[repr(C, packed)]
 pub struct Dirent64Hdr {
-    pub d_ino:   u64,  // inode
-    pub d_off:   i64,  // cookie to next entry
-    pub d_reclen:u16,  // total size of this record
-    pub d_type:  u8,   // DT_*
-    // d_name[] follows (NUL-terminated), then padding to 8-byte boundary
+    pub d_ino: u64,    // inode
+    pub d_off: i64,    // cookie to next entry
+    pub d_reclen: u16, // total size of this record
+    pub d_type: u8,    // DT_*
+                       // d_name[] follows (NUL-terminated), then padding to 8-byte boundary
 }
 
 pub const EFAULT: u32 = 14;
 
-
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Stat {
-    pub st_dev_id:     u64,
-    pub st_ino:     u64,
-    pub st_nlink:   u64,
-    pub st_mode:    u32,
-    pub st_uid:     u32,
-    pub st_gid:     u32,
-    pub __pad0:     u32,
-    pub st_rdev:    u64,
-    pub st_size:    i64,
+    pub st_dev_id: u64,
+    pub st_ino: u64,
+    pub st_nlink: u64,
+    pub st_mode: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub __pad0: u32,
+    pub st_rdev: u64,
+    pub st_size: i64,
     pub st_blksize: i64,
-    pub st_blocks:  i64,
-    pub st_atim:    Timespec,
-    pub st_mtim:    Timespec,
-    pub st_ctim:    Timespec,
-    pub __unused:   [i64; 3],
+    pub st_blocks: i64,
+    pub st_atim: Timespec,
+    pub st_mtim: Timespec,
+    pub st_ctim: Timespec,
+    pub __unused: [i64; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct FStat {
+    pub st_dev: u64,        // ID of device containing file
+    pub st_ino: u64,        // Inode number
+    pub st_mode: u32,       // File type and mode
+    pub st_nlink: u32,      // Number of hard links
+    pub st_uid: u32,        // User ID of owner
+    pub st_gid: u32,        // Group ID of owner
+    pub st_rdev: u64,       // Device ID (if special file) else 0
+    pub st_size: i64,       // Total size, in bytes
+    pub st_blksize: i64,    // Block size for filesystem I/O
+    pub st_blocks: i64,     // Number of allocated 512B blocks
+    pub st_atime: Timespec, // Time of last access
+    pub st_mtime: Timespec, // Time of last modification
+    pub st_ctime: Timespec, // Time of last status change
 }

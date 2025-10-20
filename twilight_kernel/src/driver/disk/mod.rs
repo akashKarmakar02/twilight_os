@@ -1,4 +1,4 @@
-use crate::{serial_prtinln, sys};
+use crate::{sys};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;

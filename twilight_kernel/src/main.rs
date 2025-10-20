@@ -17,8 +17,8 @@ extern crate twilight_proc;
 pub mod arch;
 pub mod driver;
 pub mod kernel_utils;
-pub mod task;
 pub mod sys;
+pub mod task;
 pub mod utils;
 
 use core::arch::asm;
@@ -26,7 +26,9 @@ use core::cell::SyncUnsafeCell;
 use core::sync::atomic::Ordering::SeqCst;
 use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
-use limine::request::{FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, StackSizeRequest};
+use limine::request::{
+    FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, StackSizeRequest,
+};
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
 
 #[used]
@@ -83,7 +85,8 @@ unsafe extern "C" fn kmain() -> ! {
     }
 
     #[allow(static_mut_refs)]
-    let memory_map_response: &mut MemoryMapResponse = unsafe { &mut *MEMMAP.get() }.get_response_mut().unwrap();
+    let memory_map_response: &mut MemoryMapResponse =
+        unsafe { &mut *MEMMAP.get() }.get_response_mut().unwrap();
 
     if let Some(mpr) = MP.get_response() {
         mp_response = Some(mpr);
@@ -108,7 +111,6 @@ unsafe extern "C" fn kmain() -> ! {
         cpio_response.unwrap(),
     );
 
-
     // println!("\x1b[96m                                                     ,,    ,,    ,,            ,,                                        ");
     // println!("                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd ");
     // println!("                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y ");
@@ -127,6 +129,7 @@ unsafe extern "C" fn kmain() -> ! {
     println!(r"  |____|    \/\_/ |__|____/__\___  /|___|  /__|   \_______  /_______  / ");
     println!(r"                            /_____/      \/               \/        \/  ");
 
+    // sys::console::framebuffer::init();
     sys::console::init_console();
 
     hcf()
@@ -150,15 +153,21 @@ fn hcf() -> ! {
         }
     }
 }
-use x86_64::VirtAddr;
-use sys::{fs, memory};
-use crate::sys::console::writer::init_writer;
-use sys::framebuffer::init_framebuffer;
 use crate::kernel_utils::install::INITRAMFS;
+use crate::sys::console::writer::init_writer;
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::task::executor;
+use sys::framebuffer::init_framebuffer;
+use sys::{fs, memory};
+use x86_64::VirtAddr;
 
-pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response: &'static mut MemoryMapResponse, mp_response: &'static MpResponse, cpio_file: && limine::file::File) {
+pub fn init(
+    fb: &Framebuffer,
+    hhdm_response: &HhdmResponse,
+    memory_map_response: &'static mut MemoryMapResponse,
+    mp_response: &'static MpResponse,
+    cpio_file: &&limine::file::File,
+) {
     driver::uart::init();
 
     let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
@@ -176,7 +185,6 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
 
     memory::init(phys_mem_offset, memory_map_response.entries());
 
-
     init_framebuffer(fb);
 
     executor::init_executor();
@@ -192,7 +200,6 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
     driver::disk::ata::init();
     fs::init(true);
 
-
     arch::x86_64::gdt::init_after_boot();
 
     arch::x86_64::syscall::init();
@@ -201,7 +208,9 @@ pub fn init(fb: &Framebuffer, hhdm_response: &HhdmResponse, memory_map_response:
 
     x86_64::instructions::interrupts::enable();
 
-    let cpio_buf = unsafe { core::slice::from_raw_parts(cpio_file.addr() as *const u8, cpio_file.size() as usize) };
+    let cpio_buf = unsafe {
+        core::slice::from_raw_parts(cpio_file.addr() as *const u8, cpio_file.size() as usize)
+    };
     let cpio = CpioIterator::new(cpio_buf);
 
     {

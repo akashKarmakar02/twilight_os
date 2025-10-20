@@ -46,6 +46,7 @@ pub extern "sysv64" fn syscall_handler(
             service::open(&path, flags, mode as u32)
         }
         SYS_STAT => service::stat(arg1 as usize, arg2 as usize),
+        SYS_FSTAT => service::fstat(arg1 as usize, arg2 as usize),
         SYS_POLL => {
             // mock implementation of poll
             1

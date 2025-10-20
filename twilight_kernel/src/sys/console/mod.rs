@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 pub mod font;
+pub mod framebuffer;
 pub mod writer;
 
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
@@ -193,7 +194,9 @@ fn exec(cmd: &str, args: &[&str]) {
             #[allow(static_mut_refs)]
             let fs = unsafe { VFS.get_mut() };
 
-            if let Ok(mut node) = fs.open(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str()) {
+            if let Ok(mut node) =
+                fs.open(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str())
+            {
                 let Ok(buf) = node.read() else {
                     println!("{}: failed to read from file", cmd);
                     return;

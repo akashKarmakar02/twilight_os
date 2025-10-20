@@ -11,7 +11,7 @@ use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
-use crate::{driver, println};
+use crate::{driver};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -530,7 +530,6 @@ impl TwilightFs {
     }
 
     pub fn write_file(&mut self, inode_num: u32, data: &[u8]) -> Result<(), FsError> {
-        let start = uptime();
         if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
             return Err(InvalidInode);
         }
@@ -683,9 +682,6 @@ impl TwilightFs {
 
         inode.size = bytes_written as u64;
         self.write_inode(inode_num, &inode).unwrap();
-        let end = uptime();
-
-        println!("finished in {}", end - start);
 
         Ok(())
     }
