@@ -9,7 +9,7 @@ use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 use crate::driver::disk::mount_ata;
-use crate::println;
+use crate::{println, serial_prtinln};
 // Information Technology
 // AT Attachment with Packet Interface Extension (ATA/ATAPI-4)
 // (1998)
@@ -25,6 +25,7 @@ enum Command {
     Read     = 0x20,
     Write    = 0x30,
     Identify = 0xEC,
+    SetFeatures = 0xEF,
 }
 
 enum IdentifyResponse {
@@ -193,7 +194,7 @@ impl Bus {
 
     fn write_command(&mut self, cmd: Command) -> Result<(), ()> {
         unsafe { self.command_register.write(cmd as u8) }
-        self.wait(400); // Wait at least 400 ns
+        self.wait(120); // Wait at least 400 ns
         self.status(); // Ignore results of first read
         self.clear_interrupt();
         if self.status() == 0 { // Drive does not exist
@@ -205,13 +206,41 @@ impl Bus {
             return Err(());
         }
         self.poll(Status::BSY, false)?;
-        self.poll(Status::DRQ, true)?;
+        match cmd {
+            Command::Read | Command::Write | Command::Identify => {
+                self.poll(Status::DRQ, true)?;
+            }
+            Command::SetFeatures => {
+                // Do nothing — no DRQ expected
+            }
+        }
+
         Ok(())
     }
 
     fn setup_pio(&mut self, drive: u8, block: u32) -> Result<(), ()> {
         self.select_drive(drive)?;
         self.write_command_params(drive, block)?;
+        Ok(())
+    }
+
+    fn set_pio_mode(&mut self, drive: u8, mode: u8) -> Result<(), ()> {
+        // According to ATA/ATAPI-4 spec:
+        // Set Features (0xEF) with subcommand 0x03 and transfer mode 0x08 + mode_num
+        self.select_drive(drive)?;
+        self.poll(Status::BSY, false)?;
+
+
+        unsafe {
+            self.features_register.write(0x03); // subcommand: Set Transfer Mode
+            self.sector_count_register.write(0x08 | mode); // 0x08 + mode (for PIO)
+            self.lba0_register.write(0);
+            self.lba1_register.write(0);
+            self.lba2_register.write(0);
+        }
+
+        self.write_command(Command::SetFeatures)?;
+        self.poll(Status::BSY, false)?;
         Ok(())
     }
 
@@ -283,7 +312,7 @@ impl Bus {
             self.control_register.write(4); // Set SRST bit
             self.wait(5); // Wait at least 5 ns
             self.control_register.write(0); // Then clear it
-            self.wait(2000); // Wait at least 2 ms
+            self.wait(200); // Wait at least 2 ms
         }
     }
 
@@ -340,7 +369,7 @@ impl Drive {
     pub fn open(bus: u8, dsk: u8) -> Option<Self> {
         let mut buses = BUSES.lock();
         let res = buses[bus as usize].identify_drive(dsk);
-        
+
         if let Ok(IdentifyResponse::Ata(res)) = res {
             let buf = res.map(u16::to_be_bytes).concat();
             let model: String = String::from_utf8_lossy(&buf[54..94]).trim().into();
@@ -349,6 +378,9 @@ impl Drive {
                 buf[120..124].try_into().unwrap()
             ).rotate_left(16);
             let block_index = 0;
+
+            let _ = buses[bus as usize].set_pio_mode(dsk, 4);
+
 
             Some(Self {
                 bus,
