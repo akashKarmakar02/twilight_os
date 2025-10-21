@@ -154,12 +154,12 @@ fn hcf() -> ! {
     }
 }
 use crate::kernel_utils::install::INITRAMFS;
-use crate::sys::console::writer::init_writer;
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::task::executor;
 use sys::framebuffer::init_framebuffer;
 use sys::{fs, memory};
 use x86_64::VirtAddr;
+use crate::sys::console::init_tty;
 
 pub fn init(
     fb: &Framebuffer,
@@ -190,7 +190,8 @@ pub fn init(
     executor::init_executor();
     fs::init_fs();
 
-    init_writer();
+    // init_writer();
+    init_tty();
     sys::pci::init();
 
     // depends on pci initialization

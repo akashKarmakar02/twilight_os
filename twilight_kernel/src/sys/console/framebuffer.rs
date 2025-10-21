@@ -1,15 +1,10 @@
-use crate::{
-    arch::x86_64::halt,
-    sys::{
-        console::font::PSF_FONTS,
-        framebuffer::{FRAMEBUFFER, convert_color, get_framebuffer, get_framebuffer_mut},
-        fs::VfsNode,
-    },
-    task::executor::sleep,
+use crate::sys::{
+    console::font::PSF_FONTS,
+    framebuffer::{convert_color, get_framebuffer, FRAMEBUFFER},
+    fs::VfsNode,
 };
 
-use alloc::vec::Vec;
-use alloc::{format, vec};
+use alloc::vec;
 
 /// A framebuffer-based terminal backend (no ANSI parsing, pure rendering)
 pub struct FramebufferTerminal {
@@ -28,6 +23,9 @@ pub struct ScreenChar {
 }
 
 impl FramebufferTerminal {
+    const CHAR_W: usize = 8;
+    const CHAR_H: usize = 16;
+
     /// Initialize and clear the framebuffer console
     pub fn new() -> Self {
         let fb = get_framebuffer();
@@ -44,6 +42,18 @@ impl FramebufferTerminal {
         term
     }
 
+    fn backspace(&mut self) {
+        if self.cursor_x > 0 {
+            self.cursor_x -= 1;
+            let x = self.cursor_x * Self::CHAR_W;
+            let y = self.cursor_y * Self::CHAR_H;
+            self.draw_char(x, y, ScreenChar { char: b' ', color: self.color });
+        } else {
+            // At column 0: keep it simple (no wrap). If you want wrap:
+            // if self.cursor_y > 0 { self.cursor_y -= 1; self.cursor_x = self.cols().saturating_sub(1); }
+        }
+    }
+
     /// Clears the framebuffer with the background color
     pub fn clear(&mut self) {
         apply_console_bg(self.bg_color);
@@ -55,6 +65,11 @@ impl FramebufferTerminal {
     pub fn put_char(&mut self, c: u8) {
         if c == b'\n' {
             self.new_line();
+            return;
+        }
+
+        if c == 0x08 || c == b'\x7f' {
+            self.backspace();
             return;
         }
 
@@ -173,27 +188,4 @@ fn apply_console_bg(color: u32) {
         let fb = FRAMEBUFFER.get_mut().unwrap();
         fb.write(0, buf.as_slice()).unwrap();
     }
-}
-
-pub fn init() {
-    let mut term = FramebufferTerminal::new();
-
-    let mut count = 0;
-    loop {
-        term.put_char('A' as u8);
-        term.put_char(' ' as u8);
-        for c in format!("{}", count).chars() {
-            term.put_char(c as u8);
-        }
-        term.new_line();
-        count += 1;
-        halt();
-    }
-    // term.put_char('a' as u8);
-    // term.new_line();
-    // term.put_char('a' as u8);
-    // term.new_line();
-    // term.put_char('a' as u8);
-    // term.new_line();
-    // term.scroll();
 }

@@ -1,7 +1,6 @@
 extern crate alloc;
 
 use crate::arch::x86_64::halt;
-use crate::sys::console::writer::clear_screen;
 use crate::sys::fs::vfs::VFS;
 use crate::sys::proc::{PROCESS_TABLE, Process};
 use crate::sys::tty::read_char;
@@ -9,19 +8,33 @@ use crate::{print, println, serial_prtinln};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
+use spin::{Mutex, Once};
+use crate::sys::console::tty::Tty;
 
 pub mod font;
 pub mod framebuffer;
-pub mod writer;
+pub mod tty;
 
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
 pub static CURSOR_POSITION: Mutex<usize> = Mutex::new(0);
+pub static mut TTY: Once<Tty> = Once::new();
 
 pub static mut DIR: String = String::new();
 
 static mut CONSOLE_HISTORY: Vec<String> = Vec::new();
 static mut CONSOLE_HISTORY_INDEX: Mutex<usize> = Mutex::new(0);
+
+pub fn init_tty() {
+    #[allow(static_mut_refs)]
+    unsafe {
+        TTY.call_once(|| {
+            let tty = Tty::new();
+            let mut cur_pos = CURSOR_POSITION.lock();
+            *cur_pos = 2;
+            tty
+        });
+    }
+}
 
 pub fn init_console() {
     #[allow(static_mut_refs)]
@@ -47,6 +60,11 @@ fn handle_console_input() {
         halt();
         let c = read_char();
         match c {
+            '\r' => {
+                if !STDIO.lock().is_empty() {
+                    print!("{}", c);
+                }
+            }
             '\n' => {
                 print!("\n");
                 let cmd_line;
@@ -165,15 +183,11 @@ fn handle_console_input() {
 
 fn exec(cmd: &str, args: &[&str]) {
     match cmd {
-        "clear" => {
-            clear_screen(true);
-        }
         "uptime" => {
             println!("{:.6} seconds", crate::driver::timer::pit::uptime());
         }
         "shutdown" => crate::kernel_utils::shutdown::main(),
         "meminfo" => crate::kernel_utils::meminfo::main(),
-        // "ls" => crate::kernel_utils::ls::main(args),
         "pitch" => {
             println!("{}", crate::sys::framebuffer::get_pitch());
         }
