@@ -2,7 +2,7 @@ pub mod allocator;
 pub mod phys;
 pub mod paging;
 
-use crate::{log};
+use crate::{log, serial_prtinln};
 use conquer_once::spin::OnceCell;
 use core::sync::atomic::Ordering::SeqCst;
 use core::sync::atomic::{AtomicU64, AtomicUsize};
@@ -10,6 +10,7 @@ use limine::memory_map::{Entry, EntryType};
 use spin::Once;
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate};
 use x86_64::{PhysAddr, VirtAddr};
+use x86_64::registers::control::Cr3;
 
 #[allow(static_mut_refs)]
 static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();
@@ -17,10 +18,15 @@ static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();
 pub(crate) static mut PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
 static ALLOCATED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static MEMORY_MAP: OnceCell<&'static[&Entry]> = OnceCell::uninit();
-
+static mut PAGE_TABLE: Option<PhysFrame> = None;
 
 pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static [&Entry]) {
-    let level_4_table = unsafe { active_level_4_table() };
+    let level_4_table = active_level_4_table();
+    let (phys_frame, _) = Cr3::read();
+    #[allow(static_mut_refs)]
+    unsafe {
+        PAGE_TABLE = Some(phys_frame);
+    }
     #[allow(static_mut_refs)]
     unsafe {
         MAPPER.call_once(|| {
@@ -77,8 +83,20 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     }
 }
 
-#[allow(unsafe_op_in_unsafe_fn)]
-pub unsafe fn active_level_4_table() -> &'static mut PageTable {
+pub fn kernel_page_table() -> &'static mut PageTable {
+    #[allow(static_mut_refs)]
+    let frame = unsafe { PAGE_TABLE.clone().unwrap() };
+
+    let phys = frame.start_address();
+    let virt = VirtAddr::new(phys.as_u64() + phys_mem_offset());
+    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
+
+    unsafe {
+        &mut *page_table_ptr
+    }
+}
+
+pub fn active_level_4_table() -> &'static mut PageTable {
     use x86_64::registers::control::Cr3;
 
     let (level_4_table_frame, _) = Cr3::read();
@@ -87,7 +105,9 @@ pub unsafe fn active_level_4_table() -> &'static mut PageTable {
     let virt = VirtAddr::new(phys.as_u64() + phys_mem_offset());
     let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
 
-    &mut *page_table_ptr
+    unsafe {
+        &mut *page_table_ptr
+    }
 }
 
 

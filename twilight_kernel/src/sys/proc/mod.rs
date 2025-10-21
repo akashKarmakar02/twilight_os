@@ -1,11 +1,12 @@
 pub mod mem;
+pub mod switch;
 
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::kernel_utils::exec::jump_to_user;
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
-use crate::sys::memory::{active_level_4_table, alloc_pages, dealloc_pages, frame_allocator, phys_mem_offset};
+use crate::sys::memory::{alloc_pages, dealloc_pages, frame_allocator, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
 use crate::println;
 use alloc::boxed::Box;
@@ -126,6 +127,7 @@ pub struct Process {
     pub entry_point: u64,
     pub page_table_frame: PhysFrame,
     pub pid: u16,
+    pub parent_pid: u16,
     pub state: ProcessState,
     pub addr_size_vec: Vec<(u64, usize)>,
     pub pwd: String,
@@ -136,14 +138,14 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn new(content_buf: Vec<u8>, pwd: &str, args: &[&str]) -> Result<Self, ()> {
+    pub fn new(content_buf: Vec<u8>, pwd: &str, args: &[&str], parent_pid: u16) -> Result<Self, ()> {
         let (_, flags) = Cr3::read();
 
         let page_table_frame = frame_allocator().allocate_frame().unwrap();
 
         let page_table = crate::sys::memory::create_page_table(page_table_frame);
 
-        let kernel_page_table = unsafe { active_level_4_table() };
+        let kernel_page_table = kernel_page_table();
 
         let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
 
@@ -306,6 +308,7 @@ impl Process {
             gs_base: VirtAddr::zero(),
             handler: Vec::new(),
             proc_mm,
+            parent_pid,
         };
         Ok(p)
     }
@@ -341,17 +344,21 @@ pub fn exit() {
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
     let mut process = table.proc_list.pop_back().unwrap();
 
-    if let Some(k_process) = table.get_process(1) {
-        let page_table_frame = k_process.page_table_frame;
+    if let Some(p_process) = table.get_process(process.parent_pid) {
+        let page_table_frame = p_process.page_table_frame;
         let (_, flags) = Cr3::read();
         unsafe {
             Cr3::write(page_table_frame, flags);
         }
-    }
-
     process.cleanup();
 
-    init_console();
+        if p_process.pid == 1 {
+            init_console();
+        } else {
+            PID.store(p_process.pid, Ordering::SeqCst);
+            p_process.exec();
+        }
+    }
 }
 
 pub fn init() {
@@ -390,6 +397,7 @@ pub fn init() {
                 gs_base: VirtAddr::zero(),
                 fs_base: VirtAddr::zero(),
                 proc_mm,
+                parent_pid: 0,
             })
     }
 }

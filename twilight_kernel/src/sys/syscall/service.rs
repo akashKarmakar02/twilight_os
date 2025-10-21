@@ -298,7 +298,7 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         .pwd
         .clone();
 
-    if let Ok(p) = Process::new(elf_buf, pwd.as_str(), argv.as_slice()) {
+    if let Ok(p) = Process::new(elf_buf, pwd.as_str(), argv.as_slice(), crate::sys::proc::id()) {
         unsafe { asm!("swapgs") };
         process_table.run(p);
     } else {
