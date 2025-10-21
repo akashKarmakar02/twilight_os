@@ -31,7 +31,7 @@ pub extern "sysv64" fn syscall_handler(
             let ptr = arg2 as *mut u8;
             let len = arg3;
             let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len as usize) };
-            read(arg1 as usize, buf, len as usize)
+            read(arg1 as usize, buf)
         }
         SYS_WRITE => service::write(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_OPEN => {
@@ -62,6 +62,8 @@ pub extern "sysv64" fn syscall_handler(
         SYS_EXECVE => service::execev(arg1 as usize, arg2 as usize, arg3 as usize),
         SYS_EXIT => service::exit(),
         SYS_UNAME => service::uname(arg1 as usize),
+        SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
+        SYS_GET_EUID => 1,
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
         SYS_GET_TID => {
             crate::sys::proc::id() as i64

@@ -1,9 +1,10 @@
-use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
+use crate::arch::x86_64::io::{rdmsr, wrmsr, IA32_FS_BASE, IA32_GS_BASE};
+use crate::driver::disk::dummy_blockdev;
+use crate::sys::console::tty::get_tty;
 use crate::sys::console::DIR;
-use crate::sys::fs::vfs::{FileType, VFS};
-use crate::sys::proc::{Handler, PROCESS_TABLE, Process, USER_STACK_SIZE};
-use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array};
-use crate::sys::tty::{read_char, read_line};
+use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
+use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
+use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
 use crate::{print, serial_prtinln};
 use alloc::boxed::Box;
 use alloc::format;
@@ -54,22 +55,15 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     res
 }
 
-pub fn read(handler: usize, buf: &mut [u8], len: usize) -> i64 {
+pub fn read(handler: usize, buf: &mut [u8]) -> i64 {
     if handler == 0 || handler <= 2 {
-        let mut str = if len != 1 {
-            read_line()
-        } else {
-            let res = String::from(read_char());
-            print!("{}", res);
-            res
-        };
-        str.truncate(len);
+        let tty = get_tty();
 
-        let string_bytes = str.as_bytes();
-        let copy_len = string_bytes.len().min(buf.len());
-        buf[..copy_len].copy_from_slice(&string_bytes[..copy_len]);
+        if let Ok(v) = tty.read(&mut dummy_blockdev(), 0, buf) {
+            return v.len() as i64;
+        }
 
-        return copy_len as i64;
+        return 0;
     }
 
     #[allow(static_mut_refs)]
@@ -333,7 +327,7 @@ pub fn uname(ptr: usize) -> i64 {
             let uname_s = &mut *uname_ptr;
 
             fill(&mut uname_s.sysname, "TwilightOS");
-            fill(&mut uname_s.nodename, "Twilight");
+            fill(&mut uname_s.nodename, "twilight");
             fill(&mut uname_s.release, "0.1.0-testing-build.x86_64");
             fill(&mut uname_s.version, "#1 NON-SMP 12-10-2025");
             fill(&mut uname_s.machine, "x86_64");
@@ -599,6 +593,18 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     0
 }
 
-pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
+pub fn fstat(_fd: usize, _fstat_ptr: usize) -> i64 {
     0
+}
+
+pub fn getcwd(buf_ptr: usize, buf_len: usize) -> i64 {
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
+    #[allow(static_mut_refs)]
+    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()).unwrap() };
+
+    let cwd = proc.pwd.as_str();
+    let cwd_bytes = cwd.as_bytes();
+    buf[..cwd_bytes.len()].copy_from_slice(cwd_bytes);
+
+    buf.as_ptr() as i64
 }

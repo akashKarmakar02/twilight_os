@@ -38,7 +38,7 @@ impl DevFs {
 struct DirNodeOps;
 
 impl VfsNodeOps for DirNodeOps {
-    fn read(&self, _device: &mut BlockDev, _lba: usize) -> Result<Vec<u8>, ()> {
+    fn read(&self, _device: &mut BlockDev, _lba: usize, _buf: &mut [u8]) -> Result<Vec<u8>, ()> {
         Err(())
     }
 

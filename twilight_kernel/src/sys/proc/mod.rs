@@ -278,12 +278,13 @@ impl Process {
             }
         }
 
+        let env = ["USER=akash"];
         // Some(virt_to_phys(VirtAddr::new(0x400000)).unwrap().as_u64())
         let user_rsp = build_initial_stack(
             user_stack_top.as_u64(),
             entry_point_addr,
             Some(args),
-            None,
+            Some(&env),
             phdr_va,
             phent,
             phnum,

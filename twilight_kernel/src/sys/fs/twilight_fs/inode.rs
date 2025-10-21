@@ -44,7 +44,7 @@ unsafe impl Sync for TFSVfsNode {}
 
 #[allow(dead_code)]
 impl VfsNodeOps for TFSVfsNode {
-    fn read(&self, device: &mut BlockDev, _lba: usize) -> Result<Vec<u8>, ()> {
+    fn read(&self, device: &mut BlockDev, _lba: usize, _buf: &mut [u8]) -> Result<Vec<u8>, ()> {
         let mut content = Vec::new();
         let mut remaining = self.inode.size as usize;
         let block_size = 2048;

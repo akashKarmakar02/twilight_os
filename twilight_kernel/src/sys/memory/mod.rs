@@ -2,15 +2,15 @@ pub mod allocator;
 pub mod phys;
 pub mod paging;
 
-use crate::{log, serial_prtinln};
+use crate::log;
 use conquer_once::spin::OnceCell;
 use core::sync::atomic::Ordering::SeqCst;
 use core::sync::atomic::{AtomicU64, AtomicUsize};
 use limine::memory_map::{Entry, EntryType};
 use spin::Once;
+use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate};
 use x86_64::{PhysAddr, VirtAddr};
-use x86_64::registers::control::Cr3;
 
 #[allow(static_mut_refs)]
 static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();

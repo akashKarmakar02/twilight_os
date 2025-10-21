@@ -1,6 +1,7 @@
-use crate::sys::console::framebuffer::FramebufferTerminal;
 use crate::sys::console::TTY;
+use crate::sys::console::framebuffer::FramebufferTerminal;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
+use crate::sys::tty::read_char;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -19,7 +20,11 @@ pub struct Tty {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
-enum AnsiState { Ground, Esc, Csi }
+enum AnsiState {
+    Ground,
+    Esc,
+    Csi,
+}
 
 impl Tty {
     const FLUSH_THRESHOLD: usize = 512;
@@ -37,13 +42,19 @@ impl Tty {
     }
 
     #[inline]
-    fn is_printable_ascii(b: u8) -> bool { (0x20..=0x7E).contains(&b) }
+    fn is_printable_ascii(b: u8) -> bool {
+        (0x20..=0x7E).contains(&b)
+    }
 
     #[inline]
-    fn is_control_forced_flush(b: u8) -> bool { matches!(b, b'\n' | b'\r' | 0x08 | 0x7F) }
+    fn is_control_forced_flush(b: u8) -> bool {
+        matches!(b, b'\n' | b'\r' | 0x08 | 0x7F)
+    }
 
     fn write_bytes_ansi(&mut self, data: &[u8]) {
-        for &b in data { self.ansi_feed(b); }
+        for &b in data {
+            self.ansi_feed(b);
+        }
         if self.output_buffer.len() >= Self::FLUSH_THRESHOLD {
             self.flush_output();
         }
@@ -51,25 +62,23 @@ impl Tty {
 
     fn ansi_feed(&mut self, b: u8) {
         match self.ansi_state {
-            AnsiState::Ground => {
-                match b {
-                    0x1B => {
-                        self.ansi_state = AnsiState::Esc;
-                        self.csi_buf.clear();
-                    }
-                    _ if Self::is_control_forced_flush(b) => {
-                        self.flush_output();
-                        self.term.put_char(b);
-                    }
-                    _ if Self::is_printable_ascii(b) => {
-                        self.output_buffer.push_back(b);
-                    }
-                    _ => {
-                        self.flush_output();
-                        self.term.put_char(b);
-                    }
+            AnsiState::Ground => match b {
+                0x1B => {
+                    self.ansi_state = AnsiState::Esc;
+                    self.csi_buf.clear();
                 }
-            }
+                _ if Self::is_control_forced_flush(b) => {
+                    self.flush_output();
+                    self.term.put_char(b);
+                }
+                _ if Self::is_printable_ascii(b) => {
+                    self.output_buffer.push_back(b);
+                }
+                _ => {
+                    self.flush_output();
+                    self.term.put_char(b);
+                }
+            },
             AnsiState::Esc => {
                 if b == b'[' {
                     self.ansi_state = AnsiState::Csi;
@@ -86,7 +95,9 @@ impl Tty {
                     self.handle_csi_final();
                     self.ansi_state = AnsiState::Ground;
                 } else {
-                    if self.csi_buf.len() < 64 { self.csi_buf.push(b); }
+                    if self.csi_buf.len() < 64 {
+                        self.csi_buf.push(b);
+                    }
                 }
             }
         }
@@ -102,8 +113,9 @@ impl Tty {
 
     fn handle_csi_final(&mut self) {
         let final_byte = *self.csi_buf.last().unwrap_or(&b'\0');
-        let params_str = core::str::from_utf8(&self.csi_buf[..self.csi_buf.len().saturating_sub(1)])
-            .unwrap_or("");
+        let params_str =
+            core::str::from_utf8(&self.csi_buf[..self.csi_buf.len().saturating_sub(1)])
+                .unwrap_or("");
 
         let params = String::from(params_str);
 
@@ -115,7 +127,11 @@ impl Tty {
             b'J' => {
                 // Erase in Display (ED)
                 // 0: from cursor to end, 1: from start to cursor, 2: entire screen
-                let param = if params.is_empty() { "0" } else { params.as_str() };
+                let param = if params.is_empty() {
+                    "0"
+                } else {
+                    params.as_str()
+                };
                 match param {
                     "2" => {
                         self.flush_output();
@@ -139,10 +155,18 @@ impl Tty {
     }
 
     fn apply_sgr(&mut self, params: &str) {
-        let mut it = if params.is_empty() { "0".split(';') } else { params.split(';') };
+        let mut it = if params.is_empty() {
+            "0".split(';')
+        } else {
+            params.split(';')
+        };
 
         while let Some(p) = it.next() {
-            let code = if p.is_empty() { 0 } else { p.parse::<i32>().unwrap_or(-1) };
+            let code = if p.is_empty() {
+                0
+            } else {
+                p.parse::<i32>().unwrap_or(-1)
+            };
 
             match code {
                 0 => {
@@ -150,8 +174,12 @@ impl Tty {
                     self.term.color = DEFAULT_FG;
                     self.term.bg_color = DEFAULT_BG;
                 }
-                1 => { self.sgr_bold = true; }
-                22 => { self.sgr_bold = false; }
+                1 => {
+                    self.sgr_bold = true;
+                }
+                22 => {
+                    self.sgr_bold = false;
+                }
 
                 30..=37 => {
                     let idx = (code - 30) as u8;
@@ -161,7 +189,9 @@ impl Tty {
                     let idx = (code - 90 + 8) as u8;
                     self.term.color = ansi16_color(idx, false);
                 }
-                39 => { self.term.color = DEFAULT_FG; }
+                39 => {
+                    self.term.color = DEFAULT_FG;
+                }
 
                 40..=47 => {
                     let idx = (code - 40) as u8;
@@ -171,7 +201,9 @@ impl Tty {
                     let idx = (code - 100 + 8) as u8;
                     self.term.bg_color = ansi16_color(idx, false);
                 }
-                49 => { self.term.bg_color = DEFAULT_BG; }
+                49 => {
+                    self.term.bg_color = DEFAULT_BG;
+                }
 
                 38 => {
                     if let Some(mode) = it.next() {
@@ -184,10 +216,12 @@ impl Tty {
                                 }
                             }
                             "2" => {
-                                let (r,g,b) = (it.next(), it.next(), it.next());
-                                if let (Some(r), Some(g), Some(b)) = (r,g,b) {
-                                    if let (Ok(r), Ok(g), Ok(b)) = (r.parse::<u8>(), g.parse::<u8>(), b.parse::<u8>()) {
-                                        self.term.color = rgb(r,g,b);
+                                let (r, g, b) = (it.next(), it.next(), it.next());
+                                if let (Some(r), Some(g), Some(b)) = (r, g, b) {
+                                    if let (Ok(r), Ok(g), Ok(b)) =
+                                        (r.parse::<u8>(), g.parse::<u8>(), b.parse::<u8>())
+                                    {
+                                        self.term.color = rgb(r, g, b);
                                     }
                                 }
                             }
@@ -207,10 +241,12 @@ impl Tty {
                                 }
                             }
                             "2" => {
-                                let (r,g,b) = (it.next(), it.next(), it.next());
-                                if let (Some(r), Some(g), Some(b)) = (r,g,b) {
-                                    if let (Ok(r), Ok(g), Ok(b)) = (r.parse::<u8>(), g.parse::<u8>(), b.parse::<u8>()) {
-                                        self.term.bg_color = rgb(r,g,b);
+                                let (r, g, b) = (it.next(), it.next(), it.next());
+                                if let (Some(r), Some(g), Some(b)) = (r, g, b) {
+                                    if let (Ok(r), Ok(g), Ok(b)) =
+                                        (r.parse::<u8>(), g.parse::<u8>(), b.parse::<u8>())
+                                    {
+                                        self.term.bg_color = rgb(r, g, b);
                                     }
                                 }
                             }
@@ -229,15 +265,21 @@ impl Tty {
     }
 
     fn flush_output(&mut self) {
-        if self.output_buffer.is_empty() { return; }
+        if self.output_buffer.is_empty() {
+            return;
+        }
 
         let mut tmp: Vec<u8> = Vec::with_capacity(self.output_buffer.len());
-        while let Some(b) = self.output_buffer.pop_front() { tmp.push(b); }
+        while let Some(b) = self.output_buffer.pop_front() {
+            tmp.push(b);
+        }
 
         let mut i = 0;
         while i < tmp.len() {
             let start = i;
-            while i < tmp.len() && Self::is_printable_ascii(tmp[i]) { i += 1; }
+            while i < tmp.len() && Self::is_printable_ascii(tmp[i]) {
+                i += 1;
+            }
             if i > start {
                 let s = unsafe { core::str::from_utf8_unchecked(&tmp[start..i]) };
                 self.term.write(s);
@@ -258,16 +300,19 @@ impl Tty {
 const DEFAULT_FG: u32 = 0xFFFFFF;
 const DEFAULT_BG: u32 = 0x101010;
 
-#[inline] fn rgb(r:u8,g:u8,b:u8)->u32 {
+#[inline]
+fn rgb(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 fn ansi16_color(idx: u8, bold_for_basic: bool) -> u32 {
     const P: [u32; 16] = [
-        0x000000, 0xAA0000, 0x00AA00, 0xAA5500, 0x0000AA, 0xAA00AA, 0x00AAAA, 0xAAAAAA,
-        0x555555, 0xFF5555, 0x55FF55, 0xFFFF55, 0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
+        0x000000, 0xAA0000, 0x00AA00, 0xAA5500, 0x0000AA, 0xAA00AA, 0x00AAAA, 0xAAAAAA, 0x555555,
+        0xFF5555, 0x55FF55, 0xFFFF55, 0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
     ];
     let mut i = idx.min(15);
-    if bold_for_basic && i < 8 { i += 8; }
+    if bold_for_basic && i < 8 {
+        i += 8;
+    }
     P[i as usize]
 }
 
@@ -290,8 +335,40 @@ fn xterm_256_to_rgb(n: u8) -> u32 {
 }
 
 impl VfsNodeOps for Tty {
-    fn read(&self, _device: &mut BlockDev, _lba: usize) -> Result<Vec<u8>, ()> {
-        Err(())
+    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
+        let mut i = 0;
+        loop {
+            let c = read_char() as u8;
+            buf[i] = c;
+
+            match c {
+                b'\n' => {
+                    i += 1;
+                    crate::print!("\n");
+                    break;
+                }
+                0x08 | 0x7F => {
+                    if i > 0 {
+                        i -= 1;
+                        buf[i] = b' ';
+                        crate::print!("{}", c as char);
+                    }
+                }
+                _ => {
+                    i += 1;
+                    if self.echo {
+                        crate::print!("{}", c as char);
+                    }
+                    if i >= buf.len() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let res = Vec::from(&buf[..i]);
+
+        Ok(res)
     }
 
     fn write(&mut self, _device: &mut BlockDev, _lba: usize, data: &[u8]) -> Result<(), ()> {
@@ -324,7 +401,9 @@ macro_rules! println {
 
 pub fn get_tty() -> &'static mut Tty {
     #[allow(static_mut_refs)]
-    unsafe { TTY.get_mut().unwrap() }
+    unsafe {
+        TTY.get_mut().unwrap()
+    }
 }
 
 #[doc(hidden)]
