@@ -6,7 +6,6 @@ pub mod metadata;
 
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
-use crate::driver::timer::pit::uptime;
 use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};

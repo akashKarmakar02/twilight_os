@@ -149,7 +149,6 @@ impl TwilightFrameBuffer {
         }
 
         let src_start = scroll * w;
-        let src_end = h * w;
         let dst_start = 0;
 
         // SAFER copy: use a manual copy to avoid overlap issues with copy_within
@@ -177,9 +176,7 @@ impl TwilightFrameBuffer {
         let scroll = lines as usize;
 
         let src_start = 0;
-        let src_end = (h - scroll) * w;
         let dst_start = scroll * w;
-        let dst_end = h * w;
 
         // Copy downwards safely to prevent overlap corruption
         for i in 0..(h - scroll) * w {

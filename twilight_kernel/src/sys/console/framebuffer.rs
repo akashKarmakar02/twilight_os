@@ -114,8 +114,6 @@ impl FramebufferTerminal {
 
     /// Scroll the framebuffer content up by one character row (16 pixels)
     fn scroll(&mut self) {
-        let fb = get_framebuffer();
-        let pitch = fb.width as usize;
         let char_height = 16;
 
         #[allow(static_mut_refs)]

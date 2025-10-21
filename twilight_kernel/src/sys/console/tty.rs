@@ -6,7 +6,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use core::fmt::Write;
-use crate::serial_prtinln;
 
 pub struct Tty {
     term: FramebufferTerminal,
@@ -91,6 +90,14 @@ impl Tty {
                 }
             }
         }
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        self.term.cursor_x -= 1;
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        self.term.cursor_x += 1;
     }
 
     fn handle_csi_final(&mut self) {

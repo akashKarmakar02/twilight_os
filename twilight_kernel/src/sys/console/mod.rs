@@ -9,7 +9,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::{Mutex, Once};
-use crate::sys::console::tty::Tty;
+use crate::sys::console::tty::{get_tty, Tty};
 
 pub mod font;
 pub mod framebuffer;
@@ -169,8 +169,14 @@ fn handle_console_input() {
                     }
                 }
             }
-            '\u{F702}' => {}
-            '\u{F703}' => {}
+            '\u{F702}' => {
+                let tty = get_tty();
+                tty.move_cursor_left();
+            }
+            '\u{F703}' => {
+                let tty = get_tty();
+                tty.move_cursor_right();
+            }
             _ => {
                 print!("{}", c);
                 STDIO.lock().push(c);
@@ -217,7 +223,7 @@ fn exec(cmd: &str, args: &[&str]) {
                 };
 
                 #[allow(static_mut_refs)]
-                if let Ok(process) = Process::new(buf.clone(), unsafe { DIR.as_str() }, args) {
+                if let Ok(process) = Process::new(buf.clone(), unsafe { DIR.as_str() }, args, 1) {
                     unsafe {
                         PROCESS_TABLE.get_mut().unwrap().run(process);
                     }

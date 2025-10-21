@@ -28,7 +28,8 @@ impl PartialEq for FileType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(u16)]
 pub enum VfsError {
     NotFound,
     NotDir,
