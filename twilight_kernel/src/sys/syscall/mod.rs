@@ -101,6 +101,23 @@ pub extern "sysv64" fn syscall_handler(
             // this is a demo implementation of settid_addr
             arg1 as i64
         }
+        SYS_CLOCK_GETTIME => {
+            if arg1 == 0 {
+                let timespec_ptr = arg2 as *mut Timespec;
+                let mut cmos = CMOS::new();
+                let unix_time: u64 = cmos.unix_time();
+
+                unsafe {
+                    if !timespec_ptr.is_null() {
+                        let timespec = &mut *timespec_ptr;
+                        timespec.tv_sec = unix_time as i64;
+                        timespec.tv_nsec = 0;
+                    }
+                }
+            }
+
+            0
+        }
         SYS_EXIT_GROUP => service::exit(),
         SYS_OPENAT => {
             let upath = UserPtr(arg2 as *const u8);
@@ -134,6 +151,9 @@ pub extern "sysv64" fn syscall_handler(
 
 
             service::pr_limit64(pid as i32, resource, new_limit, old_limit)
+        },
+        334 => {
+            -38
         }
         _ => {
             serial_prtinln!("Unknown syscall number: {}", syscall_number);
