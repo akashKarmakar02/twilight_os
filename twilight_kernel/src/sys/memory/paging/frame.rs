@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 
 use limine::memory_map;
 use spin::{Once};
-
+use crate::serial_prtinln;
 use super::mapper::*;
 use super::page::*;
 
@@ -123,6 +123,7 @@ impl LockedFrameAllocator {
 unsafe impl FrameAllocator<Size4KiB> for LockedFrameAllocator {
     fn allocate_frame(&self) -> Option<PhysFrame<Size4KiB>> {
         let phys = self.alloc(Size4KiB::SIZE as _)?;
+
         Some(PhysFrame::containing_address(phys))
     }
 

@@ -190,8 +190,6 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
         }
     };
 
-    serial_prtinln!("{}", full_path);
-
     // Try open existing
     let mut existed = true;
     #[allow(static_mut_refs)]
@@ -611,7 +609,41 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     0
 }
 
-pub fn fstat(_fd: usize, _fstat_ptr: usize) -> i64 {
+pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
+    let fstat = fstat_ptr as *mut FStat;
+
+    if fstat.is_null() {
+        return -1;
+    }
+
+    #[allow(static_mut_refs)]
+    let process = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()).unwrap() };
+
+    let handler = process.handler.get(fd - 3).unwrap();
+
+    let metadata = handler.handler.lock().metadata.clone();
+
+    let fstat = unsafe { &mut *fstat };
+
+    fstat.st_size = metadata.size as i64;
+    fstat.st_dev = 1;
+    fstat.st_ino = metadata.ino as u64;
+    fstat.st_uid = 1;
+    fstat.st_gid = 1;
+    fstat.st_nlink = 1;
+    fstat.st_ctime = Timespec { tv_sec: metadata.created_time as i64, tv_nsec: 0 };
+    fstat.st_mtime = Timespec { tv_sec: metadata.modified_time as i64, tv_nsec: 0 };
+    fstat.st_atime = Timespec { tv_sec: metadata.access_time as i64, tv_nsec: 0 };
+    fstat.st_mode = match metadata.file_type {
+        FileType::File => 0o100644,        // regular file: rw-r--r--
+        FileType::Dir => 0o040755,         // directory: rwxr-xr-x
+        FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
+        FileType::BlockDevice => 0o060660, // block device: rw-rw----
+    };
+    fstat.st_rdev = 0;
+    fstat.st_blksize = 2048;
+    fstat.st_blocks = metadata.size as i64 / 2048;
+
     0
 }
 
@@ -629,6 +661,9 @@ pub fn getcwd(buf_ptr: usize, buf_len: usize) -> i64 {
     let cwd = proc.pwd.as_str();
     let cwd_bytes = cwd.as_bytes();
     buf[..cwd_bytes.len()].copy_from_slice(cwd_bytes);
+    if buf.len() > cwd_bytes.len() {
+        buf[cwd_bytes.len()] = b'\0';
+    }
 
     buf.as_ptr() as i64
 }

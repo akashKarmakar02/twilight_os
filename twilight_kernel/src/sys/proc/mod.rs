@@ -1,13 +1,14 @@
 pub mod mem;
 pub mod switch;
 
+use alloc::borrow::ToOwned;
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::kernel_utils::exec::jump_to_user;
 use crate::println;
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
-use crate::sys::memory::{alloc_pages, dealloc_pages, frame_allocator, kernel_page_table, phys_mem_offset};
+use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -20,8 +21,7 @@ use object::{Object, ObjectSegment, SegmentFlags};
 use spin::mutex::Mutex;
 use spin::Once;
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame};
-use x86_64::VirtAddr;
+use crate::sys::memory::paging::{FrameAllocator, OffsetPageTable, PhysAddr, PhysFrame, VirtAddr, FRAME_ALLOCATOR};
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -141,24 +141,20 @@ impl Process {
     pub fn new(content_buf: Vec<u8>, pwd: &str, args: &[&str], parent_pid: u16) -> Result<Self, ()> {
         let (_, flags) = Cr3::read();
 
-        let page_table_frame = frame_allocator().allocate_frame().unwrap();
+        let page_table_frame = FRAME_ALLOCATOR.allocate_frame().unwrap();
 
         let page_table = crate::sys::memory::create_page_table(page_table_frame);
 
         let kernel_page_table = kernel_page_table();
 
-        let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
-
-        for (idx, (page, kernel_page)) in pages.enumerate() {
-            if idx > 135 {
-                *page = kernel_page.clone();
-            }
-        }
+        kernel_page_table.clone_into(page_table);
 
         let mut addr_size_vec: Vec<(u64, usize)> = Vec::new();
 
+        let x_table_frame = x86_64::structures::paging::frame::PhysFrame::containing_address(x86_64::PhysAddr::new(page_table_frame.start_address().as_u64()));
+
         unsafe {
-            Cr3::write(page_table_frame, flags);
+            Cr3::write(x_table_frame, flags);
         };
 
         let mut mapper =
@@ -348,6 +344,7 @@ pub fn exit() {
     if let Some(p_process) = table.get_process(process.parent_pid) {
         let page_table_frame = p_process.page_table_frame;
         let (_, flags) = Cr3::read();
+        let page_table_frame = x86_64::structures::paging::frame::PhysFrame::containing_address(x86_64::PhysAddr::new(page_table_frame.start_address().as_u64()));
         unsafe {
             Cr3::write(page_table_frame, flags);
         }
@@ -370,6 +367,8 @@ pub fn init() {
             .unwrap();
     }
     let (page_table_frame, _) = Cr3::read();
+    let page_table_frame = crate::sys::memory::paging::PhysFrame::containing_address(PhysAddr::new(page_table_frame.start_address().as_u64()));
+
     let page_table = crate::memory::create_page_table(page_table_frame);
     let mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 

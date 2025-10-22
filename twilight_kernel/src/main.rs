@@ -10,7 +10,6 @@
 #![feature(sync_unsafe_cell)]
 #![feature(ip_from)]
 extern crate alloc;
-
 #[macro_use]
 extern crate twilight_proc;
 
@@ -21,15 +20,17 @@ pub mod sys;
 pub mod task;
 pub mod utils;
 
+use alloc::vec::Vec;
 use core::arch::asm;
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::Ordering::SeqCst;
-use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, StackSizeRequest,
 };
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
+use limine::BaseRevision;
+use x86_64::instructions::hlt;
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -154,12 +155,15 @@ fn hcf() -> ! {
     }
 }
 use crate::kernel_utils::install::INITRAMFS;
+use crate::sys::console::init_tty;
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::task::executor;
 use sys::framebuffer::init_framebuffer;
 use sys::{fs, memory};
-use x86_64::VirtAddr;
-use crate::sys::console::init_tty;
+use crate::sys::memory::allocator::LockedHeap;
+
+#[global_allocator]
+static AERO_SYSTEM_ALLOCATOR: LockedHeap = LockedHeap::new_uninit();
 
 pub fn init(
     fb: &Framebuffer,
@@ -170,21 +174,31 @@ pub fn init(
 ) {
     driver::uart::init();
 
-    let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
+    let phys_mem_offset = memory::paging::VirtAddr::new(hhdm_response.offset());
 
     #[allow(static_mut_refs)]
     unsafe {
         memory::PHYSICAL_MEMORY_OFFSET.store(phys_mem_offset.as_u64(), SeqCst);
     }
-
     memory::paging::init(memory_map_response).expect("paging init failed");
-
-    arch::x86_64::gdt::init();
-    arch::x86_64::idt::init();
-    arch::x86_64::idt::init_pics();
+    serial_prtinln!("paging init success");
 
     memory::init(phys_mem_offset, memory_map_response.entries());
+    serial_prtinln!("memory init success");
 
+
+    arch::x86_64::gdt::init();
+    memory::paging::init_vm_frames();
+
+    arch::x86_64::idt::init();
+    arch::x86_64::idt::init_pics();
+    x86_64::instructions::interrupts::enable();
+
+
+    let mut vec = Vec::new();
+    vec.push(3);
+    serial_prtinln!("{:?}", vec);
+    hlt();
     init_framebuffer(fb);
 
     executor::init_executor();
@@ -206,8 +220,6 @@ pub fn init(
     arch::x86_64::syscall::init();
 
     sys::proc::init();
-
-    x86_64::instructions::interrupts::enable();
 
     let cpio_buf = unsafe {
         core::slice::from_raw_parts(cpio_file.addr() as *const u8, cpio_file.size() as usize)

@@ -27,7 +27,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use intrusive_collections::*;
 use spin::Once;
-
+use crate::serial_prtinln;
 use crate::utils::sync::{Mutex, MutexGuard};
 
 use super::paging::*;
@@ -202,7 +202,8 @@ pub fn init() {
 
 /// ## Panics
 /// * If the `vmalloc` allocator is not initialized.
-pub(super) fn get_vmalloc() -> MutexGuard<'static, Vmalloc> {
+pub fn get_vmalloc() -> MutexGuard<'static, Vmalloc> {
+
     VMALLOC
         .get()
         .expect("get_vmalloc: not initialized")

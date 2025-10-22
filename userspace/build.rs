@@ -168,16 +168,30 @@ fn has_c_sources(path: &Path) -> bool {
 fn build_rust(path: &Path) -> io::Result<()> {
     println!("Detected Rust project (Cargo.toml). Running cargo build (musl target)");
     // Use x86_64-unknown-linux-musl target; make sure the target is installed on the system
-    let status = Command::new("cargo")
+    println!("{}", path.to_str().unwrap());
+    // let s = Command::new("cd")
+    //     .arg(path.to_str().unwrap())
+    //     // .arg("&&")
+    //     // .arg("cargo")
+    //     // .arg("build")
+    //     // .arg("--release")
+    //     // .arg("&&")
+    //     // .arg("cd")
+    //     // .arg("..")
+    //     .status()?;
+    //
+    // if !s.success() {
+    //     return Err(io::Error::new(io::ErrorKind::Other, "cargo build failed"));
+    // }
+    let mut s = Command::new("cargo")
         .arg("build")
         .arg("--release")
-        .arg("--target")
-        .arg("x86_64-unknown-linux-musl")
         .current_dir(path)
-        .status()?;
-    if !status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "cargo build failed"));
-    }
+        .spawn()?;
+
+    s.wait()?;
+
+
     Ok(())
 }
 

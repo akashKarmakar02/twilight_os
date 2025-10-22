@@ -5,7 +5,6 @@ use alloc::boxed::Box;
 use aml::{AmlContext, AmlName, AmlValue, DebugVerbosity, Handler};
 use core::ptr::NonNull;
 use x86_64::instructions::port::Port;
-use x86_64::PhysAddr;
 
 static mut PM1A_CNT_BLK: u32 = 0;
 static mut SLP_TYPA: u16 = 0;
@@ -20,7 +19,7 @@ unsafe impl Sync for KernelAcpiHandler {}
 impl AcpiHandler for KernelAcpiHandler {
     #[allow(unsafe_code)]
     unsafe fn map_physical_region<T>(&self, physical_address: usize, size: usize) -> PhysicalMapping<Self, T> {
-        let phys_addr = PhysAddr::new(physical_address as u64);
+        let phys_addr = sys::memory::paging::PhysAddr::new(physical_address as u64);
         let virt_addr = phys_to_virt(phys_addr);
         let ptr = NonNull::new(virt_addr.as_mut_ptr()).unwrap();
         unsafe { PhysicalMapping::new(physical_address, ptr, size, size, Self) }
@@ -41,8 +40,8 @@ pub fn init() {
                 }
             }
             if let Ok(dsdt) = acpi.dsdt() {
-                let phys_addr = PhysAddr::new(dsdt.address as u64);
-                let virt_addr = sys::memory::phys_to_virt(phys_addr);
+                let phys_addr = sys::memory::paging::PhysAddr::new(dsdt.address as u64);
+                let virt_addr = phys_to_virt(phys_addr);
                 let ptr = virt_addr.as_ptr();
                 let table = unsafe {
                     core::slice::from_raw_parts(ptr , dsdt.length as usize)
@@ -153,6 +152,6 @@ impl Handler for KernelAmlHandler {
 }
 
 fn read_addr<T>(addr: usize) -> T where T: Copy {
-    let virtual_address = sys::memory::phys_to_virt(PhysAddr::new(addr as u64));
+    let virtual_address = phys_to_virt(sys::memory::paging::PhysAddr::new(addr as u64));
     unsafe { *virtual_address.as_ptr::<T>() }
 }

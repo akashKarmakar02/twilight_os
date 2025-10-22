@@ -1,4 +1,3 @@
-pub mod cd;
 pub mod df;
 pub mod dhcp;
 pub mod exec;

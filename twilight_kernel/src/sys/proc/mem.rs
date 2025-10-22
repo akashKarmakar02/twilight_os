@@ -1,5 +1,6 @@
-use x86_64::structures::paging::OffsetPageTable;
 use crate::sys::memory::{alloc_pages, dealloc_pages};
+use crate::sys::memory::paging::OffsetPageTable;
+
 pub const PAGE: usize = 4096;
 #[inline] pub fn align_up(x: usize, a: usize) -> usize { (x + a - 1) & !(a - 1) }
 #[inline] pub fn align_dn(x: usize, a: usize) -> usize { x & !(a - 1) }

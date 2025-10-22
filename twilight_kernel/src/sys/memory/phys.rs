@@ -1,7 +1,7 @@
-use crate::sys::memory::{frame_allocator, phys_to_virt};
+use crate::sys::memory::{phys_to_virt};
 use core::ptr::NonNull;
-use x86_64::structures::paging::FrameAllocator;
-use x86_64::PhysAddr;
+use x86_64::structures::paging::Size4KiB;
+use crate::sys::memory::paging::{FrameAllocator, PhysAddr, PhysFrame, FRAME_ALLOCATOR};
 
 #[derive(Clone, Debug)]
 pub struct PhysBuf {
@@ -22,7 +22,7 @@ impl PhysBuf {
         let mut first_frame = None;
 
         for i in 0..num_pages {
-            let frame = frame_allocator().allocate_frame().expect("Out of memory");
+            let frame: PhysFrame<Size4KiB> = FRAME_ALLOCATOR.allocate_frame().expect("Out of memory");
             if i == 0 {
                 first_frame = Some(frame);
             }

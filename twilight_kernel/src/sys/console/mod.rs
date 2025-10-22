@@ -201,7 +201,6 @@ fn exec(cmd: &str, args: &[&str]) {
         "df" => crate::kernel_utils::df::main(args),
         "touch" => crate::kernel_utils::touch::main(args),
         "mkdir" => crate::kernel_utils::mkdir::main(args),
-        "cd" => crate::kernel_utils::cd::main(args),
         "rm" => crate::kernel_utils::rm::main(args),
         "readelf" => crate::kernel_utils::readelf::main(args),
         "install" => crate::kernel_utils::install::main(),

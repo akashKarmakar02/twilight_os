@@ -1,3 +1,4 @@
 [workspace]
 members = ["twilight_common", "twilight_kernel", "twilight_proc", "userspace"]
-resolver = "2"
+#exclude = ["userspace/apps/logind"]
+resolver = "1"
