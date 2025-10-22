@@ -15,10 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with Aero. If not, see <https://www.gnu.org/licenses/>.
 
-// use super::slab::{SlabHeader, SmallSlab};
-// use super::vmalloc;
-use crate::utils::sync::IrqGuard;
-
 // struct Allocator {
 //     zones: [SmallSlab; 9],
 // }
@@ -260,12 +256,12 @@ use crate::utils::sync::IrqGuard;
 // }
 
 use crate::serial_prtinln;
+use crate::sys::memory::{mapper, MEMORY_MAP};
 use limine::memory_map::EntryType;
 use linked_list_allocator::LockedHeap;
-use x86_64::VirtAddr;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
-use crate::sys::memory::{mapper, MEMORY_MAP};
+use x86_64::VirtAddr;
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 
