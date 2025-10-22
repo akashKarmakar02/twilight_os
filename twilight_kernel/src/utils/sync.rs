@@ -67,3 +67,30 @@ impl<T: ?Sized> Drop for MutexGuard<'_, T> {
         }
     }
 }
+
+pub struct IrqGuard {
+    locked: bool,
+}
+
+impl IrqGuard {
+    /// Creates a new IRQ guard. See the [`IrqGuard`] documentation for more.
+    pub fn new() -> Self {
+        let locked = interrupts::are_enabled();
+
+        unsafe {
+            interrupts::disable();
+        }
+
+        Self { locked }
+    }
+}
+
+impl Drop for IrqGuard {
+    /// Drops the IRQ guard, enabling interrupts again. See the [`IrqGuard`]
+    /// documentation for more.
+    fn drop(&mut self) {
+        if self.locked {
+            unsafe { interrupts::enable() }
+        }
+    }
+}
