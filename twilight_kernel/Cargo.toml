@@ -15,6 +15,7 @@ pic8259 = { version = "0.11.0", features = ["nightly"] }
 spin = "0.9.8"
 iced-x86 = { version = "1.21.0", default-features = false, features = ["decoder", "no_std", "intel"] }
 bitflags = "2.9.0"
+hashbrown = "0.15.5"
 [target.'cfg(target_arch="x86_64")'.dependencies]
 x86_64 = "0.15.2"
 bit_field = "0.10.2"
@@ -23,6 +24,9 @@ futures-util = { version = "0.3.31", default-features = false, features = ["allo
 raw-cpuid = { version = "11.5.0", default-features = false }
 object = { version = "0.37.1", default-features = false, features = ["read"] }
 smoltcp = { version = "0.12.0", default-features = false, features = ["alloc", "medium-ethernet", "socket-tcp", "socket-udp", "socket-dhcpv4", "proto-ipv4", "proto-dhcpv4"] }
+
+intrusive-collections = "0.9"
+memoffset = "0.9"
 
 twilight_common = { path = "../twilight_common" }
 twilight_proc = { path = "../twilight_proc" }

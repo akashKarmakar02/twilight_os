@@ -1,6 +1,6 @@
 use core::arch::asm;
 use core::ops::RangeInclusive;
-
+use core::sync::atomic::AtomicU64;
 use super::FRAME_ALLOCATOR;
 use super::addr::{PhysAddr, VirtAddr};
 use super::page::{AddressNotAligned, Page, PageSize, PhysFrame, Size1GiB, Size2MiB, Size4KiB};
