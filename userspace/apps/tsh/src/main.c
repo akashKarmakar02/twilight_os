@@ -14,6 +14,7 @@
  * prints errno.
  */
 
+#include <ctype.h>
 #define _GNU_SOURCE
 #include <errno.h>
 #include <limits.h>
@@ -25,6 +26,120 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+static void free_argv(char **argv) {
+  if (!argv)
+    return;
+  for (size_t i = 0; argv[i]; i++)
+    free(argv[i]);
+  free(argv);
+}
+
+static int parse_argv(const char *line, char ***argv_out) {
+  *argv_out = NULL;
+  if (!line)
+    return 0;
+
+  size_t cap = 8, argc = 0;
+  char **argv = malloc(cap * sizeof *argv);
+  if (!argv)
+    return 0;
+
+  const char *p = line;
+  while (*p) {
+    /* skip whitespace */
+    while (*p && isspace((unsigned char)*p))
+      p++;
+    if (!*p)
+      break;
+
+    /* collect one argument into a temp buffer */
+    size_t outcap = 64, outlen = 0;
+    char *out = malloc(outcap);
+    if (!out) {
+      free_argv(argv);
+      return 0;
+    }
+
+    int in_single = 0, in_double = 0;
+    while (*p) {
+      unsigned char c = (unsigned char)*p;
+
+      if (!in_single && !in_double && isspace(c))
+        break;
+
+      if (!in_double && c == '\'') {
+        in_single = !in_single;
+        p++;
+        continue;
+      }
+      if (!in_single && c == '"') {
+        in_double = !in_double;
+        p++;
+        continue;
+      }
+
+      if (c == '\\') {
+        /* Backslash escapes: active outside quotes and inside double quotes */
+        const char *next = p + 1;
+        if (*next) {
+          char e = *next;
+          if (!in_single) {
+            /* Common escapes */
+            if (e == 'n')
+              c = '\n';
+            else if (e == 't')
+              c = '\t';
+            else
+              c = e; /* \", \\, \ , etc. */
+            p += 2;
+          } else {
+            /* In single quotes, backslash is literal */
+            c = '\\';
+            p++;
+          }
+        } else { /* trailing backslash → literal */
+          p++;
+          c = '\\';
+        }
+      } else {
+        p++;
+      }
+
+      if (outlen + 1 >= outcap) {
+        outcap *= 2;
+        char *tmp = realloc(out, outcap);
+        if (!tmp) {
+          free(out);
+          free_argv(argv);
+          return 0;
+        }
+        out = tmp;
+      }
+      out[outlen++] = (char)c;
+    }
+
+    /* close any unclosed quotes (like sh does) — we just end token */
+    out[outlen] = '\0';
+
+    if (argc + 2 > cap) {
+      cap *= 2;
+      char **tmp = realloc(argv, cap * sizeof *argv);
+      if (!tmp) {
+        free(out);
+        free_argv(argv);
+        return 0;
+      }
+      argv = tmp;
+    }
+    argv[argc++] = out;
+    /* argv[argc] left for NULL later */
+  }
+
+  argv[argc] = NULL;
+  *argv_out = argv;
+  return (int)argc;
+}
 
 static void rstrip_newline(char *s) {
   size_t n = strlen(s);
@@ -96,18 +211,39 @@ static const char *get_hostname(char *buf, size_t bufsz) {
 static const char *get_cwd_short(char *buf, size_t bufsz) {
   if (!buf || bufsz == 0)
     return "/";
-  if (getcwd(buf, bufsz) == NULL) {
-    /* fallback */
-    strncpy(buf, "/", bufsz - 1);
-    buf[bufsz - 1] = '\0';
-    return buf;
+  char dbuf[bufsz];
+
+  printf("dbuf: %s\n", dbuf);
+  getcwd(dbuf, sizeof(dbuf));
+  strncpy(buf, dbuf, bufsz - 1);
+  for (int i = 0; i < sizeof(dbuf); i++) {
+    if (dbuf[i] == '\0') {
+      printf("%d\n", i);
+      buf[i] = '\0';
+      break;
+    }
   }
-  /* Optionally, shorten home to ~ if you want:
-     const char *home = getenv("HOME");
-     if (home && strncmp(buf, home, strlen(home)) == 0) { ... }
-     For now we'll show full cwd like /home/user/projects
-  */
+
   return buf;
+}
+
+static char *trim(char *s) {
+  if (!s)
+    return s;
+
+  // Trim leading whitespace
+  while (isspace((unsigned char)*s))
+    s++;
+
+  // Trim trailing whitespace
+  if (*s == '\0')
+    return s; // all spaces
+  char *end = s + strlen(s) - 1;
+  while (end > s && isspace((unsigned char)*end))
+    end--;
+  *(end + 1) = '\0';
+
+  return s;
 }
 
 static void build_prompt(char *out, size_t outsz) {
@@ -144,17 +280,45 @@ int main(void) {
 
     if (!fgets(line, sizeof line, stdin))
       break;
-
     rstrip_newline(line);
     char *cmdline = lstrip(line);
     if (*cmdline == '\0')
-      continue; /* empty line */
+      continue;
 
-    if (strcmp(cmdline, "exit") == 0)
+    char **argv = NULL;
+    int argc = parse_argv(cmdline, &argv);
+    if (argc <= 0) {
+      free_argv(argv);
+      continue;
+    }
+
+    if (strcmp(argv[0], "exit") == 0)
       break;
+    if (strcmp(argv[0], "cd") == 0) {
+      if (argc < 2) {
+        printf("cd: usage cd <dir>\n");
+        continue;
+      } else {
+        int res = chdir(trim(argv[1]));
+        if (res == -1) {
+          fprintf(stderr, "tsh: cd: %s\n", strerror(errno));
+        }
+        continue;
+      }
+    }
     char *space = strchr(cmdline, ' ');
     if (space)
       *space = '\0';
+
+    /* Copy argv[0] into cmdline safely: cmdline points into 'line', so compute
+       remaining space in 'line' and use snprintf to avoid the strncpy-sizeof
+       mismatch. */
+    {
+      size_t cmdcap = sizeof(line) - (size_t)(cmdline - line);
+      if (cmdcap == 0)
+        cmdcap = 1;
+      snprintf(cmdline, cmdcap, "%s", argv[0]);
+    }
 
     /* If cmdline doesn't start with '/', prefix it with "/bin/" */
     char fullpath[512];
@@ -165,9 +329,6 @@ int main(void) {
       snprintf(fullpath, sizeof(fullpath), "/bin/%s", cmdline);
       path = fullpath;
     }
-
-    /* Build argv */
-    char *const argv[] = {(char *)path, space ? space + 1 : NULL, NULL};
 
     /* Provide an empty environment vector (safer than NULL on custom kernels)
      */
