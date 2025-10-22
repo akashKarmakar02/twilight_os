@@ -54,10 +54,12 @@ static mut TASK_B_CTX_SP: *mut Context = core::ptr::null_mut();
 static mut BOOT_CTX_SP: *mut Context = core::ptr::null_mut();
 
 extern "C" fn task_a() -> ! {
-    for i in 0..5 {
+    for i in 0..10 {
         println!("[A] tick {i}");
         #[allow(static_mut_refs)]
-        unsafe { yield_to(&mut TASK_B_CTX_SP, &mut TASK_A_CTX_SP) };
+        if unsafe { !TASK_B_DONE } {
+            unsafe { yield_to(&mut TASK_B_CTX_SP, &mut TASK_A_CTX_SP) };
+        }
     }
     println!("[A] done");
     #[allow(static_mut_refs)]
@@ -68,7 +70,9 @@ extern "C" fn task_b() -> ! {
     for i in 0..5 {
         println!("[B] tick {i}");
         #[allow(static_mut_refs)]
-        unsafe { yield_to(&mut TASK_A_CTX_SP, &mut TASK_B_CTX_SP) };
+        if unsafe { !TASK_A_DONE } {
+            unsafe { yield_to(&mut TASK_A_CTX_SP, &mut TASK_B_CTX_SP) };
+        }
     }
     println!("[B] done");
     #[allow(static_mut_refs)]
