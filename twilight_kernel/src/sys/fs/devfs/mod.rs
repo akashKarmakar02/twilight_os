@@ -38,12 +38,16 @@ impl DevFs {
 struct DirNodeOps;
 
 impl VfsNodeOps for DirNodeOps {
-    fn read(&self, _device: &mut BlockDev) -> Result<Vec<u8>, ()> {
+    fn read(&self, _device: &mut BlockDev, _lba: usize) -> Result<Vec<u8>, ()> {
         Err(())
     }
 
-    fn write(&mut self, _device: &mut BlockDev, _data: &[u8]) -> Result<(), ()> {
+    fn write(&mut self, _device: &mut BlockDev, _lba: usize, _data: &[u8]) -> Result<(), ()> {
         Err(())
+    }
+
+    fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
+        Ok(true)
     }
 }
 

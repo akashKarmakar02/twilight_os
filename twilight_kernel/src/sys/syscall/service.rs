@@ -582,9 +582,10 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
 
     user_stat.st_size = metadata.size as i64;
     user_stat.st_mode = match metadata.file_type {
-        FileType::File | FileType::Dir => 0100755,
-        FileType::CharDevice => 020666,
-        FileType::BlockDevice => 060660,
+        FileType::File => 0o100644,        // regular file: rw-r--r--
+        FileType::Dir => 0o040755,         // directory: rwxr-xr-x
+        FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
+        FileType::BlockDevice => 0o060660, // block device: rw-rw----
     };
     user_stat.st_uid = 0;
     user_stat.st_gid = 0;

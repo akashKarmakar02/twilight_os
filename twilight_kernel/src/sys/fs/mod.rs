@@ -4,19 +4,19 @@ pub mod vfs;
 mod devfs;
 mod gdt;
 
-use crate::println;
-use crate::sys::fs::twilight_fs::MinixFs;
+use crate::sys::fs::devfs::DevFs;
 use crate::sys::fs::ram_fs::RamFS;
+use crate::sys::fs::twilight_fs::TwilightFs;
+use crate::sys::fs::vfs::VFS;
+use crate::println;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
-use crate::sys::fs::devfs::DevFs;
-use crate::sys::fs::vfs::VFS;
 
 pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
-pub static MFS: OnceCell<Mutex<MinixFs>> = OnceCell::uninit();
+pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
 
 pub const KERNEL_PADDING: usize = 4 * 1024 * 1024;
 
@@ -38,14 +38,14 @@ pub fn init(show_log: bool) {
     let uptime = crate::driver::timer::pit::uptime();
     for bus in 0..2 {
         for dsk in 0..2 {
-            if let Ok(mfs) = MinixFs::check_ata(bus, dsk) {
+            if let Ok(mfs) = TwilightFs::check_ata(bus, dsk) {
                 if let Err(_) = MFS.try_init_once(|| Mutex::new(mfs)) {
                     println!("MFS already initialized");
                     return;
                 }
                 #[allow(static_mut_refs)]
                 unsafe {
-                    VFS.get_mut().mount("/", Arc::new(Mutex::new(MinixFs::check_ata(bus, dsk).unwrap())));
+                    VFS.get_mut().mount("/", Arc::new(Mutex::new(TwilightFs::check_ata(bus, dsk).unwrap())));
                 }
                 #[allow(static_mut_refs)]
                 unsafe {
@@ -53,7 +53,7 @@ pub fn init(show_log: bool) {
                 }
                 if show_log {
                     println!(
-                        "\x1b[93m[{:.6}]\x1b[0m MinixFS Superblock found in ATA {}:{}",
+                        "\x1b[93m[{:.6}]\x1b[0m TwilightFS Superblock found in ATA {}:{}",
                         uptime, bus, dsk
                     );
                 }
@@ -65,7 +65,7 @@ pub fn init(show_log: bool) {
     unsafe {
         VFS.get_mut().mount("/dev", Arc::new(Mutex::new(DevFs::new())));
     }
-    println!("\x1b[93m[{:.6}]\x1b[0m No MinixFS Superblock found", uptime);
+    println!("\x1b[93m[{:.6}]\x1b[0m No TwilightFS Superblock found", uptime);
     println!("\x1b[93mWarning\x1b[0m Trying running 'install' to install Twilight OS");
 }
 

@@ -1,4 +1,4 @@
-use crate::sys;
+use crate::{serial_prtinln, sys};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -8,7 +8,7 @@ use crate::sys::fs::vfs::BlockDev;
 
 pub mod ata;
 
-pub const BLOCK_SIZE: usize = 512;
+pub const BLOCK_SIZE: usize = 2048;
 
 pub static mut BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
 

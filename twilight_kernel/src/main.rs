@@ -8,6 +8,7 @@
 #![feature(allocator_api)]
 #![feature(stmt_expr_attributes)]
 #![feature(sync_unsafe_cell)]
+#![feature(ip_from)]
 extern crate alloc;
 
 #[macro_use]
