@@ -128,7 +128,7 @@ unsafe extern "C" fn kmain() -> ! {
     println!(r"  |    |   \     /|  |  |_|  / /_/  |   Y  \  |   /    |    \/        \ ");
     println!(r"  |____|    \/\_/ |__|____/__\___  /|___|  /__|   \_______  /_______  / ");
     println!(r"                            /_____/      \/               \/        \/  ");
-
+    sys::proc::switch::switch_demo();
     // sys::console::framebuffer::init();
     sys::console::init_console();
 

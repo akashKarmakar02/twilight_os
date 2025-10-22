@@ -63,7 +63,8 @@ pub extern "sysv64" fn syscall_handler(
         SYS_EXIT => service::exit(),
         SYS_UNAME => service::uname(arg1 as usize),
         SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
-        SYS_GET_EUID => 1,
+        SYS_CHDIR => service::chdir(arg1 as usize),
+        SYS_GET_EUID => 0,
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
         SYS_GET_TID => {
             crate::sys::proc::id() as i64

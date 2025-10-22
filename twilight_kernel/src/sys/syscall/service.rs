@@ -1,10 +1,10 @@
-use crate::arch::x86_64::io::{rdmsr, wrmsr, IA32_FS_BASE, IA32_GS_BASE};
+use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
 use crate::driver::disk::dummy_blockdev;
-use crate::sys::console::tty::get_tty;
 use crate::sys::console::DIR;
-use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
-use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
-use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
+use crate::sys::console::tty::get_tty;
+use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
+use crate::sys::proc::{Handler, PROCESS_TABLE, Process, USER_STACK_SIZE};
+use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array};
 use crate::{print, serial_prtinln};
 use alloc::boxed::Box;
 use alloc::format;
@@ -292,7 +292,12 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         .pwd
         .clone();
 
-    if let Ok(p) = Process::new(elf_buf, pwd.as_str(), argv.as_slice(), crate::sys::proc::id()) {
+    if let Ok(p) = Process::new(
+        elf_buf,
+        pwd.as_str(),
+        argv.as_slice(),
+        crate::sys::proc::id(),
+    ) {
         unsafe { asm!("swapgs") };
         process_table.run(p);
     } else {
@@ -559,11 +564,15 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     let Ok(mut file_path) = copy_cstr_from_user(file_name_ptr, 4096) else {
         return -1;
     };
-    
+
     if file_path.starts_with("./") {
         #[allow(static_mut_refs)]
         let pwd = unsafe { DIR.as_str() };
-        let calnonical_pwd = if pwd.ends_with("/") { pwd.to_string() } else { format!("{}/", pwd) };
+        let calnonical_pwd = if pwd.ends_with("/") {
+            pwd.to_string()
+        } else {
+            format!("{}/", pwd)
+        };
         file_path = file_path.replace("./", &calnonical_pwd.as_str());
     }
 
@@ -586,9 +595,18 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     user_stat.st_ino = metadata.ino as u64;
     user_stat.st_nlink = 1;
     user_stat.st_rdev = 0;
-    user_stat.st_atim = Timespec { tv_sec: metadata.access_time as i64, tv_nsec: 0 };
-    user_stat.st_ctim = Timespec { tv_sec: metadata.created_time as i64, tv_nsec: 0 };
-    user_stat.st_mtim = Timespec { tv_sec: metadata.modified_time as i64, tv_nsec: 0 };
+    user_stat.st_atim = Timespec {
+        tv_sec: metadata.access_time as i64,
+        tv_nsec: 0,
+    };
+    user_stat.st_ctim = Timespec {
+        tv_sec: metadata.created_time as i64,
+        tv_nsec: 0,
+    };
+    user_stat.st_mtim = Timespec {
+        tv_sec: metadata.modified_time as i64,
+        tv_nsec: 0,
+    };
 
     0
 }
@@ -600,11 +618,76 @@ pub fn fstat(_fd: usize, _fstat_ptr: usize) -> i64 {
 pub fn getcwd(buf_ptr: usize, buf_len: usize) -> i64 {
     let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
     #[allow(static_mut_refs)]
-    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()).unwrap() };
+    let proc = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
 
     let cwd = proc.pwd.as_str();
     let cwd_bytes = cwd.as_bytes();
     buf[..cwd_bytes.len()].copy_from_slice(cwd_bytes);
 
     buf.as_ptr() as i64
+}
+
+pub fn chdir(path_ptr: usize) -> i64 {
+    let Ok(path) = copy_cstr_from_user(UserPtr(path_ptr as *const u8), 4096) else {
+        return -1;
+    };
+
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
+
+    let dir_path = if path.starts_with("./") || !path.starts_with("/") {
+        #[allow(static_mut_refs)]
+        let pwd = process.pwd.as_str();
+        let calnonical_pwd = if pwd.ends_with("/") {
+            pwd.to_string()
+        } else {
+            format!("{}/", pwd)
+        };
+        format!("{}{}", calnonical_pwd, path.replace("./", ""))
+    } else {
+        path
+    };
+
+    let dir_path = if dir_path.ends_with("..") {
+        let parts = dir_path.split("/");
+        let mut vec = parts.collect::<Vec<&str>>();
+
+        vec.pop();
+        vec.pop();
+
+        if vec.is_empty() || (vec[0] == "" && vec.len() == 1) {
+            "/".to_string()
+        } else {
+            vec.join("/")
+        }
+
+    } else {
+        dir_path
+    };
+
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if let Ok(inode) = fs.open(dir_path.as_str()) {
+        if inode.metadata.file_type != FileType::Dir {
+            return -1;
+        }
+
+        process.pwd = dir_path;
+        0
+    } else {
+        -1
+    }
 }
