@@ -1,7 +1,6 @@
 extern crate alloc;
 
 use crate::arch::x86_64::halt;
-use crate::sys::console::writer::clear_screen;
 use crate::sys::fs::vfs::VFS;
 use crate::sys::proc::{PROCESS_TABLE, Process};
 use crate::sys::tty::read_char;
@@ -9,18 +8,33 @@ use crate::{print, println, serial_prtinln};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
+use spin::{Mutex, Once};
+use crate::sys::console::tty::{get_tty, Tty};
 
 pub mod font;
-pub mod writer;
+pub mod framebuffer;
+pub mod tty;
 
 pub static STDIO: Mutex<String> = Mutex::new(String::new());
 pub static CURSOR_POSITION: Mutex<usize> = Mutex::new(0);
+pub static mut TTY: Once<Tty> = Once::new();
 
 pub static mut DIR: String = String::new();
 
 static mut CONSOLE_HISTORY: Vec<String> = Vec::new();
 static mut CONSOLE_HISTORY_INDEX: Mutex<usize> = Mutex::new(0);
+
+pub fn init_tty() {
+    #[allow(static_mut_refs)]
+    unsafe {
+        TTY.call_once(|| {
+            let tty = Tty::new();
+            let mut cur_pos = CURSOR_POSITION.lock();
+            *cur_pos = 2;
+            tty
+        });
+    }
+}
 
 pub fn init_console() {
     #[allow(static_mut_refs)]
@@ -46,6 +60,11 @@ fn handle_console_input() {
         halt();
         let c = read_char();
         match c {
+            '\r' => {
+                if !STDIO.lock().is_empty() {
+                    print!("{}", c);
+                }
+            }
             '\n' => {
                 print!("\n");
                 let cmd_line;
@@ -150,8 +169,14 @@ fn handle_console_input() {
                     }
                 }
             }
-            '\u{F702}' => {}
-            '\u{F703}' => {}
+            '\u{F702}' => {
+                let tty = get_tty();
+                tty.move_cursor_left();
+            }
+            '\u{F703}' => {
+                let tty = get_tty();
+                tty.move_cursor_right();
+            }
             _ => {
                 print!("{}", c);
                 STDIO.lock().push(c);
@@ -164,15 +189,11 @@ fn handle_console_input() {
 
 fn exec(cmd: &str, args: &[&str]) {
     match cmd {
-        "clear" => {
-            clear_screen(true);
-        }
         "uptime" => {
             println!("{:.6} seconds", crate::driver::timer::pit::uptime());
         }
         "shutdown" => crate::kernel_utils::shutdown::main(),
         "meminfo" => crate::kernel_utils::meminfo::main(),
-        // "ls" => crate::kernel_utils::ls::main(args),
         "pitch" => {
             println!("{}", crate::sys::framebuffer::get_pitch());
         }
@@ -193,14 +214,16 @@ fn exec(cmd: &str, args: &[&str]) {
             #[allow(static_mut_refs)]
             let fs = unsafe { VFS.get_mut() };
 
-            if let Ok(mut node) = fs.open(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str()) {
+            if let Ok(mut node) =
+                fs.open(format!("/bin/{}", cmd.split_whitespace().next().unwrap()).as_str())
+            {
                 let Ok(buf) = node.read() else {
                     println!("{}: failed to read from file", cmd);
                     return;
                 };
 
                 #[allow(static_mut_refs)]
-                if let Ok(process) = Process::new(buf.clone(), unsafe { DIR.as_str() }, args) {
+                if let Ok(process) = Process::new(buf.clone(), unsafe { DIR.as_str() }, args, 1) {
                     unsafe {
                         PROCESS_TABLE.get_mut().unwrap().run(process);
                     }

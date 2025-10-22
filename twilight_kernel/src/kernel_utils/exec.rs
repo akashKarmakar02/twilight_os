@@ -6,10 +6,6 @@ use x86_64::structures::paging::PageTable;
 pub static PREVIOUS_TABLE: OnceCell<Mutex<PageTable>> = OnceCell::uninit();
 
 pub fn jump_to_user(entry_point: u64, stack_top: u64, user_cs: u64, user_ss: u64) {
-    use x86_64::registers::control::Cr3;
-
-    let (_, flags) = Cr3::read();
-    unsafe { Cr3::write(crate::sys::memory::get_page_table_frame(), flags) };
 
     let rip = entry_point;
     unsafe {
@@ -17,7 +13,7 @@ pub fn jump_to_user(entry_point: u64, stack_top: u64, user_cs: u64, user_ss: u64
         "cli",              // Disable interrupts
         "push {ss}",        // SS (user data segment)
         "push {stack}",     // RSP (stack pointer)
-        "push 0x200",       // RFLAGS (IF = 1 | bit 1 always set)
+        "push 0x202",       // RFLAGS (IF = 1 | bit 1 always set)
         "push {cs}",        // CS (user code segment)
         "push {rip}",       // RIP (entry point)
         "iretq",            // Return to ring 3

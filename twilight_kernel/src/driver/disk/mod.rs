@@ -1,10 +1,9 @@
-use crate::{serial_prtinln, sys};
+use crate::sys::fs::vfs::BlockDev;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use spin::mutex::Mutex;
-use crate::sys::fs::vfs::BlockDev;
 
 pub mod ata;
 
@@ -143,19 +142,6 @@ impl BlockDeviceIO for MemBlockDevice {
     fn block_count(&self) -> usize {
         self.dev.len()
     }
-}
-
-pub fn mount_mem() {
-    let mem = (sys::memory::allocator::get_total_heap_size()
-        - sys::memory::allocator::get_used_heap_size())
-        / 2;
-    let len = mem / BLOCK_SIZE;
-    let dev = Box::leak(Box::new(MemBlockDevice::new(len)));
-
-    #[allow(static_mut_refs)]
-    unsafe {
-        BLOCK_DEVICE = Some(dev)
-    };
 }
 
 pub fn mount_ata(bus: u8, dsk: u8) {

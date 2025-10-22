@@ -77,9 +77,7 @@ impl IrqGuard {
     pub fn new() -> Self {
         let locked = interrupts::are_enabled();
 
-        unsafe {
-            interrupts::disable();
-        }
+        interrupts::disable();
 
         Self { locked }
     }
@@ -90,7 +88,7 @@ impl Drop for IrqGuard {
     /// documentation for more.
     fn drop(&mut self) {
         if self.locked {
-            unsafe { interrupts::enable() }
+            interrupts::enable();
         }
     }
 }

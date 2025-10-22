@@ -28,7 +28,8 @@ impl PartialEq for FileType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone, Copy)]
+#[repr(u16)]
 pub enum VfsError {
     NotFound,
     NotDir,
@@ -99,7 +100,7 @@ impl VfsNode {
     }
 
     pub fn read(&mut self) -> Result<Vec<u8>, ()> {
-        self.node.read().read(&mut self.device, 0)
+        self.node.read().read(&mut self.device, 0, &mut [])
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<(), ()> {
@@ -108,7 +109,7 @@ impl VfsNode {
 }
 
 pub trait VfsNodeOps: Send + Sync + 'static {
-    fn read(&self, device: &mut BlockDev, lba: usize) -> Result<Vec<u8>, ()>;
+    fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()>;
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()>;
     fn poll(&self, device: &mut BlockDev) -> Result<bool, ()>;
 

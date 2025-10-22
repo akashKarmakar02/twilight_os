@@ -1,11 +1,12 @@
 CC ?= musl-gcc
-CFLAGS ?= -O2 -static
-BIN = tsh
+CFLAGS ?= -O2 -static -Wall -Wextra
 
+BIN := clear
 SRC_DIR := src
 SRCS := $(wildcard $(SRC_DIR)/*.c)
 OBJS := $(SRCS:.c=.o)
 
+.PHONY: all clean install
 
 all: $(BIN)
 

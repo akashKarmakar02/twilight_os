@@ -31,7 +31,7 @@ pub extern "sysv64" fn syscall_handler(
             let ptr = arg2 as *mut u8;
             let len = arg3;
             let buf = unsafe { core::slice::from_raw_parts_mut(ptr, len as usize) };
-            read(arg1 as usize, buf, len as usize)
+            read(arg1 as usize, buf)
         }
         SYS_WRITE => service::write(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_OPEN => {
@@ -46,6 +46,7 @@ pub extern "sysv64" fn syscall_handler(
             service::open(&path, flags, mode as u32)
         }
         SYS_STAT => service::stat(arg1 as usize, arg2 as usize),
+        SYS_FSTAT => service::fstat(arg1 as usize, arg2 as usize),
         SYS_POLL => {
             // mock implementation of poll
             1
@@ -61,6 +62,9 @@ pub extern "sysv64" fn syscall_handler(
         SYS_EXECVE => service::execev(arg1 as usize, arg2 as usize, arg3 as usize),
         SYS_EXIT => service::exit(),
         SYS_UNAME => service::uname(arg1 as usize),
+        SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
+        SYS_CHDIR => service::chdir(arg1 as usize),
+        SYS_GET_EUID => 0,
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
         SYS_GET_TID => {
             crate::sys::proc::id() as i64
@@ -100,6 +104,23 @@ pub extern "sysv64" fn syscall_handler(
             // this is a demo implementation of settid_addr
             arg1 as i64
         }
+        SYS_CLOCK_GETTIME => {
+            if arg1 == 0 {
+                let timespec_ptr = arg2 as *mut Timespec;
+                let mut cmos = CMOS::new();
+                let unix_time: u64 = cmos.unix_time();
+
+                unsafe {
+                    if !timespec_ptr.is_null() {
+                        let timespec = &mut *timespec_ptr;
+                        timespec.tv_sec = unix_time as i64;
+                        timespec.tv_nsec = 0;
+                    }
+                }
+            }
+
+            0
+        }
         SYS_EXIT_GROUP => service::exit(),
         SYS_OPENAT => {
             let upath = UserPtr(arg2 as *const u8);
@@ -133,6 +154,9 @@ pub extern "sysv64" fn syscall_handler(
 
 
             service::pr_limit64(pid as i32, resource, new_limit, old_limit)
+        },
+        334 => {
+            -38
         }
         _ => {
             serial_prtinln!("Unknown syscall number: {}", syscall_number);
