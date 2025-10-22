@@ -16,11 +16,17 @@ static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();
 
 pub(crate) static mut PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
 static ALLOCATED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static mut KERNEL_PAGE_TABLE_FRAME: PhysFrame = PhysFrame::containing_address(PhysAddr::new(0));
 static MEMORY_MAP: OnceCell<&'static[&Entry]> = OnceCell::uninit();
 
 
 pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static [&Entry]) {
     let level_4_table = unsafe { active_level_4_table() };
+    let (frame, _) = x86_64::registers::control::Cr3::read();
+    #[allow(static_mut_refs)]
+    unsafe {
+        KERNEL_PAGE_TABLE_FRAME = frame;
+    }
     #[allow(static_mut_refs)]
     unsafe {
         MAPPER.call_once(|| {
@@ -34,7 +40,6 @@ pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static [&Entry]) {
     MEMORY_MAP.try_init_once(|| memory_map).unwrap();
 
     allocator::init_heap(&mut frame_allocator).expect("Failed to initialize heap");
-
 }
 
 
@@ -75,6 +80,19 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
         // creating an iterator for each allocation become very slow.
         self.usable_frames().nth(next)
     }
+}
+
+
+pub(crate) fn kernel_page_table() -> &'static mut PageTable {
+    #[allow(static_mut_refs)]
+    let frame = unsafe { KERNEL_PAGE_TABLE_FRAME };
+
+    let phys = frame.start_address();
+    let virt = VirtAddr::new(phys.as_u64() + phys_mem_offset());
+    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
+
+
+    unsafe { &mut *page_table_ptr }
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]

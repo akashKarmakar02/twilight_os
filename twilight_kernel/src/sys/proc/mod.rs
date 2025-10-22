@@ -20,7 +20,7 @@ use object::{Object, ObjectSegment, SegmentFlags};
 use spin::mutex::Mutex;
 use spin::Once;
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame};
+use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame};
 use x86_64::VirtAddr;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();

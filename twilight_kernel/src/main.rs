@@ -255,7 +255,7 @@ macro_rules! extern_sym {
     }};
 }
 
-#[alloc_error_handler]
-fn alloc_error(layout: alloc::alloc::Layout) -> ! {
-    panic!("allocation error: {:?}", layout);
-}
+// #[alloc_error_handler]
+// fn alloc_error(layout: alloc::alloc::Layout) -> ! {
+//     panic!("allocation error: {:?}", layout);
+// }

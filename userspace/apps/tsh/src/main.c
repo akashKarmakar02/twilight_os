@@ -213,16 +213,9 @@ static const char *get_cwd_short(char *buf, size_t bufsz) {
     return "/";
   char dbuf[bufsz];
 
-  printf("dbuf: %s\n", dbuf);
   getcwd(dbuf, sizeof(dbuf));
   strncpy(buf, dbuf, bufsz - 1);
-  for (int i = 0; i < sizeof(dbuf); i++) {
-    if (dbuf[i] == '\0') {
-      printf("%d\n", i);
-      buf[i] = '\0';
-      break;
-    }
-  }
+  buf[bufsz - 1] = '\0';
 
   return buf;
 }
