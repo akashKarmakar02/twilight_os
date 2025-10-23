@@ -5,7 +5,7 @@ use alloc::borrow::ToOwned;
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::kernel_utils::exec::jump_to_user;
-use crate::println;
+use crate::{println, serial_prtinln};
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
 use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
@@ -21,7 +21,7 @@ use object::{Object, ObjectSegment, SegmentFlags};
 use spin::mutex::Mutex;
 use spin::Once;
 use x86_64::registers::control::Cr3;
-use crate::sys::memory::paging::{FrameAllocator, OffsetPageTable, PhysAddr, PhysFrame, VirtAddr, FRAME_ALLOCATOR};
+use crate::sys::memory::paging::{FrameAllocator, OffsetPageTable, PhysAddr, PhysFrame, Translate, VirtAddr, FRAME_ALLOCATOR};
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -254,6 +254,7 @@ impl Process {
                         let src = data.as_ptr();
                         let dst = base_addr as *mut u8;
                         unsafe {
+                            println!("copy data from {:X} to {:X}", src as u64, dst as u64);
                             core::ptr::copy_nonoverlapping(src, dst, data.len());
                             if size > data.len() {
                                 core::ptr::write_bytes(dst.add(data.len()), 0, size - data.len());

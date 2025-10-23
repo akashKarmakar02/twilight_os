@@ -6,6 +6,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use limine::framebuffer::Framebuffer;
 use spin::Once;
+use x86_64::instructions::hlt;
 
 #[allow(static_mut_refs)]
 pub static mut FRAMEBUFFER: Once<TwilightFrameBuffer> = Once::new();
@@ -19,6 +20,11 @@ pub struct TwilightFrameBuffer {
 
 impl TwilightFrameBuffer {
     pub fn new(fb: &Framebuffer) -> Self {
+        let mut pixel_buf = Vec::new();
+        for i in 0..(fb.width() * fb.height()) as usize {
+            // serial_prtinln!("{i}");
+            pixel_buf.push(0);
+        }
         let w = fb.width();
         let h = fb.height();
         Self {
@@ -26,7 +32,7 @@ impl TwilightFrameBuffer {
             width: w,
             height: h,
             pitch: fb.pitch(),                    // bytes per scanline in VRAM
-            pixel_buf: vec![0; (w * h) as usize], // compact RGBx buffer (u32 per pixel)
+            pixel_buf, // compact RGBx buffer (u32 per pixel)
         }
     }
 

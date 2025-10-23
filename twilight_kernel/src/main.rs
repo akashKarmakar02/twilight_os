@@ -21,6 +21,7 @@ pub mod task;
 pub mod utils;
 
 use alloc::vec::Vec;
+use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::Ordering::SeqCst;
@@ -192,13 +193,28 @@ pub fn init(
 
     arch::x86_64::idt::init();
     arch::x86_64::idt::init_pics();
-    x86_64::instructions::interrupts::enable();
+    // x86_64::instructions::interrupts::enable();
 
 
-    let mut vec = Vec::new();
-    vec.push(3);
-    serial_prtinln!("{:?}", vec);
-    hlt();
+    // unsafe {
+    //     let ptr = AERO_SYSTEM_ALLOCATOR.alloc(Layout::from_size_align_unchecked(4096000, 4));
+    //     serial_prtinln!("{:p}", ptr);
+    //     let num_ptr = ptr as *mut i32;
+    //     if num_ptr.is_null() {
+    //         panic!("alloc failed");
+    //     }
+    //     let num = &mut *num_ptr;
+    //
+    //     *num = 32;
+    //     serial_prtinln!("alloc success: {:p}, num: {}", ptr, *num);
+    // }
+
+    // let mut v = Vec::new();
+    // v.push(22);
+    // v.push(32);
+    // v.push(45);
+    // serial_prtinln!("{:?}", v);
+
     init_framebuffer(fb);
 
     executor::init_executor();
@@ -212,6 +228,7 @@ pub fn init(
     driver::nic::init();
     driver::usb::init();
     driver::cpu::init(mp_response);
+    // hlt();
     driver::disk::ata::init();
     fs::init(true);
 

@@ -3,6 +3,7 @@ use crate::{driver, println};
 use alloc::string::String;
 use limine::response::MpResponse;
 use raw_cpuid::CpuId;
+use x86_64::instructions::hlt;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::xcontrol::{XCr0, XCr0Flags};
 
@@ -78,7 +79,8 @@ pub fn init(mp_response: &'static MpResponse) {
         device_id,
         name
     );
-    init_smp(mp_response);
+    // hlt();
+    // init_smp(mp_response);
 }
 
 pub fn has_fsgsbase() -> bool {

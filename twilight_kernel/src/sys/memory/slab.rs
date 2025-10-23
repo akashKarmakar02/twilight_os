@@ -18,8 +18,9 @@
 use core::ptr::NonNull;
 
 use intrusive_collections::UnsafeRef;
-
+use x86_64::instructions::hlt;
 use crate::memory::paging::*;
+use crate::serial_prtinln;
 use crate::utils::sync::Mutex;
 
 #[repr(C)]

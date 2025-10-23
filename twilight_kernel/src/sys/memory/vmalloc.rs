@@ -27,6 +27,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use intrusive_collections::*;
 use spin::Once;
+use x86_64::instructions::hlt;
 use crate::serial_prtinln;
 use crate::utils::sync::{Mutex, MutexGuard};
 
@@ -99,6 +100,9 @@ impl Vmalloc {
     pub(super) fn alloc(&mut self, npages: usize) -> Option<VirtAddr> {
         // +1: area for the guard page.
         let size_bytes = (npages + 1) * Size4KiB::SIZE as usize;
+
+        serial_prtinln!("Allocating {} bytes", size_bytes);
+
 
         let (i, area) = self
             .free_list

@@ -24,18 +24,17 @@ use crate::utils::sync::IrqGuard;
 
 use core::alloc;
 use crate::memory::paging::*;
-use crate::serial_prtinln;
 
 struct Allocator {
-    zones: [SmallSlab; 9],
+    zones: [SmallSlab; 7],
 }
 
 impl Allocator {
     const fn new() -> Self {
         Self {
             zones: [
-                SmallSlab::new(8),
-                SmallSlab::new(16),
+                // SmallSlab::new(8),
+                // SmallSlab::new(16),
                 SmallSlab::new(32),
                 SmallSlab::new(64),
                 SmallSlab::new(128),
@@ -52,12 +51,14 @@ impl Allocator {
 
         let size = align_up(layout.size() as _, layout.align() as _) as u64;
 
+
         for slab in self.zones.iter() {
             if size as usize <= slab.size() {
                 return slab.alloc();
             }
         }
-        serial_prtinln!("fucking here");
+
+
         if size <= Size2MiB::SIZE {
             FRAME_ALLOCATOR
                 .alloc(size as usize)
@@ -67,10 +68,8 @@ impl Allocator {
         } else {
             let size = align_up(size as usize, Size4KiB::SIZE as usize) / Size4KiB::SIZE as usize;
 
-            vmalloc::get_vmalloc()
-                .alloc(size as usize)
-                .map(|addr| addr.as_mut_ptr::<u8>())
-                .unwrap()
+            let virt_addr = vmalloc::get_vmalloc().alloc(size).unwrap();
+            virt_addr.as_mut_ptr::<u8>()
         }
     }
 
@@ -217,7 +216,6 @@ unsafe impl GlobalAlloc for LockedHeap {
         #[cfg(feature = "kmemleak")]
         kmemleak::MEM_LEAK_CATCHER.track_caller(ptr, layout);
 
-        serial_prtinln!("allocating {} bytes", layout.size());
         self.0.alloc(layout)
     }
 
@@ -252,14 +250,14 @@ unsafe impl GlobalAlloc for LockedHeap {
     }
 }
 
-// #[alloc_error_handler]
-// fn alloc_error_handler(layout: alloc::Layout) -> ! {
-//     panic!(
-//         "Allocation error with size {} and layout {}",
-//         layout.size(),
-//         layout.align()
-//     )
-// }
+#[alloc_error_handler]
+fn alloc_error_handler(layout: alloc::Layout) -> ! {
+    panic!(
+        "Allocation error with size {} and layout {}",
+        layout.size(),
+        layout.align()
+    )
+}
 
 /// Initialize the heap at the [HEAP_START].
 pub fn init_heap() {

@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 
 use limine::memory_map;
 use spin::{Once};
+use x86_64::instructions::hlt;
 use crate::serial_prtinln;
 use super::mapper::*;
 use super::page::*;
