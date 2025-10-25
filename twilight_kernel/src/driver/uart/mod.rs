@@ -108,7 +108,7 @@ pub fn _print(args: fmt::Arguments) {
 }
 
 #[macro_export]
-macro_rules! serial_prtinln {
+macro_rules! serial_println {
     ($($arg:tt)*) => {
         $crate::serial_print!($($arg)*);
         crate::serial_print!("\n");

@@ -1,7 +1,7 @@
 use core::arch::asm;
 use x86_64::VirtAddr;
 use crate::driver::cpu::has_fsgsbase;
-use crate::serial_prtinln;
+use crate::serial_println;
 
 pub const IA32_EFER: u32 = 0xc0000080;
 
@@ -284,7 +284,7 @@ pub fn set_inactive_gsbase() -> fn(base: VirtAddr) {
     }
 
     fn with_wrmsr(base: VirtAddr) {
-        serial_prtinln!("Here");
+        serial_println!("Here");
         wrmsr(IA32_KERNEL_GSBASE, base.as_u64());
     }
 

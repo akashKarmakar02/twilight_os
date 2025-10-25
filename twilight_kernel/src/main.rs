@@ -137,7 +137,7 @@ unsafe extern "C" fn kmain() -> ! {
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_prtinln!("[PANIC]: {}", info);
+    serial_println!("[PANIC]: {}", info);
     hcf();
 }
 
@@ -176,8 +176,6 @@ pub fn init(
     unsafe {
         memory::PHYSICAL_MEMORY_OFFSET.store(phys_mem_offset.as_u64(), SeqCst);
     }
-
-    memory::paging::init(memory_map_response).expect("paging init failed");
 
     arch::x86_64::gdt::init();
     arch::x86_64::idt::init();
@@ -218,6 +216,8 @@ pub fn init(
         *INITRAMFS.lock() = cpio;
     }
 
+    kernel_utils::dhcp::main();
+    
     // #[allow(static_mut_refs)]
     // if let Some(fb) = unsafe { FRAMEBUFFER.get_mut() } {
     //     fb.animate_bouncing_rect(3000);
@@ -230,7 +230,7 @@ pub fn init(
 macro_rules! log {
     ($($arg:tt)*) => ({
         let time = $crate::driver::timer::pit::uptime();
-        $crate::println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
+        $crate::serial_println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
     });
 }
 
@@ -238,7 +238,7 @@ macro_rules! log {
 macro_rules! logger {
     ($($arg:tt)*) => ({
         let time = $crate::driver::timer::pit::uptime();
-        $crate::serial_prtinln!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
+        $crate::serial_println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
     });
 }
 

@@ -94,7 +94,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     let index = (error_code >> 3) & 0x1fff;
     let ti    = (error_code >> 2) & 1;
     let rpl   = error_code & 0b11;
-    crate::serial_prtinln!(
+    crate::serial_println!(
         "#GP err: selector=0x{:04x} index={} TI={}({}) RPL={}",
         error_code,
         index,
