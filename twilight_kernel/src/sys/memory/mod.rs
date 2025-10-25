@@ -1,23 +1,26 @@
-pub mod allocator;
 pub mod phys;
-pub mod paging;
+pub mod bitmap;
+pub mod heap;
 
-use crate::{log};
+use crate::sys::memory::bitmap::with_frame_allocator;
+use crate::log;
 use conquer_once::spin::OnceCell;
 use core::sync::atomic::Ordering::SeqCst;
-use core::sync::atomic::{AtomicU64, AtomicUsize};
-use limine::memory_map::{Entry, EntryType};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use limine::memory_map::Entry;
 use spin::Once;
-use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate};
+use x86_64::structures::paging::mapper::CleanUp;
+use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Translate};
 use x86_64::{PhysAddr, VirtAddr};
 
 #[allow(static_mut_refs)]
 static mut MAPPER: Once<OffsetPageTable<'static>> = Once::new();
 
 pub(crate) static mut PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
-static ALLOCATED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+
 static mut KERNEL_PAGE_TABLE_FRAME: PhysFrame = PhysFrame::containing_address(PhysAddr::new(0));
 static MEMORY_MAP: OnceCell<&'static[&Entry]> = OnceCell::uninit();
+static MEMORY_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 
 pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static [&Entry]) {
@@ -34,54 +37,33 @@ pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static [&Entry]) {
         });
     }
 
-    let mut frame_allocator = unsafe {
-        BootInfoFrameAllocator::init(memory_map)
-    };
+    let mut memory_size = 0;
+    let mut last_end_addr = 0;
+    for region in memory_map {
+        let start_addr = region.base;
+        let end_addr = region.base + region.length;
+        let size = end_addr - start_addr;
+        let hole = start_addr - last_end_addr;
+        if hole > 0 {
+            log!(
+                "MEM [{:#016X}-{:#016X}] {}", // "({} KB)"
+                last_end_addr, start_addr - 1, "Unmapped" //, hole >> 10
+            );
+            if start_addr < (1 << 20) {
+                memory_size += hole as usize; // BIOS memory
+            }
+        }
+        memory_size += size as usize;
+        last_end_addr = end_addr;
+    }
+
+    MEMORY_SIZE.store(memory_size, SeqCst);
+
+    bitmap::init_frame_allocator(memory_map);
     MEMORY_MAP.try_init_once(|| memory_map).unwrap();
 
-    allocator::init_heap(&mut frame_allocator).expect("Failed to initialize heap");
+    heap::init_heap().expect("Failed to initialize heap");
 }
-
-
-pub struct BootInfoFrameAllocator {
-    memory_map: &'static [&'static Entry],
-}
-
-impl BootInfoFrameAllocator {
-    pub unsafe fn init(memory_map: &'static [&Entry]) -> Self {
-        let allocator = Self {
-            memory_map,
-        };
-
-        allocator
-    }
-
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
-        let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r|
-            r.entry_type == EntryType::USABLE
-        );
-        let addr_ranges = usable_regions.map(|r|
-            r.base..(r.base + r.length)
-        );
-        let frame_addresses = addr_ranges.flat_map(|r|
-            r.step_by(4096)
-        );
-        frame_addresses.map(|addr|
-            PhysFrame::containing_address(PhysAddr::new(addr))
-        )
-    }
-}
-
-unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
-    fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        let next = ALLOCATED_FRAMES.fetch_add(1, SeqCst);
-        // FIXME: When the heap is larger than a few megabytes,
-        // creating an iterator for each allocation become very slow.
-        self.usable_frames().nth(next)
-    }
-}
-
 
 pub(crate) fn kernel_page_table() -> &'static mut PageTable {
     #[allow(static_mut_refs)]
@@ -128,10 +110,6 @@ pub fn virt_to_phys(addr: VirtAddr) -> Option<PhysAddr> {
     mapper().translate_addr(addr)
 }
 
-pub fn frame_allocator() -> BootInfoFrameAllocator {
-    unsafe { BootInfoFrameAllocator::init(MEMORY_MAP.get_unchecked()) }
-}
-
 pub fn create_page_table(frame: PhysFrame) -> &'static mut PageTable {
     let phys_addr = frame.start_address();
     let virt_addr = phys_to_virt(phys_addr);
@@ -164,7 +142,6 @@ pub fn alloc_pages(
     is_executable: bool,
 ) -> Result<(), ()> {
     let size = size.saturating_sub(1) as u64;
-    let mut frame_allocator = frame_allocator();
 
     let pages = {
         let start_page: Page = Page::containing_address(VirtAddr::new(addr));
@@ -174,23 +151,23 @@ pub fn alloc_pages(
 
     let flags = make_flags(is_writable, is_executable);
 
-    for page in pages {
-        if let Some(frame) = frame_allocator.allocate_frame() {
-            // serial_prtinln!("{:?} to {:?} with flags {:?}", page, frame, flags);
-            let res = unsafe { mapper.map_to(page, frame, flags, &mut frame_allocator) };
-            if let Ok(mapping) = res {
-                mapping.flush();
-            } else {
-                // log!("Could not map {:?} to {:?}", page, frame);
-                if let Ok(_old_frame) = mapper.translate_page(page) {
-                    // log!("Already mapped to {:?}", old_frame);
+    with_frame_allocator(|frame_allocator| {
+        for page in pages {
+            if let Some(frame) = frame_allocator.allocate_frame() {
+                let res = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
+                if let Ok(mapping) = res {
+                    mapping.flush();
+                } else {
+                    // log!("Could not map {:?} to {:?}", page, frame);
+                    if let Ok(_old_frame) = mapper.translate_page(page) {
+                        // log!("Already mapped to {:?}", old_frame);
+                    }
                 }
+            } else {
+                log!("Could not allocate frame for {:?}", page);
             }
-        } else {
-            log!("Could not allocate frame for {:?}", page);
-            return Err(());
         }
-    }
+    });
 
     Ok(())
 }
@@ -206,9 +183,14 @@ pub fn dealloc_pages(
     let pages = Page::range_inclusive(start_page, end_page);
     
     for page in pages {
-        if let Ok((_frame, mapping)) = mapper.unmap(page) {
+        if let Ok((frame, mapping)) = mapper.unmap(page) {
             mapping.flush();
-            // serial_prtinln!("unmapped page {:?} to frame {:?}", page, frame);
+            unsafe {
+                with_frame_allocator(|frame_allocator| {
+                    mapper.clean_up(frame_allocator);
+                    frame_allocator.deallocate_frame(frame);
+                });
+            }
         }
     }
     
@@ -219,4 +201,9 @@ pub fn phys_addr(ptr: *const u8) -> u64 {
     let virt_addr = VirtAddr::new(ptr as u64);
     let phys_addr = virt_to_phys(virt_addr).unwrap();
     phys_addr.as_u64()
+}
+
+
+pub fn memory_size() -> usize {
+    MEMORY_SIZE.load(Ordering::Relaxed)
 }

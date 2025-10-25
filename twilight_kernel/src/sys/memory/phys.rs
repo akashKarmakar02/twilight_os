@@ -1,7 +1,8 @@
-use crate::sys::memory::{frame_allocator, phys_to_virt};
+use crate::sys::memory::{phys_to_virt};
 use core::ptr::NonNull;
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::PhysAddr;
+use crate::sys::memory::bitmap::with_frame_allocator;
 
 #[derive(Clone, Debug)]
 pub struct PhysBuf {
@@ -21,12 +22,14 @@ impl PhysBuf {
         let num_pages = aligned_len / 0x1000;
         let mut first_frame = None;
 
-        for i in 0..num_pages {
-            let frame = frame_allocator().allocate_frame().expect("Out of memory");
-            if i == 0 {
-                first_frame = Some(frame);
+        with_frame_allocator(|frame_allocator| {
+            for i in 0..num_pages {
+                let frame = frame_allocator.allocate_frame().expect("Out of memory");
+                if i == 0 {
+                    first_frame = Some(frame);
+                }
             }
-        }
+        });
 
         let phys = first_frame.unwrap().start_address();
         let virt = phys_to_virt(phys).as_mut_ptr();
