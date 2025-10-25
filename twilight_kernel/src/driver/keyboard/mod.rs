@@ -26,11 +26,9 @@ pub fn keyboard_interrupt(scancode: u8) {
             DecodedKey::RawKey(key) => {
                 match key {
                     KeyCode::ArrowUp => {
-                        // handle up arrow
                         crate::sys::buffer::stdin::send_special("up");
                     }
                     KeyCode::ArrowDown => {
-                        // handle down arrow
                         crate::sys::buffer::stdin::send_special("down");
                     }
                     KeyCode::ArrowLeft => {

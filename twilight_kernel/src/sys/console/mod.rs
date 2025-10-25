@@ -4,7 +4,7 @@ use crate::arch::x86_64::halt;
 use crate::sys::fs::vfs::VFS;
 use crate::sys::proc::{PROCESS_TABLE, Process};
 use crate::sys::tty::read_char;
-use crate::{print, println, serial_prtinln};
+use crate::{print, println, serial_println};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -125,7 +125,7 @@ fn handle_console_input() {
                     #[allow(static_mut_refs)]
                     let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
 
-                    serial_prtinln!("{}", *idx);
+                    serial_println!("{}", *idx);
 
                     let mut stdio = STDIO.lock();
                     stdio.clear();
@@ -202,11 +202,10 @@ fn exec(cmd: &str, args: &[&str]) {
         "touch" => crate::kernel_utils::touch::main(args),
         "mkdir" => crate::kernel_utils::mkdir::main(args),
         "cd" => crate::kernel_utils::cd::main(args),
-        "rm" => crate::kernel_utils::rm::main(args),
         "readelf" => crate::kernel_utils::readelf::main(args),
         "install" => crate::kernel_utils::install::main(),
         "dhcp" => crate::kernel_utils::dhcp::main(),
-        "vi" => crate::kernel_utils::vi::main(args),
+        // "vi" => crate::kernel_utils::vi::main(args),
         "anirect" => crate::kernel_utils::anirect::main(),
         "curl" => crate::kernel_utils::curl::main(args),
         "serve" => crate::kernel_utils::serve::main(args),

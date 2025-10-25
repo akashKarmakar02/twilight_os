@@ -15,4 +15,12 @@ impl VfsNodeOps for Null {
     fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
         Ok(true)
     }
+
+    fn ioctl(&self, _device: &mut BlockDev, _cmd: u32, _arg: usize) -> Result<i64, ()> {
+        Ok(0)
+    }
+
+    fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
+        Ok(-1)
+    }
 }

@@ -85,6 +85,8 @@ pub trait FsCtx {
     fn alloc_zone(&mut self) -> Result<u32, TfsError>;
     fn free_zone(&mut self, zone: u32) -> Result<(), TfsError>;
     fn write_inode_twilight(&mut self, ino: u32, inode: Inode) -> Result<(), &'static str>;
+
+    fn remove_file(&mut self, path: &str) -> Result<(), ()>;
 }
 
 #[allow(dead_code)]
@@ -106,13 +108,26 @@ impl VfsNode {
     pub fn write(&mut self, data: &[u8]) -> Result<(), ()> {
         self.node.write().write(&mut self.device, 0, data)
     }
+
+    pub fn poll(&mut self) -> Result<bool, ()> {
+        self.node.read().poll(&mut self.device)
+    }
+
+    pub fn unlink(&mut self) -> Result<i32, ()> {
+        self.node.write().unlink(&mut self.device)
+    }
+
+    pub fn ioctl(&mut self, cmd: u32, arg: usize) -> Result<i64, ()> {
+        self.node.read().ioctl(&mut self.device, cmd, arg)
+    }
 }
 
 pub trait VfsNodeOps: Send + Sync + 'static {
     fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()>;
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()>;
     fn poll(&self, device: &mut BlockDev) -> Result<bool, ()>;
-
+    fn ioctl(&self, device: &mut BlockDev, cmd: u32, arg: usize) -> Result<i64, ()>;
+    fn unlink(&mut self, device: &mut BlockDev) -> Result<i32, ()>;
 }
 
 pub trait FileSystem: Send + Sync + 'static {

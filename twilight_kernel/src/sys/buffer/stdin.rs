@@ -17,10 +17,26 @@ pub fn send_char(c: char) {
 pub fn send_special(key: &str) {
     let mut stdin = STDIN.lock();
     match key {
-        "up" => stdin.push_back('\u{F700}'),
-        "down" => stdin.push_back('\u{F701}'),
-        "left" => stdin.push_back('\u{F702}'),
-        "right" => stdin.push_back('\u{F703}'),
+        "up" => {
+            for ch in "\x1b[A".chars() {
+                stdin.push_back(ch);
+            }
+        },
+        "down" => {
+            for ch in "\x1b[B".chars() {
+                stdin.push_back(ch);
+            }
+        },
+        "left" => {
+            for ch in "\x1b[D".chars() {
+                stdin.push_back(ch);
+            }
+        },
+        "right" => {
+            for ch in "\x1b[C".chars() {
+                stdin.push_back(ch);
+            }
+        },
         _ => return,
     }
     STDIN_WAKER.wake();

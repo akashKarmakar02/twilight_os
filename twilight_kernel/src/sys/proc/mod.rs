@@ -2,12 +2,13 @@ pub mod mem;
 pub mod switch;
 
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
-use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
+use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
 use crate::println;
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
-use crate::sys::memory::{alloc_pages, dealloc_pages, frame_allocator, kernel_page_table, phys_mem_offset};
+use crate::sys::memory::bitmap::with_frame_allocator;
+use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -17,11 +18,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
-use spin::mutex::Mutex;
 use spin::Once;
-use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame};
+use spin::mutex::Mutex;
 use x86_64::VirtAddr;
+use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, OffsetPageTable, PhysFrame};
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -138,10 +139,16 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn new(content_buf: Vec<u8>, pwd: &str, args: &[&str], parent_pid: u16) -> Result<Self, ()> {
+    pub fn new(
+        content_buf: Vec<u8>,
+        pwd: &str,
+        args: &[&str],
+        parent_pid: u16,
+    ) -> Result<Self, ()> {
         let (_, flags) = Cr3::read();
 
-        let page_table_frame = frame_allocator().allocate_frame().unwrap();
+        let page_table_frame =
+            with_frame_allocator(|frame_allocator| frame_allocator.allocate_frame().unwrap());
 
         let page_table = crate::sys::memory::create_page_table(page_table_frame);
 
@@ -197,7 +204,8 @@ impl Process {
                         let start = ph.p_offset as usize;
                         let len = ph.p_filesz as usize;
                         if start + len <= content_buf.len() {
-                            let s = core::str::from_utf8(&content_buf[start..start + len]).unwrap_or("");
+                            let s = core::str::from_utf8(&content_buf[start..start + len])
+                                .unwrap_or("");
                             interp_path = Some(s.trim_end_matches('\0').to_string());
                             println!("interp_path: {:?}", interp_path);
                             return Err(());
@@ -247,7 +255,8 @@ impl Process {
                             SegmentFlags::Elf { p_flags } => {
                                 let _is_writable = (p_flags & object::elf::PF_W) != 0;
                                 let _is_executable = (p_flags & object::elf::PF_X) != 0;
-                                if let Ok(_) = alloc_pages(&mut mapper, base_addr, size, true, true) {
+                                if let Ok(_) = alloc_pages(&mut mapper, base_addr, size, true, true)
+                                {
                                     addr_size_vec.push((base_addr, size));
                                 }
                             }
@@ -325,13 +334,20 @@ impl Process {
         );
     }
 
-    pub fn cleanup(&mut self) {
+    pub fn cleanup(&mut self, table_frame: PhysFrame) {
         for (addr, size) in self.addr_size_vec.iter() {
             let addr = *addr;
             let size = *size;
+
             if let Err(_) = dealloc_pages(&mut self.mapper, addr, size) {
                 println!("failed to dealloc pages in {:X} of size {}", addr, size);
             }
+
+            with_frame_allocator(|allocator| {
+                unsafe {
+                    allocator.deallocate_frame(table_frame);
+                }
+            });
         }
     }
 }
@@ -347,11 +363,11 @@ pub fn exit() {
 
     if let Some(p_process) = table.get_process(process.parent_pid) {
         let page_table_frame = p_process.page_table_frame;
-        let (_, flags) = Cr3::read();
+        let (pre_table_frame, flags) = Cr3::read();
         unsafe {
             Cr3::write(page_table_frame, flags);
         }
-    process.cleanup();
+        process.cleanup(pre_table_frame);
 
         if p_process.pid == 1 {
             init_console();
@@ -435,7 +451,9 @@ fn build_initial_stack(
     fn push_raw(rsp: &mut u64, bytes: &[u8]) -> u64 {
         *rsp -= bytes.len() as u64;
         let p = *rsp as *mut u8;
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len()); }
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+        }
         *rsp
     }
     //
@@ -470,19 +488,43 @@ fn build_initial_stack(
 
     // ---- write auxv (topmost among these tables) ----
     let aux_vec: Vec<AuxvEntry> = vec![
-        AuxvEntry { key: 3, value: phdr_addr }, // AT_PHDR
-        AuxvEntry { key: 4, value: phent     }, // AT_PHENT
-        AuxvEntry { key: 5, value: phnum     }, // AT_PHNUM
-        AuxvEntry { key: 6, value: 4096      }, // AT_PAGESZ
-        AuxvEntry { key: 9, value: entry_point }, // AT_ENTRY
-        AuxvEntry { key: 25, value: rand_ptr }, // AT_RANDOM
-        AuxvEntry { key: 31, value: execfn   }, // AT_EXECFN
+        AuxvEntry {
+            key: 3,
+            value: phdr_addr,
+        }, // AT_PHDR
+        AuxvEntry {
+            key: 4,
+            value: phent,
+        }, // AT_PHENT
+        AuxvEntry {
+            key: 5,
+            value: phnum,
+        }, // AT_PHNUM
+        AuxvEntry {
+            key: 6,
+            value: 4096,
+        }, // AT_PAGESZ
+        AuxvEntry {
+            key: 9,
+            value: entry_point,
+        }, // AT_ENTRY
+        AuxvEntry {
+            key: 25,
+            value: rand_ptr,
+        }, // AT_RANDOM
+        AuxvEntry {
+            key: 31,
+            value: execfn,
+        }, // AT_EXECFN
         AuxvEntry { key: 17, value: 0 }, // AT_UID
         AuxvEntry { key: 18, value: 0 }, // AT_EUID
         AuxvEntry { key: 19, value: 0 }, // AT_GID
         AuxvEntry { key: 20, value: 0 }, // AT_EGID
-        AuxvEntry { key: 23, value: 100 }, // AT_CLKTCK
-        AuxvEntry { key: 0, value: 0 }, // AT_NULL
+        AuxvEntry {
+            key: 23,
+            value: 100,
+        }, // AT_CLKTCK
+        AuxvEntry { key: 0, value: 0 },  // AT_NULL
     ];
 
     rsp -= (size_of::<AuxvEntry>() * aux_vec.len()) as u64;
@@ -509,7 +551,6 @@ fn build_initial_stack(
         *(rsp as *mut u64) = 0;
     }
 
-
     // ---- argv pointers then NULL ----
     for &p in &argv_ptrs {
         rsp -= 8;
@@ -525,7 +566,9 @@ fn build_initial_stack(
 
     // ---- argc ----
     rsp -= 8;
-    unsafe { *(rsp as *mut u64) = argv_ptrs.len() as u64; }
+    unsafe {
+        *(rsp as *mut u64) = argv_ptrs.len() as u64;
+    }
 
     rsp
 }

@@ -1062,6 +1062,14 @@ impl FsCtx for TwilightFs {
     fn write_inode_twilight(&mut self, ino: u32, inode: Inode) -> Result<(), &'static str> {
         self.write_inode(ino, &inode)
     }
+
+    fn remove_file(&mut self, path: &str) -> Result<(), ()> {
+        if self.remove_entry(path).is_err() {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl FileSystem for TwilightFs {
@@ -1096,6 +1104,7 @@ impl FileSystem for TwilightFs {
                             TwilightFs { device: self.device.clone(), superblock: self.superblock.clone() }
                         )
                     ),
+                    full_path: path.to_string(),
                     inode_no
                 }))
             );

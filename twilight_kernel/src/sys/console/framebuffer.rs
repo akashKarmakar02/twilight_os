@@ -42,6 +42,53 @@ impl FramebufferTerminal {
         term
     }
 
+    pub fn set_cursor_visible(&mut self, _v: bool) {
+        // store a flag if you later want to draw a caret; for now this can be a no-op
+    }
+
+    pub fn erase_line(&mut self) {
+        let y = self.cursor_y * 16;
+        self.fill_rect(0, y, self.width, 16, self.bg_color);
+        self.cursor_x = 0;
+    }
+    pub fn erase_in_line_from_cursor(&mut self) {
+        let x = self.cursor_x * 8;
+        let y = self.cursor_y * 16;
+        self.fill_rect(x, y, self.width.saturating_sub(x), 16, self.bg_color);
+    }
+    pub fn erase_in_line_to_cursor(&mut self) {
+        let x = self.cursor_x * 8;
+        let y = self.cursor_y * 16;
+        self.fill_rect(0, y, x, 16, self.bg_color);
+    }
+    pub fn erase_display_from_cursor(&mut self) {
+        // clear from cursor to end of screen
+        let x = self.cursor_x * 8;
+        let y = self.cursor_y * 16;
+        // clear part of current line
+        self.fill_rect(x, y, self.width.saturating_sub(x), 16, self.bg_color);
+        // clear all lines below
+        if y + 16 < self.height {
+            self.fill_rect(0, y + 16, self.width, self.height - (y + 16), self.bg_color);
+        }
+    }
+    pub fn erase_display_to_cursor(&mut self) {
+        let x = self.cursor_x * 8;
+        let y = self.cursor_y * 16;
+        // clear all lines above
+        if y > 0 {
+            self.fill_rect(0, 0, self.width, y, self.bg_color);
+        }
+        // clear part of current line up to cursor
+        self.fill_rect(0, y, x, 16, self.bg_color);
+    }
+
+    fn fill_rect(&mut self, _x: usize, _y: usize, _w: usize, _h: usize, _color: u32) {
+        // use your framebuffer writer, similar to clear()/scroll()
+        // batch rows for speed
+        // ...
+    }
+
     fn backspace(&mut self) {
         if self.cursor_x > 0 {
             self.cursor_x -= 1;
@@ -106,7 +153,7 @@ impl FramebufferTerminal {
     fn new_line(&mut self) {
         self.cursor_x = 0;
         self.cursor_y += 1;
-        if (self.cursor_y + 1) * 16 >= self.height {
+        if (self.cursor_y) * 16 >= self.height {
             self.scroll();
             self.cursor_y -= 1;
         }

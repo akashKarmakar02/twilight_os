@@ -1,6 +1,6 @@
 use crate::arch::x86_64::io::delay;
 use crate::driver::timer::pit::uptime;
-use crate::serial_prtinln;
+use crate::serial_println;
 use crate::sys::fs::{VfsError, VfsNode};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -137,7 +137,7 @@ impl TwilightFrameBuffer {
     pub fn scroll_up(&mut self, lines: u64, fill_color: u32) {
         let h = self.height as usize;
         let w = self.width as usize;
-        let scroll = lines.min(self.height as u64) as usize;
+        let scroll = lines.min(self.height) as usize;
 
         if scroll == 0 {
             return;
@@ -253,7 +253,7 @@ impl TwilightFrameBuffer {
                 next_tick += frame_ms;
                 did_frame = true;
             }
-            serial_prtinln!("frame: {}", frame_ms);
+            serial_println!("frame: {}", frame_ms);
             // If we got massively behind (e.g., breakpoint), resync gently
             if !did_frame && now > next_tick + 8 * frame_ms {
                 next_tick = now + frame_ms;

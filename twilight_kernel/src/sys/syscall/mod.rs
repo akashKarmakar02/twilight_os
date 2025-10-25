@@ -4,7 +4,7 @@ mod memory;
 
 use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
-use crate::serial_prtinln;
+use crate::serial_println;
 use crate::sys::syscall::service::read;
 use crate::sys::syscall::utils::{copy_cstr_from_user, UserPtr};
 use crate::task::executor::sleep;
@@ -51,19 +51,22 @@ pub extern "sysv64" fn syscall_handler(
             // mock implementation of poll
             1
         }
+        SYS_LSEEK => service::lseek(arg1 as usize, arg2, arg3 as u8),
         SYS_MMAP => memory::mmap(arg1, arg2 as usize, arg3 as usize, arg4 as usize, arg5, arg6),
         SYS_MUNMAP => memory::munmap(arg1, arg2 as usize),
         SYS_BRK => memory::brk(arg1 as usize),
         SYS_IOCTL => {
-            // this is a mock implementation for ioctl
-            0
-        }
+            service::ioctl(arg1 as usize, arg2 as usize, arg3 as usize)
+            // 0
+        },
+        SYS_READV => service::readv(arg1 as usize, arg2, arg3),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
         SYS_EXECVE => service::execev(arg1 as usize, arg2 as usize, arg3 as usize),
         SYS_EXIT => service::exit(),
         SYS_UNAME => service::uname(arg1 as usize),
         SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
         SYS_CHDIR => service::chdir(arg1 as usize),
+        SYS_UNLINK => service::unlink(arg1 as usize),
         SYS_GET_EUID => 0,
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
         SYS_GET_TID => {
@@ -159,8 +162,8 @@ pub extern "sysv64" fn syscall_handler(
             -38
         }
         _ => {
-            serial_prtinln!("Unknown syscall number: {}", syscall_number);
-            0
+            serial_println!("Unknown syscall number: {}", syscall_number);
+            -1
         }
     };
 

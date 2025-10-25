@@ -7,6 +7,40 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use core::fmt::Write;
+use twilight_common::syscall::types::EFAULT;
+use crate::serial_println;
+
+const IOCTL_TIOCGWINSZ: u32 = 0x5413;
+const IOCTL_TCGETS: u32 = 0x5401;
+const IOCTL_TCSETS: u32 = 0x5402;
+
+#[repr(C)]
+struct Winsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+impl Winsize {
+    fn new(rows: u16, cols: u16, xpixels: u16, ypixels: u16) -> Self {
+        Self {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: xpixels,
+            ws_ypixel: ypixels,
+        }
+    }
+}
+
+struct Termios {
+    c_iflag: u32,
+    c_oflag: u32,
+    c_cflag: u32,
+    c_lflag: u32,
+    c_line: u8,
+    c_cc: [u8; 20],
+}
 
 pub struct Tty {
     term: FramebufferTerminal,
@@ -378,6 +412,37 @@ impl VfsNodeOps for Tty {
 
     fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
         Ok(!self.input_buffer.is_empty())
+    }
+
+    fn ioctl(&self, _device: &mut BlockDev, cmd: u32, arg: usize) -> Result<i64, ()> {
+        match cmd {
+            IOCTL_TIOCGWINSZ => {
+                let winsize_ptr = arg as *mut Winsize;
+                if winsize_ptr.is_null() {
+                    return Ok(-(EFAULT as i64));
+                }
+
+                serial_println!("ioctl: TIOCGWINSZ: {:X}", arg);
+
+
+                unsafe {
+                    let winsize = &mut *winsize_ptr;
+                    winsize.ws_row = 10;
+                    winsize.ws_col = 10;
+                    // winsize.ws_xpixel = 0;
+                    // winsize.ws_ypixel = 0;
+                }
+            }
+            _ => {
+                return Ok(0);
+            }
+        }
+
+        Ok(0)
+    }
+
+    fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
+        Ok(-1)
     }
 }
 

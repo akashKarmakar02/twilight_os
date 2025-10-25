@@ -135,3 +135,11 @@ pub struct FStat {
     pub st_mtime: Timespec, // Time of last modification
     pub st_ctime: Timespec, // Time of last status change
 }
+
+#[derive(Clone, Copy, Debug)]
+#[repr(u8)]
+pub enum Seek {
+    Set,
+    Cur,
+    End,
+}
