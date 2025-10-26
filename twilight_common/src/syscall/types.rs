@@ -35,6 +35,7 @@ pub const O_CLOEXEC: i32 = 0o2000000; // 524288
 pub const O_PATH: i32 = 0o10000000; // 2097152
 
 #[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
 pub struct Iovec {
     pub iov_base: *const u8,
     pub iov_len: usize,
@@ -134,4 +135,12 @@ pub struct FStat {
     pub st_atime: Timespec, // Time of last access
     pub st_mtime: Timespec, // Time of last modification
     pub st_ctime: Timespec, // Time of last status change
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(u8)]
+pub enum Seek {
+    Set,
+    Cur,
+    End,
 }

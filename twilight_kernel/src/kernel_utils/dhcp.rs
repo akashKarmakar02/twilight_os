@@ -3,12 +3,12 @@ use crate::println;
 use crate::sys::net::socket::SOCKETS;
 use crate::task::executor::sleep;
 use alloc::string::ToString;
-use alloc::vec::Vec;
 use core::str::FromStr;
 use smoltcp::socket::dhcpv4;
 use smoltcp::socket::dhcpv4::Event;
 use smoltcp::time::Instant;
 use smoltcp::wire::IpCidr;
+use crate::driver::timer::pit::uptime;
 
 pub fn main() {
     let mut dhcp_config = None;
@@ -61,14 +61,9 @@ pub fn main() {
         }
     }
 
-    if let Some((ip, gw, dns)) = dhcp_config {
-
-        let dns: Vec<_> = dns.iter().map(|s| s.to_string()).collect();
-        println!("NET DNS: {}", dns.join(", "));
-        println!("NET IP: {}", ip);
-        if let Some(gw) = gw {
-            println!("NET GW: {}", gw);
-        }
+    if let Some((ip, _, _)) = dhcp_config {
+        let uptime = uptime();
+        println!("\x1b[93m[{uptime:.6}]\x1b[0m DHCP Config Done! IP Address: {}", ip);
     } else {
         println!("dhcp failed");
     }

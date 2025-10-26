@@ -15,7 +15,8 @@ use crate::{println};
 use crate::task::executor::sleep;
 
 use time::{Duration, OffsetDateTime, UtcOffset};
-use crate::sys::fs::vfs::VFS;
+use crate::driver::disk::dummy_blockdev;
+use crate::sys::fs::vfs::{VfsNodeOps, VFS};
 
 const MAX_CONNECTIONS: usize = 32; // TODO: Add dynamic pooling
 const POLL_DELAY_DIV: usize = 128;
@@ -283,6 +284,17 @@ pub fn main(_args: &[&str]) {
             let ms = (cmos.unix_time() as f64 * 1000000.0) as i64;
             let time = Instant::from_micros(ms);
             iface.poll(time, device, &mut sockets);
+
+            let tty = crate::sys::console::get_tty();
+
+            if tty.poll(&mut dummy_blockdev()).unwrap_or(false) {
+                let mut buf = [0u8; 1];
+                let c = tty.read(&mut dummy_blockdev(), 0, &mut buf).unwrap_or(Vec::new());
+
+                if c.get(0).unwrap_or(&0) == &0x03 {
+                    break;
+                }
+            }
 
             for (tcp_handle, send_queue, keep_alive) in &mut connections {
                 let socket = sockets.get_mut::<tcp::Socket>(*tcp_handle);

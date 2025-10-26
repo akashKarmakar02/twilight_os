@@ -1,15 +1,15 @@
 extern crate alloc;
 
 use crate::arch::x86_64::halt;
-use crate::sys::fs::vfs::VFS;
-use crate::sys::proc::{PROCESS_TABLE, Process};
-use crate::sys::tty::read_char;
-use crate::{print, println, serial_prtinln};
+use crate::driver::disk::dummy_blockdev;
+pub(crate) use crate::sys::console::tty::{get_tty, Tty};
+use crate::sys::fs::vfs::{VfsNodeOps, VFS};
+use crate::sys::proc::{Process, PROCESS_TABLE};
+use crate::{print, println, serial_println};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::{Mutex, Once};
-use crate::sys::console::tty::{get_tty, Tty};
 
 pub mod font;
 pub mod framebuffer;
@@ -36,6 +36,11 @@ pub fn init_tty() {
     }
 }
 
+pub fn put_char_in_tty(c: u8) {
+    let tty = get_tty();
+    tty.put_input(c);
+}
+
 pub fn init_console() {
     #[allow(static_mut_refs)]
     unsafe {
@@ -58,15 +63,18 @@ fn handle_console_input() {
     start_kernel_console();
     loop {
         halt();
-        let c = read_char();
+        let mut buf = [0u8; 1];
+        unsafe {
+            get_tty().read(&mut dummy_blockdev(), 0, &mut buf).unwrap_unchecked();
+        }
+        let c = buf[0] as char;
         match c {
             '\r' => {
                 if !STDIO.lock().is_empty() {
-                    print!("{}", c);
+
                 }
             }
             '\n' => {
-                print!("\n");
                 let cmd_line;
                 {
                     let mut stdio = STDIO.lock();
@@ -91,7 +99,6 @@ fn handle_console_input() {
                 *idx = 0;
             }
             '\t' => {
-                print!("{}", c);
                 STDIO.lock().push(' ');
                 STDIO.lock().push(' ');
                 STDIO.lock().push(' ');
@@ -101,7 +108,6 @@ fn handle_console_input() {
             }
             '\x08' => {
                 if *CURSOR_POSITION.lock() > 2 {
-                    print!("{}", c);
                     let mut cmd_line = STDIO.lock();
                     if !cmd_line.trim().is_empty() {
                         cmd_line.pop();
@@ -125,7 +131,7 @@ fn handle_console_input() {
                     #[allow(static_mut_refs)]
                     let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
 
-                    serial_prtinln!("{}", *idx);
+                    serial_println!("{}", *idx);
 
                     let mut stdio = STDIO.lock();
                     stdio.clear();
@@ -178,7 +184,6 @@ fn handle_console_input() {
                 tty.move_cursor_right();
             }
             _ => {
-                print!("{}", c);
                 STDIO.lock().push(c);
                 let mut cur_pos = CURSOR_POSITION.lock();
                 *cur_pos += 1;
@@ -202,11 +207,10 @@ fn exec(cmd: &str, args: &[&str]) {
         "touch" => crate::kernel_utils::touch::main(args),
         "mkdir" => crate::kernel_utils::mkdir::main(args),
         "cd" => crate::kernel_utils::cd::main(args),
-        "rm" => crate::kernel_utils::rm::main(args),
         "readelf" => crate::kernel_utils::readelf::main(args),
         "install" => crate::kernel_utils::install::main(),
         "dhcp" => crate::kernel_utils::dhcp::main(),
-        "vi" => crate::kernel_utils::vi::main(args),
+        // "vi" => crate::kernel_utils::vi::main(args),
         "anirect" => crate::kernel_utils::anirect::main(),
         "curl" => crate::kernel_utils::curl::main(args),
         "serve" => crate::kernel_utils::serve::main(args),

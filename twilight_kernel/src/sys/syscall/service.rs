@@ -1,11 +1,10 @@
-use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
+use crate::arch::x86_64::io::{rdmsr, wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::driver::disk::dummy_blockdev;
-use crate::sys::console::DIR;
-use crate::sys::console::tty::get_tty;
-use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
-use crate::sys::proc::{Handler, PROCESS_TABLE, Process, USER_STACK_SIZE};
-use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array};
-use crate::{print, serial_prtinln};
+use crate::sys::console::{get_tty, DIR};
+use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
+use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
+use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
+use crate::print;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -56,9 +55,9 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
 }
 
 pub fn read(handler: usize, buf: &mut [u8]) -> i64 {
+
     if handler == 0 || handler <= 2 {
         let tty = get_tty();
-
         if let Ok(v) = tty.read(&mut dummy_blockdev(), 0, buf) {
             return v.len() as i64;
         }
@@ -112,7 +111,7 @@ fn join_paths(base: &str, rel: &str) -> String {
 }
 
 fn normalize_path(p: &str) -> String {
-    let mut out: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    let mut out: Vec<&str> = Vec::new();
     for seg in p.split('/') {
         if seg.is_empty() || seg == "." {
             continue;
@@ -190,7 +189,6 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
         }
     };
 
-    serial_prtinln!("{}", full_path);
 
     // Try open existing
     let mut existed = true;
@@ -308,7 +306,6 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
 }
 
 pub fn exit() -> i64 {
-    serial_prtinln!("exiting process with pid {}", crate::sys::proc::id());
     unsafe { asm!("swapgs") };
 
     crate::sys::proc::exit();
@@ -690,4 +687,112 @@ pub fn chdir(path_ptr: usize) -> i64 {
     } else {
         -1
     }
+}
+
+pub fn unlink(path_ptr: usize) -> i64 {
+    let Ok(path) = copy_cstr_from_user(UserPtr(path_ptr as *const u8), 4096) else {
+        return -1;
+    };
+
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    // Resolve full path
+    let full_path = if path.starts_with('/') {
+        normalize_path(path.as_str())
+    } else {
+        format!("{}/{}", process.pwd.as_str(), path)
+    };
+
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if let Ok(inode) = fs.open(full_path.as_str()) {
+        let handler = Handler {
+            handler: Arc::new(Mutex::new(inode)),
+            seek: 0,
+            path,
+            flags: 0, // <-- store flags so read/write can enforce later
+        };
+        handler.handler.lock().unlink().unwrap() as i64
+    } else {
+        0
+    }
+}
+
+pub fn lseek(fd: usize, offset: u64, seek: u8) -> i64 {
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
+
+
+    if let Some(node) = process.handler.get_mut(fd - 3) {
+        match seek {
+            0 => {
+                node.seek = offset as usize;
+                0
+            }
+            1 => {
+                node.seek as i64
+            }
+            2 => {
+                node.seek = node.handler.lock().metadata.size;
+                node.seek as i64
+            }
+            _ => {
+                -1
+            }
+        }
+    } else {
+        -1
+    }
+}
+
+pub fn readv(fd: usize, iov_ptr: u64, iov_count: u64) -> i64 {
+    let iov = unsafe { core::slice::from_raw_parts(iov_ptr as *const Iovec, iov_count as usize) };
+
+    let mut total: i64 = 0;
+
+    for iv in iov {
+        // Skip empty segments
+        if iv.iov_len == 0 {
+            continue;
+        }
+
+        let buf = unsafe { core::slice::from_raw_parts_mut(iv.iov_base as *mut u8, iv.iov_len) };
+
+        // Write this segment
+        let r = read(fd, buf);
+        total = total.saturating_add(r);
+
+        // Stop on partial write (short write semantics)
+        if (r as usize) < iv.iov_len {
+            break;
+        }
+    }
+
+    total
+}
+
+pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
+    if fd <= 2 {
+        let tty = get_tty();
+
+        return tty.ioctl(&mut dummy_blockdev(), cmd as u64, arg).unwrap();
+    }
+
+    0
 }

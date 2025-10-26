@@ -1,3 +1,4 @@
+use alloc::string::String;
 use crate::sys::fs::twilight_fs::{read_tfs_block, write_tfs_block};
 use crate::sys::fs::vfs::{BlockDev, FsCtx, VfsNodeOps};
 use alloc::sync::Arc;
@@ -36,6 +37,7 @@ pub struct Inode {
 pub(crate) struct TFSVfsNode {
     pub inode_no: u32,
     pub inode: Inode,
+    pub full_path: String,
     pub ctx: Arc<Mutex<dyn FsCtx>>,
 }
 
@@ -368,5 +370,17 @@ impl VfsNodeOps for TFSVfsNode {
 
     fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
         Ok(true)
+    }
+
+    fn ioctl(&mut self, _device: &mut BlockDev, _cmd: u64, _arg: usize) -> Result<i64, ()> {
+        Ok(0)
+    }
+
+    fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
+        if self.ctx.lock().remove_file(self.full_path.as_str()).is_err() {
+            Ok(-1)
+        } else {
+            Ok(0)
+        }
     }
 }
