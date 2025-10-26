@@ -238,7 +238,6 @@ fn get(req: &Request, res: &mut Response) {
     #[allow(static_mut_refs)]
     let vfs = unsafe { VFS.get_mut() };
     let file_path = format!("/var/www/{}", file);
-    println!("file_path: {}", file_path);
     if let Ok(mut inode) = vfs.open(file_path.as_str()) {
         res.code = 200;
         let Ok(buf) = inode.read() else {
