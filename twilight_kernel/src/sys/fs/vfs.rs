@@ -117,8 +117,8 @@ impl VfsNode {
         self.node.write().unlink(&mut self.device)
     }
 
-    pub fn ioctl(&mut self, cmd: u32, arg: usize) -> Result<i64, ()> {
-        self.node.read().ioctl(&mut self.device, cmd, arg)
+    pub fn ioctl(&mut self, cmd: u64, arg: usize) -> Result<i64, ()> {
+        self.node.write().ioctl(&mut self.device, cmd, arg)
     }
 }
 
@@ -126,7 +126,7 @@ pub trait VfsNodeOps: Send + Sync + 'static {
     fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()>;
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()>;
     fn poll(&self, device: &mut BlockDev) -> Result<bool, ()>;
-    fn ioctl(&self, device: &mut BlockDev, cmd: u32, arg: usize) -> Result<i64, ()>;
+    fn ioctl(&mut self, device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()>;
     fn unlink(&mut self, device: &mut BlockDev) -> Result<i32, ()>;
 }
 

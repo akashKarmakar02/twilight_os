@@ -1,11 +1,10 @@
 use crate::arch::x86_64::io::{rdmsr, wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::driver::disk::dummy_blockdev;
-use crate::sys::console::tty::get_tty;
-use crate::sys::console::DIR;
+use crate::sys::console::{get_tty, DIR};
 use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
 use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
-use crate::print;
+use crate::{print, serial_println};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -24,6 +23,11 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     let res = match file_descriptor {
         1 => {
             print!("{}", String::from_utf8_lossy(buf));
+            let str = unsafe { core::str::from_utf8_unchecked(buf) };
+
+            if str.starts_with("-") {
+                serial_println!("{}", str);
+            }
 
             len as i64
         }
@@ -56,9 +60,9 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
 }
 
 pub fn read(handler: usize, buf: &mut [u8]) -> i64 {
+
     if handler == 0 || handler <= 2 {
         let tty = get_tty();
-
         if let Ok(v) = tty.read(&mut dummy_blockdev(), 0, buf) {
             return v.len() as i64;
         }
@@ -792,7 +796,7 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
     if fd <= 2 {
         let tty = get_tty();
 
-        return tty.ioctl(&mut dummy_blockdev(), cmd as u32, arg).unwrap();
+        return tty.ioctl(&mut dummy_blockdev(), cmd as u64, arg).unwrap();
     }
 
     0

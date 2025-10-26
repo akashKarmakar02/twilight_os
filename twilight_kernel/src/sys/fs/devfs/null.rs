@@ -16,7 +16,7 @@ impl VfsNodeOps for Null {
         Ok(true)
     }
 
-    fn ioctl(&self, _device: &mut BlockDev, _cmd: u32, _arg: usize) -> Result<i64, ()> {
+    fn ioctl(&mut self, _device: &mut BlockDev, _cmd: u64, _arg: usize) -> Result<i64, ()> {
         Ok(0)
     }
 

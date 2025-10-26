@@ -1,8 +1,16 @@
+use crate::sys::console::put_char_in_tty;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use lazy_static::lazy_static;
-use pc_keyboard::{DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1, layouts};
-use spin::Mutex;
+use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
+use spin::{Mutex, RwLock};
+use crate::serial_println;
 
 pub mod ps2;
+
+pub trait KeyboardListener: Send + Sync {
+    fn on_key(&self, key: u8, released: bool);
+}
 
 lazy_static! {
     pub static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
@@ -13,6 +21,16 @@ lazy_static! {
         ));
 }
 
+
+lazy_static! {
+    static ref KEYBOARD_LISTENER: RwLock<Vec<Arc<dyn Fn(u8) + Send + Sync>>> =
+        RwLock::new(Vec::new());
+}
+
+pub fn register_keyboard_listener(listener: Arc<dyn Fn(u8) + Send + Sync>) {
+    KEYBOARD_LISTENER.write().push(listener);
+}
+
 pub fn keyboard_interrupt(scancode: u8) {
     let mut keyboard = KEYBOARD.lock();
 
@@ -21,30 +39,36 @@ pub fn keyboard_interrupt(scancode: u8) {
     {
         match key {
             DecodedKey::Unicode(character) => {
-                send_char(character);
+                put_char_in_tty(character as u8);
             }
             DecodedKey::RawKey(key) => {
                 match key {
                     KeyCode::ArrowUp => {
-                        crate::sys::buffer::stdin::send_special("up");
+                        for c in "\x1b[A".chars() {
+                            put_char_in_tty(c as u8);
+                        }
                     }
                     KeyCode::ArrowDown => {
-                        crate::sys::buffer::stdin::send_special("down");
+                        for c in "\x1b[B".chars() {
+                            put_char_in_tty(c as u8);
+                        }
                     }
                     KeyCode::ArrowLeft => {
-                        crate::sys::buffer::stdin::send_special("left");
+                        for c in "\x1b[D".chars() {
+                            put_char_in_tty(c as u8);
+                        }
                     }
                     KeyCode::ArrowRight => {
-                        crate::sys::buffer::stdin::send_special("right");
+                        for c in "\x1b[C".chars() {
+                            put_char_in_tty(c as u8);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        put_char_in_tty(b'\x08');
                     }
                     _ => {}
                 }
             }
         }
     }
-}
-
-fn send_char(c: char) {
-    // get_stdio_keypress(c);
-    crate::sys::buffer::stdin::send_char(c);
 }

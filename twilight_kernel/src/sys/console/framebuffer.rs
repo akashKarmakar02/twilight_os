@@ -4,9 +4,11 @@ use crate::sys::{
     fs::VfsNode,
 };
 
+use crate::sys::framebuffer::get_framebuffer_mut;
 use alloc::vec;
 
 /// A framebuffer-based terminal backend (no ANSI parsing, pure rendering)
+#[derive(Clone, Copy, Debug)]
 pub struct FramebufferTerminal {
     pub width: usize,
     pub height: usize,
@@ -83,10 +85,23 @@ impl FramebufferTerminal {
         self.fill_rect(0, y, x, 16, self.bg_color);
     }
 
-    fn fill_rect(&mut self, _x: usize, _y: usize, _w: usize, _h: usize, _color: u32) {
-        // use your framebuffer writer, similar to clear()/scroll()
-        // batch rows for speed
-        // ...
+    fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
+        let fb = get_framebuffer_mut();
+        let pitch = fb.width as usize;
+        let mut buf = vec![0u8; w * h * 4];
+        let color_bytes = convert_color(color);
+
+        let start = y * pitch + x;
+
+        for i in 0..buf.len() / 4 {
+            buf[i * 4..i * 4 + 4].clone_from_slice(&color_bytes);
+        }
+        #[allow(static_mut_refs)]
+        unsafe {
+            let fb = FRAMEBUFFER.get_mut().unwrap();
+            fb.write(start as u64, buf.as_slice()).unwrap();
+        }
+        fb.sync_partial(start as u64, w as u64 * h as u64);
     }
 
     fn backspace(&mut self) {
@@ -115,7 +130,7 @@ impl FramebufferTerminal {
             return;
         }
 
-        if c == 0x08 || c == b'\x7f' {
+        if c == 0x08 || c == 0x7F {
             self.backspace();
             return;
         }
