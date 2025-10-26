@@ -1,10 +1,11 @@
+#![allow(dead_code)]
+
 use crate::sys::console::put_char_in_tty;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use pc_keyboard::{layouts, DecodedKey, HandleControl, KeyCode, Keyboard, ScancodeSet1};
 use spin::{Mutex, RwLock};
-use crate::serial_println;
 
 pub mod ps2;
 
@@ -27,6 +28,24 @@ lazy_static! {
         RwLock::new(Vec::new());
 }
 
+lazy_static! {
+    static ref PS2_KEYBOARD_STATE: Mutex<Ps2KeyboardState> = Mutex::new(Ps2KeyboardState::new());
+}
+
+struct Ps2KeyboardState {
+    is_ctrl_pressed: bool,
+    is_shift_pressed: bool,
+}
+
+impl Ps2KeyboardState {
+    pub fn new() -> Self {
+        Self {
+            is_ctrl_pressed: false,
+            is_shift_pressed: false,
+        }
+    }
+}
+
 pub fn register_keyboard_listener(listener: Arc<dyn Fn(u8) + Send + Sync>) {
     KEYBOARD_LISTENER.write().push(listener);
 }
@@ -34,12 +53,28 @@ pub fn register_keyboard_listener(listener: Arc<dyn Fn(u8) + Send + Sync>) {
 pub fn keyboard_interrupt(scancode: u8) {
     let mut keyboard = KEYBOARD.lock();
 
+    let mut ps2_keyboard_state = PS2_KEYBOARD_STATE.lock();
+
+    if scancode == 29 {
+        ps2_keyboard_state.is_ctrl_pressed = true;
+    } else if scancode == 157 {
+        ps2_keyboard_state.is_ctrl_pressed = false;
+    }
+
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode)
         && let Some(key) = keyboard.process_keyevent(key_event)
     {
         match key {
             DecodedKey::Unicode(character) => {
-                put_char_in_tty(character as u8);
+                if ps2_keyboard_state.is_ctrl_pressed && character == 's' {
+                    put_char_in_tty(0x13);
+                }
+                if ps2_keyboard_state.is_ctrl_pressed && character == 'c' {
+                    put_char_in_tty(0x03);
+                }
+                if !ps2_keyboard_state.is_ctrl_pressed {
+                    put_char_in_tty(character as u8);
+                }
             }
             DecodedKey::RawKey(key) => {
                 match key {

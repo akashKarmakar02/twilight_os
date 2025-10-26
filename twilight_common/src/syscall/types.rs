@@ -35,6 +35,7 @@ pub const O_CLOEXEC: i32 = 0o2000000; // 524288
 pub const O_PATH: i32 = 0o10000000; // 2097152
 
 #[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
 pub struct Iovec {
     pub iov_base: *const u8,
     pub iov_len: usize,

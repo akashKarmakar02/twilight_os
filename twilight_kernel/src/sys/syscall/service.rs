@@ -4,7 +4,7 @@ use crate::sys::console::{get_tty, DIR};
 use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
 use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
-use crate::{print, serial_println};
+use crate::print;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -23,11 +23,6 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     let res = match file_descriptor {
         1 => {
             print!("{}", String::from_utf8_lossy(buf));
-            let str = unsafe { core::str::from_utf8_unchecked(buf) };
-
-            if str.starts_with("-") {
-                serial_println!("{}", str);
-            }
 
             len as i64
         }
@@ -116,7 +111,7 @@ fn join_paths(base: &str, rel: &str) -> String {
 }
 
 fn normalize_path(p: &str) -> String {
-    let mut out: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    let mut out: Vec<&str> = Vec::new();
     for seg in p.split('/') {
         if seg.is_empty() || seg == "." {
             continue;
@@ -770,6 +765,7 @@ pub fn readv(fd: usize, iov_ptr: u64, iov_count: u64) -> i64 {
     let iov = unsafe { core::slice::from_raw_parts(iov_ptr as *const Iovec, iov_count as usize) };
 
     let mut total: i64 = 0;
+
     for iv in iov {
         // Skip empty segments
         if iv.iov_len == 0 {
@@ -787,9 +783,8 @@ pub fn readv(fd: usize, iov_ptr: u64, iov_count: u64) -> i64 {
             break;
         }
     }
-    total
 
-    -1
+    total
 }
 
 pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
