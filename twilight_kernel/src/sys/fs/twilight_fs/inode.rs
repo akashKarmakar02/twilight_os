@@ -162,7 +162,7 @@ impl VfsNodeOps for TFSVfsNode {
         Ok(content)
     }
 
-    fn write(&mut self, device: &mut BlockDev, _lba: usize, data: &[u8]) -> Result<(), ()> {
+    fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()> {
         let block_size = 2048;
         let mut bytes_written = 0;
         let mut remaining = data.len();
@@ -170,6 +170,9 @@ impl VfsNodeOps for TFSVfsNode {
         let zones = self.inode.zones;
 
         for i in 0..zones.len() {
+            if lba / 2048 < i {
+                continue;
+            }
             if remaining == 0 {
                 break;
             }
@@ -183,7 +186,14 @@ impl VfsNodeOps for TFSVfsNode {
             let mut buffer = [0u8; 2048];
 
             let copy_size = core::cmp::min(remaining, block_size);
-            buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+            if lba != 0 && lba > i * 2048 {
+                if let Err(_) = read_tfs_block(device.lock().as_mut(), block, &mut buffer) {
+                    return Err(());
+                }
+                buffer[(lba % 2048)..((lba % 2048) + copy_size)].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+            } else {
+                buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+            }
             if let Err(_) = write_tfs_block(device.lock().as_mut(), block, &buffer) {
                 return Err(());
             }
@@ -209,6 +219,9 @@ impl VfsNodeOps for TFSVfsNode {
 
             let zone_entries = 2048 / 4;
             for i in 0..(zone_entries - 1) {
+                if lba / 2048 < i + 7 {
+                    continue;
+                }
                 if remaining == 0 {
                     break;
                 }
@@ -230,8 +243,14 @@ impl VfsNodeOps for TFSVfsNode {
 
                 let mut buffer = [0u8; 2048];
                 let copy_size = core::cmp::min(remaining, block_size);
-                buffer[..copy_size]
-                    .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                if lba != 0 && lba > (i + 7) * 2048 {
+                    if let Err(_) = read_tfs_block(device.lock().as_mut(), zone, &mut buffer) {
+                        return Err(());
+                    }
+                    buffer[(lba % 2048)..((lba % 2048) + copy_size)].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                } else {
+                    buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                }
                 if let Err(_) = write_tfs_block(device.lock().as_mut(), zone, &buffer) {
                     return Err(());
                 }
@@ -359,7 +378,7 @@ impl VfsNodeOps for TFSVfsNode {
             }
         }
 
-        self.inode.size = bytes_written as u64;
+        self.inode.size = (bytes_written + lba) as u64 ;
         self.ctx
             .lock()
             .write_inode_twilight(self.inode_no, self.inode)

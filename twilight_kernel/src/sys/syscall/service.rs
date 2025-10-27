@@ -42,7 +42,8 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
             };
 
             if let Some(node) = process.handler.get_mut(n as usize - 3) {
-                if let Ok(_) = node.handler.lock().write(buf) {
+                if let Ok(_) = node.handler.lock().write(node.seek, buf) {
+                    node.seek += len;
                     return len as i64;
                 }
             }

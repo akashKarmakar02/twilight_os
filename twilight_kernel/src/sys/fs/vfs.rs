@@ -105,8 +105,8 @@ impl VfsNode {
         self.node.read().read(&mut self.device, 0, &mut [])
     }
 
-    pub fn write(&mut self, data: &[u8]) -> Result<(), ()> {
-        self.node.write().write(&mut self.device, 0, data)
+    pub fn write(&mut self, lba: usize, data: &[u8]) -> Result<(), ()> {
+        self.node.write().write(&mut self.device, lba, data)
     }
 
     pub fn poll(&mut self) -> Result<bool, ()> {
