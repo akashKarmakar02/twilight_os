@@ -342,13 +342,13 @@ impl Process {
             if let Err(_) = dealloc_pages(&mut self.mapper, addr, size) {
                 println!("failed to dealloc pages in {:X} of size {}", addr, size);
             }
-
-            with_frame_allocator(|allocator| {
-                unsafe {
-                    allocator.deallocate_frame(table_frame);
-                }
-            });
         }
+
+        with_frame_allocator(|allocator| {
+            unsafe {
+                allocator.deallocate_frame(table_frame);
+            }
+        });
     }
 }
 
@@ -414,7 +414,7 @@ pub fn init() {
                 gs_base: VirtAddr::zero(),
                 fs_base: VirtAddr::zero(),
                 proc_mm,
-                parent_pid: 0,
+                parent_pid: 1,
             })
     }
 }
