@@ -1,19 +1,3 @@
-/* tsh.c - tiny shell prompt showing username@hostname:cwd$ (or # for root)
- *
- * Compile:
- *   gcc -Wall -Wextra -o tsh tsh.c
- *
- * Notes:
- * - Prompt mimics common bash/sh PS1 of the form: user@host:cwd$ (root: #)
- * - Uses getpwuid(geteuid()) -> getenv("USER") -> "unknown" fallback to
- * determine username.
- * - Shows hostname (gethostname), and current working directory (getcwd).
- * - Very simple tokenization: splits by first space; argv[1] contains rest of
- * line.
- * - Uses execve syscall; on success the process image is replaced. On failure,
- * prints errno.
- */
-
 #include <ctype.h>
 #define _GNU_SOURCE
 #include <errno.h>
@@ -47,13 +31,11 @@ static int parse_argv(const char *line, char ***argv_out) {
 
   const char *p = line;
   while (*p) {
-    /* skip whitespace */
     while (*p && isspace((unsigned char)*p))
       p++;
     if (!*p)
       break;
 
-    /* collect one argument into a temp buffer */
     size_t outcap = 64, outlen = 0;
     char *out = malloc(outcap);
     if (!out) {
@@ -80,25 +62,22 @@ static int parse_argv(const char *line, char ***argv_out) {
       }
 
       if (c == '\\') {
-        /* Backslash escapes: active outside quotes and inside double quotes */
         const char *next = p + 1;
         if (*next) {
           char e = *next;
           if (!in_single) {
-            /* Common escapes */
             if (e == 'n')
               c = '\n';
             else if (e == 't')
               c = '\t';
             else
-              c = e; /* \", \\, \ , etc. */
+              c = e;
             p += 2;
           } else {
-            /* In single quotes, backslash is literal */
             c = '\\';
             p++;
           }
-        } else { /* trailing backslash → literal */
+        } else {
           p++;
           c = '\\';
         }
@@ -119,7 +98,6 @@ static int parse_argv(const char *line, char ***argv_out) {
       out[outlen++] = (char)c;
     }
 
-    /* close any unclosed quotes (like sh does) — we just end token */
     out[outlen] = '\0';
 
     if (argc + 2 > cap) {
@@ -133,7 +111,6 @@ static int parse_argv(const char *line, char ***argv_out) {
       argv = tmp;
     }
     argv[argc++] = out;
-    /* argv[argc] left for NULL later */
   }
 
   argv[argc] = NULL;
@@ -147,7 +124,6 @@ static void rstrip_newline(char *s) {
     s[n - 1] = '\0';
 }
 
-/* replace: #include <ctype.h> */
 static inline int ascii_isspace(unsigned char c) {
   return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' ||
          c == '\f';
@@ -163,7 +139,6 @@ static const char *get_username(char *buf, size_t bufsz) {
   if (!buf || bufsz == 0)
     return "unknown";
 
-  /* First try geteuid + getpwuid (most reliable) */
   struct passwd *pw = getpwuid(geteuid());
   if (pw && pw->pw_name && pw->pw_name[0]) {
     strncpy(buf, pw->pw_name, bufsz - 1);
@@ -171,7 +146,6 @@ static const char *get_username(char *buf, size_t bufsz) {
     return buf;
   }
 
-  /* Next try environment variable */
   const char *env_user = getenv("USER");
   if (env_user && env_user[0]) {
     strncpy(buf, env_user, bufsz - 1);
@@ -179,7 +153,6 @@ static const char *get_username(char *buf, size_t bufsz) {
     return buf;
   }
 
-  /* Next try getlogin() */
   char *lg = getlogin();
   if (lg && lg[0]) {
     strncpy(buf, lg, bufsz - 1);
@@ -187,7 +160,6 @@ static const char *get_username(char *buf, size_t bufsz) {
     return buf;
   }
 
-  /* final fallback */
   strncpy(buf, "unknown", bufsz - 1);
   buf[bufsz - 1] = '\0';
   return buf;
@@ -224,13 +196,11 @@ static char *trim(char *s) {
   if (!s)
     return s;
 
-  // Trim leading whitespace
   while (isspace((unsigned char)*s))
     s++;
 
-  // Trim trailing whitespace
   if (*s == '\0')
-    return s; // all spaces
+    return s;
   char *end = s + strlen(s) - 1;
   while (end > s && isspace((unsigned char)*end))
     end--;
@@ -248,14 +218,10 @@ static void build_prompt(char *out, size_t outsz) {
   get_hostname(host, sizeof host);
   get_cwd_short(cwd, sizeof cwd);
 
-  /* choose prompt char: root -> '#', else '$' */
   char prompt_char = (geteuid() == 0) ? '#' : '$';
 
-  /* Format: user@host:cwd<prompt_char> */
-  /* Make sure we don't overflow 'out' */
   int n = snprintf(out, outsz, "%s@%s:%s%c ", user, host, cwd, prompt_char);
   if (n < 0 || (size_t)n >= outsz) {
-    /* truncated - fallback */
     strncpy(out, "shell> ", outsz - 1);
     out[outsz - 1] = '\0';
   }
@@ -267,7 +233,6 @@ int main(void) {
 
   for (;;) {
     build_prompt(prompt_buf, sizeof prompt_buf);
-    /* Print prompt and flush so it appears even if stdout is line-buffered */
     printf("\x1b[92m%s\x1b[0m", prompt_buf);
     fflush(stdout);
 
@@ -303,9 +268,6 @@ int main(void) {
     if (space)
       *space = '\0';
 
-    /* Copy argv[0] into cmdline safely: cmdline points into 'line', so compute
-       remaining space in 'line' and use snprintf to avoid the strncpy-sizeof
-       mismatch. */
     {
       size_t cmdcap = sizeof(line) - (size_t)(cmdline - line);
       if (cmdcap == 0)
@@ -313,7 +275,6 @@ int main(void) {
       snprintf(cmdline, cmdcap, "%s", argv[0]);
     }
 
-    /* If cmdline doesn't start with '/', prefix it with "/bin/" */
     char fullpath[512];
     const char *path;
     if (cmdline[0] == '/')
@@ -323,17 +284,11 @@ int main(void) {
       path = fullpath;
     }
 
-    /* Provide an empty environment vector (safer than NULL on custom kernels)
-     */
     char *const envp[] = {NULL};
 
-    /* Use syscall directly as in your original code */
     long rc = syscall(SYS_execve, path, argv, envp);
 
-    /* On success execve does not return. On failure, syscall returns -1 and
-     * errno is set. */
     if (rc == -1) {
-      /* Use errno for error text */
       printf("tsh: %s: %s\n", cmdline, strerror(errno));
       continue;
     }

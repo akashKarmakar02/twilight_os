@@ -1,4 +1,3 @@
-// rm.c - a minimal version of the Unix 'rm' command
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>

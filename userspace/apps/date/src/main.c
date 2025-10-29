@@ -10,16 +10,15 @@ int main(void) {
     time_t t;
     if (time(&t) == (time_t)-1) return 1;
 
-    /* Add IST offset (+5:30 = 19800 seconds) */
     t += 19800;
 
     struct tm tm;
-    if (!gmtime_r(&t, &tm)) return 1; /* gmtime_r on the shifted epoch => IST fields */
+    if (!gmtime_r(&t, &tm)) return 1;
 
     static const char *days[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
 
-    int hour24 = tm.tm_hour; /* 0..23 */
+    int hour24 = tm.tm_hour;
     const char *ampm = hour24 >= 12 ? "PM" : "AM";
     int hour12 = hour24 % 12;
     if (hour12 == 0) hour12 = 12;
@@ -35,7 +34,6 @@ int main(void) {
 
     if (n < 0) return 1;
 
-    /* write all bytes */
     ssize_t w = write(1, out, (size_t)n);
     (void)w;
     return 0;

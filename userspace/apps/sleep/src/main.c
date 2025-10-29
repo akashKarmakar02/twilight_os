@@ -5,11 +5,10 @@
 #define SYS_WRITE 1
 
 struct timespec {
-    long tv_sec;   // seconds
-    long tv_nsec;  // nanoseconds
+    long tv_sec;
+    long tv_nsec;
 };
 
-// Minimal syscall wrapper (up to 3 args)
 static inline long syscall3(long n, long a1, long a2, long a3) {
     long ret;
     asm volatile (
@@ -21,7 +20,6 @@ static inline long syscall3(long n, long a1, long a2, long a3) {
     return ret;
 }
 
-// Minimal write helper for errors
 static void print(const char *s) {
     const char *p = s;
     while (*p) p++;
@@ -34,7 +32,6 @@ int main(int argc, char **argv) {
         syscall3(SYS_EXIT, 1, 0, 0);
     }
 
-    // Parse seconds (simple atol)
     long seconds = 0;
     char *p = argv[1];
     while (*p >= '0' && *p <= '9') {

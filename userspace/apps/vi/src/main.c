@@ -37,8 +37,8 @@ typedef struct {
 
 typedef struct {
   Buffer buf;
-  size_t cx, cy;           // cursor in file coords
-  size_t row_off, col_off; // scroll offsets
+  size_t cx, cy;
+  size_t row_off, col_off;
   char status_msg[256];
   time_t status_at;
   Lang lang;
@@ -280,11 +280,8 @@ static void draw_highlighted(const char *line) {
 
 struct termios orig_termios;
 
-/* ----- terminal raw mode ----- */
 static void die(const char *msg) {
-  // best-effort restore
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-  // show cursor
   write(STDOUT_FILENO, "\x1b[?25h\x1b[0m\x1b[H\x1b[2J", 17);
   perror(msg);
   exit(1);
@@ -292,7 +289,7 @@ static void die(const char *msg) {
 
 static void disable_raw(void) {
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-  write(STDOUT_FILENO, "\x1b[?25h", 6); // show cursor
+  write(STDOUT_FILENO, "\x1b[?25h", 6);
 }
 
 static void enable_raw(void) {
@@ -310,17 +307,14 @@ static void enable_raw(void) {
   if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
     die("tcsetattr");
 
-  // hide cursor, clear
   write(STDOUT_FILENO, "\x1b[?25l\x1b[2J\x1b[H", 12);
 }
 
-/* ----- window size ----- */
 static int term_rows = 49, term_cols = 160;
 
 static void update_winsize(void) {
   struct winsize ws;
   if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-    // fallback: move to bottom-right to query; keep defaults if it fails
     write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12);
     return;
   } else {
@@ -362,7 +356,6 @@ static void buf_load(Buffer *b, const char *path) {
   if (!f)
     return;
 
-  // read whole file
   fseek(f, 0, SEEK_END);
   long n = ftell(f);
   fseek(f, 0, SEEK_SET);
@@ -379,8 +372,6 @@ static void buf_load(Buffer *b, const char *path) {
   data[rn] = '\0';
   fclose(f);
 
-  // split into lines
-  // reset current empty buffer
   for (size_t i = 0; i < b->line_count; ++i)
     free(b->lines[i]);
   free(b->lines);
@@ -468,7 +459,6 @@ static void buf_backspace(Buffer *b, size_t *y, size_t *x) {
     b->dirty = true;
   } else if (*y > 0) {
     size_t prev_len = line_len(b, *y - 1);
-    // merge current line into previous
     char *prev = b->lines[*y - 1];
     char *cur = b->lines[*y];
     size_t pn = strlen(prev), cn = strlen(cur);
@@ -476,7 +466,6 @@ static void buf_backspace(Buffer *b, size_t *y, size_t *x) {
     memcpy(prev + pn, cur, cn + 1);
     b->lines[*y - 1] = prev;
 
-    // remove current line
     free(cur);
     memmove(&b->lines[*y], &b->lines[*y + 1],
             sizeof(char *) * (b->line_count - (*y + 1)));
@@ -526,7 +515,7 @@ static void clamp_cursor(void) {
 }
 
 static void scroll(void) {
-  int text_rows = term_rows - 2; // one for status, one for msg
+  int text_rows = term_rows - 2;
   if (text_rows < 1)
     text_rows = 1;
 
@@ -550,7 +539,7 @@ static void draw_rows(void) {
     text_rows = 1;
 
   for (int y = 0; y < text_rows; ++y) {
-    write(STDOUT_FILENO, "\x1b[K", 3); // clear line
+    write(STDOUT_FILENO, "\x1b[K", 3);
     size_t file_y = E.row_off + (size_t)y;
     if (file_y < E.buf.line_count) {
       char *ln = E.buf.lines[file_y];
@@ -572,7 +561,6 @@ static void draw_rows(void) {
 }
 
 static void draw_status(void) {
-  // status (reverse video)
   char buf[512];
   int n = snprintf(buf, sizeof(buf), "\x1b[7m %s%s | %s | %zu:%zu \x1b[m",
                    E.buf.filename, E.buf.dirty ? " +" : "",
@@ -582,7 +570,6 @@ static void draw_status(void) {
   write(STDOUT_FILENO, "\x1b[K", 3);
   write(STDOUT_FILENO, buf, (size_t)n);
 
-  // message line
   write(STDOUT_FILENO, "\r\n", 2);
   write(STDOUT_FILENO, "\x1b[K", 3);
   if (E.status_msg[0] && time(NULL) - E.status_at < 4) {
@@ -594,13 +581,11 @@ static void refresh_screen(void) {
   clamp_cursor();
   scroll();
 
-  // move cursor home
   write(STDOUT_FILENO, "\x1b[H", 3);
 
   draw_rows();
   draw_status();
 
-  // position cursor
   size_t rx = E.cx - (E.cx >= E.col_off ? E.col_off : E.cx);
   size_t ry = E.cy - (E.cy >= E.row_off ? E.row_off : E.cy);
   char cmdbuf[64];
@@ -778,7 +763,6 @@ int main(int argc, char **argv) {
     int c = read_key();
 
     if (c == CTRL_KEY('c')) {
-      // quit
       write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
       break;
     }
@@ -801,7 +785,7 @@ int main(int argc, char **argv) {
     case KEY_PAGE_DOWN:
       move_cursor(c);
       break;
-    case 127: // Backspace
+    case 127:
     case CTRL_KEY('h'):
       buf_backspace(&E.buf, &E.cy, &E.cx);
       break;
@@ -812,7 +796,6 @@ int main(int argc, char **argv) {
       if (c == '\r' || c == '\n' || c == '\t' || (c >= 32 && c <= 126)) {
         insert_char(c);
       }
-      // ignore other control chars
       break;
     }
   }
