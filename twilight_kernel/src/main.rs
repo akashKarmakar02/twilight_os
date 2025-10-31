@@ -4,13 +4,13 @@
 #![feature(alloc_error_handler)]
 #![feature(let_chains)]
 #![feature(decl_macro)]
+#![feature(slice_pattern)]
 #![feature(step_trait)]
 #![feature(allocator_api)]
 #![feature(stmt_expr_attributes)]
 #![feature(sync_unsafe_cell)]
 #![feature(ip_from)]
 extern crate alloc;
-
 #[macro_use]
 extern crate twilight_proc;
 
@@ -24,12 +24,12 @@ pub mod utils;
 use core::arch::asm;
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::Ordering::SeqCst;
-use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, StackSizeRequest,
 };
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
+use limine::BaseRevision;
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -154,12 +154,12 @@ fn hcf() -> ! {
     }
 }
 use crate::kernel_utils::install::INITRAMFS;
+use crate::sys::console::init_tty;
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::task::executor;
 use sys::framebuffer::init_framebuffer;
 use sys::{fs, memory};
 use x86_64::VirtAddr;
-use crate::sys::console::init_tty;
 
 pub fn init(
     fb: &Framebuffer,
@@ -186,7 +186,6 @@ pub fn init(
     init_framebuffer(fb);
 
     executor::init_executor();
-    fs::init_fs();
 
     // init_writer();
     init_tty();
@@ -217,7 +216,7 @@ pub fn init(
     }
 
     kernel_utils::dhcp::main();
-    
+
     // #[allow(static_mut_refs)]
     // if let Some(fb) = unsafe { FRAMEBUFFER.get_mut() } {
     //     fb.animate_bouncing_rect(3000);

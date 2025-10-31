@@ -1,7 +1,6 @@
 use crate::arch::x86_64::io::delay;
 use crate::driver::timer::pit::uptime;
-use crate::serial_println;
-use crate::sys::fs::{VfsError, VfsNode};
+use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
 use alloc::vec;
 use alloc::vec::Vec;
 use limine::framebuffer::Framebuffer;
@@ -10,23 +9,35 @@ use spin::Once;
 #[allow(static_mut_refs)]
 pub static mut FRAMEBUFFER: Once<TwilightFrameBuffer> = Once::new();
 pub struct TwilightFrameBuffer {
-    video_buf_addr: *mut u8,
+    pub video_buf: &'static mut [u32],
     pub height: u64,
     pub width: u64,
-    pitch: u64,
-    pixel_buf: Vec<u32>,
+    pub pitch: u64,
+    pub pixel_buf: Vec<u32>,
 }
 
 impl TwilightFrameBuffer {
     pub fn new(fb: &Framebuffer) -> Self {
-        let w = fb.width();
-        let h = fb.height();
+        let width = fb.width() as usize;
+        let height = fb.height() as usize;
+        let bits_per_pixel = fb.bpp() as usize;
+        let byte_len = width * height * (bits_per_pixel / 8);
+
+        let framebuffer = unsafe {
+            core::slice::from_raw_parts_mut::<u32>(
+                fb.addr().cast::<u32>(),
+                byte_len / 4,
+            )
+        };
+
+        assert_eq!(framebuffer.len(), (width * height));
+
         Self {
-            video_buf_addr: fb.addr(),
-            width: w,
-            height: h,
+            video_buf: framebuffer,
+            width: width as u64,
+            height: height as u64,
             pitch: fb.pitch(),                    // bytes per scanline in VRAM
-            pixel_buf: vec![0; (w * h) as usize], // compact RGBx buffer (u32 per pixel)
+            pixel_buf: vec![0; (width * height) as usize], // compact RGBx buffer (u32 per pixel)
         }
     }
 
@@ -38,20 +49,6 @@ impl TwilightFrameBuffer {
     }
     pub fn pitch(&self) -> u64 {
         self.pitch
-    }
-
-    pub fn addr(&self) -> *mut u8 {
-        self.video_buf_addr
-    }
-
-    fn extract_color(&self, pixels: &[u8]) -> u32 {
-        if pixels.len() < 4 {
-            panic!("Input data is too short to extract a color!");
-        }
-        let r = pixels[0] as u32;
-        let g = pixels[1] as u32;
-        let b = pixels[2] as u32;
-        (r << 16) | (g << 8) | b // Keep the RGB format same as input
     }
 
     #[inline]
@@ -90,19 +87,7 @@ impl TwilightFrameBuffer {
     }
 
     pub fn sync_full(&mut self) {
-        // copy pixel_buf -> VRAM (respect pitch). Each pixel is u32.
-        let w = self.width as usize;
-        let h = self.height as usize;
-        let pitch_u32 = (self.pitch / 4) as usize;
-
-        unsafe {
-            let fb_ptr = self.video_buf_addr as *mut u32;
-            for y in 0..h {
-                let src = &self.pixel_buf[y * w..y * w + w];
-                let dst_row = fb_ptr.add(y * pitch_u32);
-                core::ptr::copy_nonoverlapping(src.as_ptr(), dst_row, w);
-            }
-        }
+        self.video_buf.copy_from_slice(self.pixel_buf.as_slice());
     }
 
     // Optional: keep sync_partial but fix bounds (end is exclusive)
@@ -114,24 +99,7 @@ impl TwilightFrameBuffer {
             return;
         }
 
-        let w = self.width as usize;
-        let pitch_u32 = (self.pitch / 4) as usize;
-
-        unsafe {
-            let fb_ptr = self.video_buf_addr as *mut u32;
-            let mut i = start as usize;
-            while i < end as usize {
-                let y = i / w;
-                let x = i % w;
-
-                let run = (w - x).min(end as usize - i); // contiguous run to the end of this row
-                let src = &self.pixel_buf[i..i + run];
-                let dst = fb_ptr.add(y * pitch_u32 + x);
-                core::ptr::copy_nonoverlapping(src.as_ptr(), dst, run);
-
-                i += run;
-            }
-        }
+        self.video_buf[(start as usize)..(end as usize)].copy_from_slice(&self.pixel_buf.as_slice()[(start as usize)..(end as usize)]);
     }
 
     pub fn scroll_up(&mut self, lines: u64, fill_color: u32) {
@@ -253,7 +221,6 @@ impl TwilightFrameBuffer {
                 next_tick += frame_ms;
                 did_frame = true;
             }
-            serial_println!("frame: {}", frame_ms);
             // If we got massively behind (e.g., breakpoint), resync gently
             if !did_frame && now > next_tick + 8 * frame_ms {
                 next_tick = now + frame_ms;
@@ -419,48 +386,36 @@ fn uptime_ms() -> u64 {
     (uptime() * 1000.0) as u64
 }
 
-impl Clone for TwilightFrameBuffer {
-    fn clone(&self) -> Self {
-        Self {
-            video_buf_addr: self.video_buf_addr,
-            height: self.height,
-            width: self.width,
-            pitch: self.pitch,
-            pixel_buf: self.pixel_buf.clone(),
-        }
-    }
-}
-
-impl VfsNode for TwilightFrameBuffer {
-    fn read(&self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, VfsError> {
-        Err(VfsError::PermissionDenied)
+impl VfsNodeOps for TwilightFrameBuffer {
+    fn read(&self, _device: &mut BlockDev, _offset: usize, _buffer: &mut [u8]) -> Result<Vec<u8>, ()> {
+        Err(())
     }
 
-    fn write(&mut self, offset: u64, buffer: &[u8]) -> Result<usize, VfsError> {
+    fn write(&mut self, _device: &mut BlockDev, offset: usize, buffer: &[u8]) -> Result<(), ()> {
         if buffer.len() % 4 != 0 {
-            return Err(VfsError::InvalidOperation);
+            return Err(());
         }
 
-        let fb_ptr = self.addr();
+        let buf_u32 = unsafe {
+            core::slice::from_raw_parts(buffer.as_ptr() as *const u32, buffer.len() / 4)
+        };
 
-        unsafe {
-            let fb_u32_ptr = fb_ptr.cast::<u32>();
-            for i in 0..(buffer.len() / 4) {
-                let color = self.extract_color(&buffer[i * 4..(i + 1) * 4]);
-                fb_u32_ptr.add(i + offset as usize).write_volatile(color);
-                self.pixel_buf[i + offset as usize] = color;
-            }
-        }
+        self.video_buf[offset..(offset) + buf_u32.len()].copy_from_slice(buf_u32);
+        self.pixel_buf[offset..(offset) + buf_u32.len()].copy_from_slice(buf_u32);
 
-        Ok(buffer.len())
+        Ok(())
     }
 
-    fn size(&self) -> u64 {
-        self.width * self.height
+    fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
+        Ok(true)
     }
 
-    fn is_directory(&self) -> bool {
-        false
+    fn ioctl(&mut self, _device: &mut BlockDev, _cmd: u64, _arg: usize) -> Result<i64, ()> {
+        Ok(-1)
+    }
+
+    fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
+        Ok(-1)
     }
 }
 
@@ -484,9 +439,9 @@ pub fn get_pitch() -> u64 {
 
 pub fn convert_color(color: u32) -> [u8; 4] {
     let rgba: [u8; 4] = [
-        ((color >> 16) & 0xFF) as u8, // Red
-        ((color >> 8) & 0xFF) as u8,  // Green
-        (color & 0xFF) as u8,         // Blue
+        (color & 0xFF) as u8,         // Red (was Blue)
+        ((color >> 8) & 0xFF) as u8,  // Green (unchanged)
+        ((color >> 16) & 0xFF) as u8, // Blue (was Red)
         255,                          // Alpha (fully opaque)
     ];
 

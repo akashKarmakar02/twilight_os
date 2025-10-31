@@ -2,6 +2,7 @@ mod null;
 
 use crate::driver::disk::dummy_blockdev;
 use crate::fs::vfs::Metadata;
+use crate::sys::framebuffer::{get_framebuffer_mut, TwilightFrameBuffer};
 use crate::sys::fs::devfs::null::Null;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, VfsNode, VfsNodeOps};
 use alloc::format;
@@ -19,6 +20,16 @@ impl DevFs {
         let mut devices = Vec::new();
         let null_meta = Metadata::chr(2, "null");
         devices.push(VfsNode::new(dummy_blockdev(), null_meta, Arc::new(RwLock::new(Null))));
+        let fb_meta = Metadata::chr(3, "fb0");
+        let existing_framebuffer = get_framebuffer_mut();
+        let fb = TwilightFrameBuffer {
+            video_buf: existing_framebuffer.video_buf,
+            height: existing_framebuffer.height,
+            width: existing_framebuffer.width,
+            pitch: existing_framebuffer.pitch,
+            pixel_buf: existing_framebuffer.pixel_buf.clone(),
+        };
+        devices.push(VfsNode::new(dummy_blockdev(), fb_meta, Arc::new(RwLock::new(fb))));
 
         DevFs {
             file_structure: devices,

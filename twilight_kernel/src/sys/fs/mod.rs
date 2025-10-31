@@ -5,7 +5,6 @@ mod devfs;
 mod gdt;
 
 use crate::sys::fs::devfs::DevFs;
-use crate::sys::fs::ram_fs::RamFS;
 use crate::sys::fs::twilight_fs::TwilightFs;
 use crate::sys::fs::vfs::VFS;
 use crate::println;
@@ -15,7 +14,6 @@ use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
 
-pub static FS: OnceCell<Mutex<RamFS>> = OnceCell::uninit();
 pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
 
 pub const KERNEL_PADDING: usize = 4 * 1024 * 1024;
@@ -28,10 +26,6 @@ pub enum VfsError {
     PermissionDenied,
     InvalidOperation,
     IoError,
-}
-
-pub fn init_fs() {
-    FS.try_init_once(|| Mutex::new(RamFS::new())).unwrap();
 }
 
 pub fn init(show_log: bool) {
@@ -69,16 +63,6 @@ pub fn init(show_log: bool) {
     println!("\x1b[93mWarning\x1b[0m Trying running 'install' to install Twilight OS");
 }
 
-pub trait VfsNode: Send + Sync + 'static {
-    fn read(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, VfsError>;
-
-    fn write(&mut self, offset: u64, buffer: &[u8]) -> Result<usize, VfsError>;
-
-    fn size(&self) -> u64;
-
-    fn is_directory(&self) -> bool;
-}
-
 pub trait Vfs: Send {
     fn read(&self, inode: u64, offset: u64) -> Result<&[u8], VfsError>;
     fn write(&mut self, inode: u64, offset: u64, buffer: &[u8]) -> Result<usize, VfsError>;
@@ -89,54 +73,4 @@ pub trait Vfs: Send {
     fn readdir(&self, inode: u64) -> Result<Vec<String>, VfsError>;
     fn mount(&mut self, device: &str) -> Result<(), VfsError>;
     fn unmount(&mut self, path: &str) -> Result<(), VfsError>;
-}
-
-pub fn read(path: &str, offset: u64) -> Option<Vec<u8>> {
-    let fs = FS.try_get().unwrap().lock();
-
-    if let Ok(inode) = fs.open(path) {
-        if let Ok(bytes) = fs.read(inode, offset) {
-            Some(Vec::from(bytes))
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-}
-
-pub fn write(path: &str, offset: u64, buffer: &[u8]) -> Option<usize> {
-    let mut fs = FS.try_get().unwrap().lock();
-
-    if let Ok(inode) = fs.open(path) {
-        fs.write(inode, offset, buffer).ok()
-    } else {
-        None
-    }
-}
-
-pub fn create(path: &str) -> Option<u64> {
-    let mut fs = FS.try_get().unwrap().lock();
-
-    fs.create(path).ok()
-}
-
-pub fn delete(path: &str) -> Option<()> {
-    let mut fs = FS.try_get().unwrap().lock();
-
-    if let Ok(()) = fs.delete(path) {
-        Some(())
-    } else {
-        None
-    }
-}
-
-pub fn readdir(path: &str) -> Option<Vec<String>> {
-    let fs = FS.try_get().unwrap().lock();
-
-    if let Ok(inode) = fs.open(path) {
-        fs.readdir(inode).ok()
-    } else {
-        None
-    }
 }

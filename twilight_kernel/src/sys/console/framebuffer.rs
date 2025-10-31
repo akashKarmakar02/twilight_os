@@ -1,11 +1,12 @@
 use crate::sys::{
     console::font::PSF_FONTS,
     framebuffer::{convert_color, get_framebuffer, FRAMEBUFFER},
-    fs::VfsNode,
 };
 
-use crate::sys::framebuffer::get_framebuffer_mut;
 use alloc::vec;
+use crate::driver::disk::dummy_blockdev;
+use crate::serial_println;
+use crate::sys::fs::vfs::VfsNodeOps;
 
 /// A framebuffer-based terminal backend (no ANSI parsing, pure rendering)
 #[derive(Clone, Copy, Debug)]
@@ -86,22 +87,26 @@ impl FramebufferTerminal {
     }
 
     fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
-        let fb = get_framebuffer_mut();
-        let pitch = fb.width as usize;
-        let mut buf = vec![0u8; w * h * 4];
+        let pitch_pixels = get_framebuffer().width as usize; // pixels per row
+        let mut row_buf = vec![0u8; w * 4];
         let color_bytes = convert_color(color);
 
-        let start = y * pitch + x;
-
-        for i in 0..buf.len() / 4 {
-            buf[i * 4..i * 4 + 4].clone_from_slice(&color_bytes);
+        // prepare one scanline filled with bg color
+        for px in 0..w {
+            let off = px * 4;
+            row_buf[off..off + 4].copy_from_slice(&color_bytes);
         }
+
         #[allow(static_mut_refs)]
         unsafe {
             let fb = FRAMEBUFFER.get_mut().unwrap();
-            fb.write(start as u64, buf.as_slice()).unwrap();
+            for row in 0..h {
+                let pixel_offset = (y + row) * pitch_pixels + x; // pixel index, not bytes
+                fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf).unwrap();
+            }
+            // If you have a cheap partial sync, sync the whole rect; otherwise skip.
+            fb.sync_partial(((y * pitch_pixels) + x) as u64, (w * h) as u64);
         }
-        fb.sync_partial(start as u64, w as u64 * h as u64);
     }
 
     fn backspace(&mut self) {
@@ -125,34 +130,22 @@ impl FramebufferTerminal {
 
     /// Write a single character at the current cursor position
     pub fn put_char(&mut self, c: u8) {
-        if c == b'\n' {
-            self.new_line();
-            return;
+        match c {
+            b'\n' => { self.new_line(); return; }
+            0x08 | 0x7F => { self.backspace(); return; }
+            b'\r' => { self.cursor_x = 0; return; }
+            _ => {}
         }
 
-        if c == 0x08 || c == 0x7F {
-            self.backspace();
-            return;
-        }
+        // Clamp to printable 32..=126; render others as space so font index is valid
+        let ch = if (32..=126).contains(&c) { c } else { b' ' };
 
-        if c == b'\r' {
-            self.cursor_x = 0;
-            return;
-        }
-
-        let x = self.cursor_x * 8;
-        let y = self.cursor_y * 16;
-        self.draw_char(
-            x,
-            y,
-            ScreenChar {
-                char: c,
-                color: self.color,
-            },
-        );
+        let x = self.cursor_x * Self::CHAR_W;
+        let y = self.cursor_y * Self::CHAR_H;
+        self.draw_char(x, y, ScreenChar { char: ch, color: self.color });
 
         self.cursor_x += 1;
-        if self.cursor_x * 8 >= self.width {
+        if self.cursor_x * Self::CHAR_W > self.width {
             self.new_line();
         }
     }
@@ -188,30 +181,42 @@ impl FramebufferTerminal {
 
     /// Draw a single ScreenChar at a pixel coordinate
     fn draw_char(&self, x: usize, y: usize, screen_char: ScreenChar) {
-        let pitch = self.width;
-        let color = screen_char.color;
+        let pitch_pixels = self.width;
         let ascii = screen_char.char;
+        let fg = convert_color(screen_char.color);
+        let bg = convert_color(self.bg_color);
 
-        if let Some(font_bitmap) = PSF_FONTS.get(ascii as usize - 32) {
-            let color_bytes = convert_color(color);
-            let background_color_bytes = convert_color(self.bg_color);
+        // Guard index into PSF_FONTS
+        let glyph_opt = if (32..=126).contains(&ascii) {
+            PSF_FONTS.get((ascii - 32) as usize)
+        } else {
+            PSF_FONTS.get(0) // space
+        };
 
-            for (row, &bitmap) in font_bitmap.iter().enumerate() {
-                let mut row_buf = vec![0u8; 8 * 4]; // 8 pixels * 4 bytes/pixel
-                for col in 0..8 {
-                    if (bitmap & (1 << (7 - col))) != 0 {
-                        row_buf[col * 4..(col + 1) * 4].clone_from_slice(&color_bytes);
-                    } else {
-                        row_buf[col * 4..(col + 1) * 4].clone_from_slice(&background_color_bytes);
+        if let Some(font_bitmap) = glyph_opt {
+            #[allow(static_mut_refs)]
+            unsafe {
+                let fb = FRAMEBUFFER.get_mut().unwrap();
+
+                for (row, &bits) in font_bitmap.iter().enumerate() {
+                    // Build one scanline: bg everywhere, then overwrite fg where bit=1
+                    let mut row_buf = vec![0u8; Self::CHAR_W * 4];
+                    for col in 0..Self::CHAR_W {
+                        // Start with bg
+                        let off = col * 4;
+                        row_buf[off..off + 4].copy_from_slice(&bg);
+                        // Overlay fg if pixel bit is set
+                        if (bits & (1 << (7 - col))) != 0 {
+                            row_buf[off..off + 4].copy_from_slice(&fg);
+                        }
                     }
+
+                    let pixel_offset = (y + row) * pitch_pixels + x; // pixel index
+                    fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf).unwrap();
                 }
 
-                let pixel_offset = ((y + row) * pitch) + x; // pixel index
-                #[allow(static_mut_refs)]
-                unsafe {
-                    let fb = FRAMEBUFFER.get_mut().unwrap();
-                    fb.write(pixel_offset as u64, row_buf.as_slice()).unwrap();
-                }
+                // Optional: sync only the glyph area
+                // fb.sync_partial((y * pitch_pixels + x) as u64, (Self::CHAR_W * Self::CHAR_H) as u64);
             }
         }
     }
@@ -246,6 +251,6 @@ fn apply_console_bg(color: u32) {
     #[allow(static_mut_refs)]
     unsafe {
         let fb = FRAMEBUFFER.get_mut().unwrap();
-        fb.write(0, buf.as_slice()).unwrap();
+        fb.write(&mut dummy_blockdev(), 0, buf.as_slice()).unwrap();
     }
 }
