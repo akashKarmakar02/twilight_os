@@ -204,13 +204,11 @@ fn exec(cmd: &str, args: &[&str]) {
         }
         "gs" => crate::kernel_utils::gs::main(),
         "df" => crate::kernel_utils::df::main(args),
-        "touch" => crate::kernel_utils::touch::main(args),
         "mkdir" => crate::kernel_utils::mkdir::main(args),
         "cd" => crate::kernel_utils::cd::main(args),
         "readelf" => crate::kernel_utils::readelf::main(args),
         "install" => crate::kernel_utils::install::main(),
         "dhcp" => crate::kernel_utils::dhcp::main(),
-        // "vi" => crate::kernel_utils::vi::main(args),
         "anirect" => crate::kernel_utils::anirect::main(),
         "curl" => crate::kernel_utils::curl::main(args),
         "serve" => crate::kernel_utils::serve::main(args),

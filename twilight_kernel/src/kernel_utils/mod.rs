@@ -9,7 +9,6 @@ pub mod mkdir;
 pub mod readelf;
 pub mod rmdir;
 pub mod shutdown;
-pub mod touch;
 pub mod anirect;
 pub mod curl;
 pub mod serve;

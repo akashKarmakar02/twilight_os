@@ -136,6 +136,9 @@ pub extern "sysv64" fn syscall_handler(
             let mode = arg4 as i32;
             service::openat(arg1 as i32, path.as_str(), flags, mode as u32)
         }
+        SYS_UTIMENAT => {
+            service::utimenat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize)
+        }
         SYS_PR_LIMIT64 => {
             let pid = arg1;
             let resource = arg2 as u32;

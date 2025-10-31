@@ -29,4 +29,5 @@ pub const SYS_SETTID_ADDR: usize = 218; // dummy
 pub const SYS_CLOCK_GETTIME: usize = 228;
 pub const SYS_EXIT_GROUP: usize = 231;
 pub const SYS_OPENAT: usize = 257;
+pub const SYS_UTIMENAT: usize = 280;
 pub const SYS_PR_LIMIT64: usize = 302;

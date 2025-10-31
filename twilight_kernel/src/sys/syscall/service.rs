@@ -14,6 +14,74 @@ use core::arch::asm;
 use spin::mutex::Mutex;
 use twilight_common::syscall::types::*;
 
+fn join_paths(base: &str, rel: &str) -> String {
+    if rel.is_empty() || rel == "." {
+        return base.to_string();
+    }
+    if rel.starts_with('/') {
+        return rel.to_string();
+    }
+    if base == "/" {
+        format!("/{}", rel.trim_start_matches('/'))
+    } else {
+        format!("{}/{}", base.trim_end_matches('/'), rel)
+    }
+}
+
+fn normalize_path(p: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for seg in p.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            out.pop();
+        } else {
+            out.push(seg);
+        }
+    }
+    if out.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", out.join("/"))
+    }
+}
+
+fn base_for_dirfd(process: &mut Process, dirfd: i32) -> Result<String, i32> {
+    if dirfd == AT_FDCWD {
+        return Ok(process.pwd.clone());
+    }
+    if dirfd < 3 {
+        return Err(-EBADF);
+    }
+    let idx = (dirfd - 3) as usize;
+    if idx >= process.handler.len() {
+        return Err(-EBADF);
+    }
+
+    // You store '&'static mut Handler' in the table:
+    let h: &mut Handler = process.handler[idx];
+
+    // Ensure it’s a directory FD
+    if h.handler.lock().metadata.file_type != FileType::Dir {
+        return Err(-ENOTDIR);
+    }
+
+    Ok(h.path.clone())
+}
+fn split_parent_name(path: &str) -> (&str, &str) {
+    if let Some(p) = path.rfind('/') {
+        if p == 0 {
+            ("/", &path[1..])
+        } else {
+            (&path[..p], &path[p + 1..])
+        }
+    } else {
+        (".", path)
+    }
+}
+
+
 pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     let file_descriptor = arg1;
     let buf = arg2 as *const u8;
@@ -95,73 +163,6 @@ pub fn read(handler: usize, buf: &mut [u8]) -> i64 {
     }
 
     -1
-}
-
-fn join_paths(base: &str, rel: &str) -> String {
-    if rel.is_empty() || rel == "." {
-        return base.to_string();
-    }
-    if rel.starts_with('/') {
-        return rel.to_string();
-    }
-    if base == "/" {
-        format!("/{}", rel.trim_start_matches('/'))
-    } else {
-        format!("{}/{}", base.trim_end_matches('/'), rel)
-    }
-}
-
-fn normalize_path(p: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for seg in p.split('/') {
-        if seg.is_empty() || seg == "." {
-            continue;
-        }
-        if seg == ".." {
-            out.pop();
-        } else {
-            out.push(seg);
-        }
-    }
-    if out.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/{}", out.join("/"))
-    }
-}
-
-fn base_for_dirfd(process: &mut Process, dirfd: i32) -> Result<String, i32> {
-    if dirfd == AT_FDCWD {
-        return Ok(process.pwd.clone());
-    }
-    if dirfd < 3 {
-        return Err(-EBADF);
-    }
-    let idx = (dirfd - 3) as usize;
-    if idx >= process.handler.len() {
-        return Err(-EBADF);
-    }
-
-    // You store '&'static mut Handler' in the table:
-    let h: &mut Handler = process.handler[idx];
-
-    // Ensure it’s a directory FD
-    if h.handler.lock().metadata.file_type != FileType::Dir {
-        return Err(-ENOTDIR);
-    }
-
-    Ok(h.path.clone())
-}
-fn split_parent_name(path: &str) -> (&str, &str) {
-    if let Some(p) = path.rfind('/') {
-        if p == 0 {
-            ("/", &path[1..])
-        } else {
-            (&path[..p], &path[p + 1..])
-        }
-    } else {
-        (".", path)
-    }
 }
 
 pub fn open(path: &str, flags: i32, mode: u32) -> i64 {
@@ -795,5 +796,37 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
         return tty.ioctl(&mut dummy_blockdev(), cmd as u64, arg).unwrap();
     }
 
+    0
+}
+
+pub fn utimenat(dirfd: i32, str_ptr: usize, time_ptr: usize, _flags: usize) -> i64 {
+    if dirfd != -100 {
+        return -1;
+    }
+    
+    let usr_ptr = UserPtr(str_ptr as *const u8);
+    
+    let Ok(path) = copy_cstr_from_user(usr_ptr, 4096) else {
+        return -(EFAULT as i64);
+    };
+    
+    #[allow(static_mut_refs)]
+    let process = unsafe { PROCESS_TABLE.get_mut_unchecked().get_process(crate::sys::proc::id()).unwrap() };
+    
+    
+    let can_path = if path.starts_with("/") {
+        path
+    } else {
+        format!("{}/{}",process.pwd, path)
+    };
+    
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+    
+    let Ok(node) = fs.open(can_path.as_str()) else {
+        return -(ENOENT) as i64;
+    };
+    
+    
     0
 }
