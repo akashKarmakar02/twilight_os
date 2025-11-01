@@ -586,6 +586,9 @@ impl VfsNodeOps for Tty {
                             if *self.read_to_count.lock() > 1 {
                                 *self.read_to_count.lock() -= 2;
                                 crate::print!("{}", c as char);
+                                if buf.len() > 1 {
+                                    i -= 1;
+                                }
                             } else {
                                 *self.read_to_count.lock() -= 1;
                             }
@@ -607,6 +610,7 @@ impl VfsNodeOps for Tty {
             }
         }
 
+        // *self.read_to_count.lock() = 0;
         let res = Vec::from(&buf[..i]);
 
         Ok(res)

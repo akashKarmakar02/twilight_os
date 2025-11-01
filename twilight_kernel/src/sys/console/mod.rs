@@ -69,9 +69,11 @@ fn handle_console_input() {
         }
         let c = buf[0] as char;
         match c {
-            '\r' => {
+            '\u{8}' | '\u{7F}' => {
                 if !STDIO.lock().is_empty() {
-
+                    STDIO.lock().pop();
+                    let mut cur_pos = CURSOR_POSITION.lock();
+                    *cur_pos -= 1;
                 }
             }
             '\n' => {
@@ -105,15 +107,6 @@ fn handle_console_input() {
                 STDIO.lock().push(' ');
                 let mut cur_pos = CURSOR_POSITION.lock();
                 *cur_pos += 4;
-            }
-            '\x08' => {
-                if *CURSOR_POSITION.lock() > 2 {
-                    let mut cmd_line = STDIO.lock();
-                    if !cmd_line.trim().is_empty() {
-                        cmd_line.pop();
-                    }
-                    *CURSOR_POSITION.lock() -= 1;
-                }
             }
             // up arrow key
             '\u{F700}' => {
