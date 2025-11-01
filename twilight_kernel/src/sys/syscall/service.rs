@@ -805,7 +805,7 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
     handler.handler.lock().ioctl(cmd as u64, arg).unwrap()
 }
 
-pub fn utimenat(dirfd: i32, str_ptr: usize, time_ptr: usize, _flags: usize) -> i64 {
+pub fn utimenat(dirfd: i32, str_ptr: usize, _time_ptr: usize, _flags: usize) -> i64 {
     if dirfd != -100 {
         return -1;
     }
@@ -829,8 +829,8 @@ pub fn utimenat(dirfd: i32, str_ptr: usize, time_ptr: usize, _flags: usize) -> i
     #[allow(static_mut_refs)]
     let fs = unsafe { VFS.get_mut() };
     
-    let Ok(node) = fs.open(can_path.as_str()) else {
-        return -(ENOENT) as i64;
+    let Ok(_node) = fs.open(can_path.as_str()) else {
+        return -ENOENT as i64;
     };
     
     

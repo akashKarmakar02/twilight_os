@@ -5,7 +5,6 @@ use crate::sys::{
 
 use alloc::vec;
 use crate::driver::disk::dummy_blockdev;
-use crate::serial_println;
 use crate::sys::fs::vfs::VfsNodeOps;
 
 /// A framebuffer-based terminal backend (no ANSI parsing, pure rendering)

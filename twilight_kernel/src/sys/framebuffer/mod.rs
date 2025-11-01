@@ -8,6 +8,32 @@ use spin::Once;
 
 #[allow(static_mut_refs)]
 pub static mut FRAMEBUFFER: Once<TwilightFrameBuffer> = Once::new();
+
+pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
+pub const FBIOPUT_VSCREENINFO: u64 = 0x4601;
+pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
+pub const FBIOGETCMAP: u64 = 0x4604;
+pub const FBIOPUTCMAP: u64 = 0x4605;
+pub const FBIOPAN_DISPLAY: u64 = 0x4606;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FbVarScreenInfo {
+    pub xres: u32,
+    pub yres: u32,
+    pub bits_per_pixel: u32,
+    pub red_offset: u32,
+    pub green_offset: u32,
+    pub blue_offset: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FbFixScreenInfo {
+    pub line_length: u32,
+    pub smem_len: u32,
+}
+
 pub struct TwilightFrameBuffer {
     pub video_buf: &'static mut [u32],
     pub height: u64,
@@ -410,8 +436,53 @@ impl VfsNodeOps for TwilightFrameBuffer {
         Ok(true)
     }
 
-    fn ioctl(&mut self, _device: &mut BlockDev, _cmd: u64, _arg: usize) -> Result<i64, ()> {
-        Ok(-1)
+    fn ioctl(&mut self, _device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()> {
+        match cmd {
+            FBIOGET_VSCREENINFO => {
+                let info = FbVarScreenInfo {
+                    xres: self.width as u32,
+                    yres: self.height as u32,
+                    bits_per_pixel: 4,
+                    red_offset: 16,
+                    green_offset: 8,
+                    blue_offset: 0,
+                };
+
+                unsafe {
+                    let ptr = arg as *mut FbVarScreenInfo;
+                    if ptr.is_null() {
+                        return Ok(-22);
+                    }
+                    core::ptr::write(ptr, info);
+                }
+
+                Ok(0)
+            }
+
+            FBIOGET_FSCREENINFO => {
+                let info = FbFixScreenInfo {
+                    line_length: self.pitch as u32,
+                    smem_len: (self.pitch * self.height) as u32,
+                };
+
+                unsafe {
+                    let ptr = arg as *mut FbFixScreenInfo;
+                    if ptr.is_null() {
+                        return Ok(-22);
+                    }
+                    core::ptr::write(ptr, info);
+                }
+
+                Ok(0)
+            }
+
+            FBIOPAN_DISPLAY => {
+                // Optional — just acknowledge panning request for now
+                Ok(0)
+            }
+
+            _ => Ok(-1),
+        }
     }
 
     fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
