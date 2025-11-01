@@ -4,6 +4,7 @@ use crate::sys::fs::vfs::{BlockDev, FsCtx, VfsNodeOps};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
+use twilight_common::syscall::types::EISDIR;
 
 #[allow(dead_code)]
 #[repr(u16)]
@@ -396,6 +397,9 @@ impl VfsNodeOps for TFSVfsNode {
     }
 
     fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
+        if self.inode.mode == 0o040777 {
+            return Ok(-EISDIR)
+        }
         if self.ctx.lock().remove_file(self.full_path.as_str()).is_err() {
             Ok(-1)
         } else {

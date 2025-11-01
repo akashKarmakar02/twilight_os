@@ -4,7 +4,7 @@ use crate::sys::console::{get_tty, DIR};
 use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
 use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
-use crate::print;
+use crate::{print, serial_println};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -109,6 +109,7 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
                     .unwrap()
             };
 
+            serial_println!("Here");
             if let Some(node) = process.handler.get_mut(n as usize - 3) {
                 if let Ok(_) = node.handler.lock().write(node.seek, buf) {
                     node.seek += len;
@@ -796,7 +797,12 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
         return tty.ioctl(&mut dummy_blockdev(), cmd as u64, arg).unwrap();
     }
 
-    0
+    #[allow(static_mut_refs)]
+    let handler = unsafe { PROCESS_TABLE.get_mut().unwrap_unchecked().get_process(crate::sys::proc::id()).unwrap_unchecked().handler.get(fd - 2).unwrap() };
+
+
+
+    handler.handler.lock().ioctl(cmd as u64, arg).unwrap()
 }
 
 pub fn utimenat(dirfd: i32, str_ptr: usize, time_ptr: usize, _flags: usize) -> i64 {

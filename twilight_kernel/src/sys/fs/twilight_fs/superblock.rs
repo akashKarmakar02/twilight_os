@@ -45,7 +45,7 @@ impl Superblock {
         let blocks_per_zone = 1u64 << log_zone_size;    // = 1
         let reserved_blocks = 1u64;                     // super at block 0
 
-        // ---- device geometry (sector-level) ----
+        // ---- device geometry (sector-level/IO Level) ----
         let dev_sector_size = device.block_size() as u64;       // 512
         let dev_sectors     = device.block_count() as u64;      // in 512B units
         let sectors_per_fs_block = block_size / dev_sector_size; // 2048/512 = 4
@@ -88,8 +88,8 @@ impl Superblock {
             first_data_zone: first_data_zone as u32,
             log_zone_size,
             pad2: 0,
-            max_size: 0x7FFF_FFFF,            // keep if that’s your limit
-            zones: total_zones as u32,        // <-- TOTAL zones, not data_zones
+            max_size: 0x7FFF_FFFF,            // mock limit don't know what i am going to do
+            zones: total_zones as u32,        // <-- TOTAL zones
             magic: u32::from_le_bytes(MAGIC), // 'T','F','S','0'
             pad3: 0,
             block_size: FS_BLOCK_SIZE as u16, // 2048
