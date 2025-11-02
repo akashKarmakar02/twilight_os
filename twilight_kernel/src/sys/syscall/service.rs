@@ -28,6 +28,23 @@ fn join_paths(base: &str, rel: &str) -> String {
     }
 }
 
+#[inline(always)]
+fn parent_path(path: &str) -> &str {
+    // Remove trailing slash (except root)
+    let path = if path != "/" && path.ends_with('/') {
+        &path[..path.len() - 1]
+    } else {
+        path
+    };
+
+    // Find the last '/'
+    match path.rfind('/') {
+        Some(0) => "/", // parent of "/foo" is "/"
+        Some(idx) => &path[..idx],
+        None => ".", // no slash → current directory
+    }
+}
+
 fn normalize_path(p: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     for seg in p.split('/') {
@@ -109,7 +126,6 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
                     .unwrap()
             };
 
-            serial_println!("Here");
             if let Some(node) = process.handler.get_mut(n as usize - 3) {
                 if let Ok(_) = node.handler.lock().write(node.seek, buf) {
                     node.seek += len;
@@ -268,8 +284,9 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
         return -1;
     };
+    serial_println!("{path}");
     #[allow(static_mut_refs)]
-    let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str()) }) else {
+    let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str().trim()) }) else {
         return -2;
     };
 
@@ -798,9 +815,7 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
     }
 
     #[allow(static_mut_refs)]
-    let handler = unsafe { PROCESS_TABLE.get_mut().unwrap_unchecked().get_process(crate::sys::proc::id()).unwrap_unchecked().handler.get(fd - 2).unwrap() };
-
-
+    let handler = unsafe { PROCESS_TABLE.get_mut().unwrap_unchecked().get_process(crate::sys::proc::id()).unwrap_unchecked().handler.get_mut(fd - 3).unwrap_unchecked() };
 
     handler.handler.lock().ioctl(cmd as u64, arg).unwrap()
 }
@@ -835,4 +850,37 @@ pub fn utimenat(dirfd: i32, str_ptr: usize, _time_ptr: usize, _flags: usize) -> 
     
     
     0
+}
+
+pub fn mkdir(path_str: usize, _mode: usize) -> i64 {
+    let Ok(path) = copy_cstr_from_user(UserPtr(path_str as *const u8), 4096) else {
+        return -1;
+    };
+
+    #[allow(static_mut_refs)]
+    let process = unsafe { PROCESS_TABLE.get_mut().unwrap_unchecked().get_process(crate::sys::proc::id()).unwrap_unchecked() };
+
+    let can_path = if path.starts_with("/") {
+        path
+    } else {
+        format!("{}/{}",process.pwd, path)
+    };
+
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if let Ok(_node) = fs.open(can_path.as_str()) {
+        return -EEXIST as i64;
+    };
+
+    let parent_path = parent_path(can_path.as_str());
+    let dir_name = can_path.split("/").last().unwrap();
+
+    serial_println!("{} {}", parent_path, dir_name);
+
+    if let Ok(_) = fs.mkdir(parent_path, dir_name) {
+        0
+    } else {
+        -1
+    }
 }
