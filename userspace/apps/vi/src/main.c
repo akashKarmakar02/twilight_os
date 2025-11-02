@@ -26,7 +26,7 @@
 #define CLR_COMMENT "\x1b[38;5;242m" // gray
 #define CLR_NUMBER "\x1b[38;5;141m"  // purple
 
-typedef enum { LANG_PLAIN = 0, LANG_C, LANG_HTML } Lang;
+typedef enum { LANG_PLAIN = 0, LANG_C, LANG_HTML, LANG_PYTHON } Lang;
 
 typedef struct {
   char **lines;
@@ -52,6 +52,14 @@ static const char *keywords[] = {
     "unsigned", "signed", "long",   "short",    "float",   "double",
     "include",  "define", "break",  "continue", NULL};
 
+static const char *python_keywords[] = {
+    "and",      "as",       "assert",   "break",    "class",   "continue",
+    "def",      "del",      "elif",     "else",     "except",  "exec",
+    "finally",  "for",      "from",     "global",   "if",      "import",
+    "in",       "is",       "lambda",   "not",      "or",      "pass",
+    "print",    "raise",    "return",   "try",      "while",   "with",
+    "yield",    "False",    "True",     "None",     NULL};
+
 static Lang detect_lang(const char *fname) {
   const char *n = fname ? strrchr(fname, '.') : NULL;
   if (!n) return LANG_PLAIN;
@@ -62,6 +70,8 @@ static Lang detect_lang(const char *fname) {
     return LANG_C;
   if (!strcasecmp(n, "html") || !strcasecmp(n, "htm"))
     return LANG_HTML;
+  if (!strcasecmp(n, "py") || !strcasecmp(n, "pyw"))
+    return LANG_PYTHON;
   return LANG_PLAIN;
 }
 
@@ -134,6 +144,102 @@ static void draw_highlighted_c(const char *line) {
     }
 
     // default
+    write(STDOUT_FILENO, p, 1);
+    p++;
+  }
+}
+
+static void draw_highlighted_python(const char *line) {
+  const char *p = line;
+  while (*p) {
+    // Comment (starts with #)
+    if (*p == '#') {
+      write(STDOUT_FILENO, CLR_COMMENT, strlen(CLR_COMMENT));
+      write(STDOUT_FILENO, p, strlen(p));
+      write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      return;
+    }
+
+    // Triple-quoted strings (""" or ''')
+    if ((p[0] == '"' && p[1] == '"' && p[2] == '"') ||
+        (p[0] == '\'' && p[1] == '\'' && p[2] == '\'')) {
+      char quote = p[0];
+      write(STDOUT_FILENO, CLR_STRING, strlen(CLR_STRING));
+      write(STDOUT_FILENO, p, 3);
+      p += 3;
+      // Find closing triple quote
+      while (*p) {
+        if (p[0] == quote && p[1] == quote && p[2] == quote) {
+          write(STDOUT_FILENO, p, 3);
+          p += 3;
+          break;
+        }
+        write(STDOUT_FILENO, p, 1);
+        p++;
+      }
+      write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      continue;
+    }
+
+    // String literal (single or double quote)
+    if (*p == '"' || *p == '\'') {
+      char quote = *p++;
+      write(STDOUT_FILENO, CLR_STRING, strlen(CLR_STRING));
+      write(STDOUT_FILENO, &quote, 1);
+      while (*p && *p != quote) {
+        if (*p == '\\' && *(p + 1)) {
+          write(STDOUT_FILENO, p, 2);
+          p += 2;
+          continue;
+        }
+        write(STDOUT_FILENO, p, 1);
+        p++;
+      }
+      if (*p == quote) {
+        write(STDOUT_FILENO, p, 1);
+        p++;
+      }
+      write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      continue;
+    }
+
+    // Number
+    if ((*p >= '0' && *p <= '9') &&
+        (p == line || (!isalnum((unsigned char)*(p - 1)) && *(p - 1) != '.'))) {
+      const char *start = p;
+      while (isdigit((unsigned char)*p) || *p == '.' || 
+             *p == 'e' || *p == 'E' || *p == '+' || *p == '-')
+        p++;
+      write(STDOUT_FILENO, CLR_NUMBER, strlen(CLR_NUMBER));
+      write(STDOUT_FILENO, start, p - start);
+      write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      continue;
+    }
+
+    // Keyword
+    if (isalpha((unsigned char)*p) || *p == '_') {
+      const char *start = p;
+      while (isalnum((unsigned char)*p) || *p == '_')
+        p++;
+      size_t len = p - start;
+      bool matched = false;
+      for (int i = 0; python_keywords[i]; i++) {
+        if (strlen(python_keywords[i]) == len && !strncmp(start, python_keywords[i], len)) {
+          matched = true;
+          break;
+        }
+      }
+      if (matched) {
+        write(STDOUT_FILENO, CLR_KEYWORD, strlen(CLR_KEYWORD));
+        write(STDOUT_FILENO, start, len);
+        write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      } else {
+        write(STDOUT_FILENO, start, len);
+      }
+      continue;
+    }
+
+    // Default
     write(STDOUT_FILENO, p, 1);
     p++;
   }
@@ -274,6 +380,7 @@ static void draw_highlighted(const char *line) {
   switch (E.lang) {
     case LANG_HTML: draw_highlighted_html(line); break;
     case LANG_C:    draw_highlighted_c(line);    break;
+    case LANG_PYTHON: draw_highlighted_python(line); break;
     default:        write(STDOUT_FILENO, line, strlen(line)); break;
   }
 }
@@ -562,10 +669,13 @@ static void draw_rows(void) {
 
 static void draw_status(void) {
   char buf[512];
+  const char *lang_name = "Plain";
+  if (E.lang == LANG_HTML) lang_name = "HTML";
+  else if (E.lang == LANG_C) lang_name = "C";
+  else if (E.lang == LANG_PYTHON) lang_name = "Python";
   int n = snprintf(buf, sizeof(buf), "\x1b[7m %s%s | %s | %zu:%zu \x1b[m",
                    E.buf.filename, E.buf.dirty ? " +" : "",
-                   (E.lang==LANG_HTML?"HTML":E.lang==LANG_C?"C":"Plain"),
-                   E.cy + 1, E.cx + 1);
+                   lang_name, E.cy + 1, E.cx + 1);
   write(STDOUT_FILENO, "\r\n", 2);
   write(STDOUT_FILENO, "\x1b[K", 3);
   write(STDOUT_FILENO, buf, (size_t)n);

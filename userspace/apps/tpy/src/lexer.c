@@ -176,6 +176,8 @@ Token lexer_next(Lexer *lx) {
         case '%': advance(lx); t.kind = TOK_MODULO;  set_text(&t, "%"); break;
         case '(': advance(lx); t.kind = TOK_LPAREN; set_text(&t, "("); break;
         case ')': advance(lx); t.kind = TOK_RPAREN; set_text(&t, ")"); break;
+        case '[': advance(lx); t.kind = TOK_LBRACKET; set_text(&t, "["); break;
+        case ']': advance(lx); t.kind = TOK_RBRACKET; set_text(&t, "]"); break;
         case ':': advance(lx); t.kind = TOK_COLON;  set_text(&t, ":"); break;
         case ',': advance(lx); t.kind = TOK_COMMA;  set_text(&t, ","); break;
         case '&': advance(lx);
@@ -253,6 +255,8 @@ const char *tok_name(TokenKind k){
         case TOK_NOT: return "NOT";
         case TOK_LPAREN: return "LPAREN";
         case TOK_RPAREN: return "RPAREN";
+        case TOK_LBRACKET: return "LBRACKET";
+        case TOK_RBRACKET: return "RBRACKET";
         case TOK_COLON: return "COLON";
         case TOK_COMMA: return "COMMA";
         case TOK_NEWLINE: return "NEWLINE";

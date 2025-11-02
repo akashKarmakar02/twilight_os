@@ -42,6 +42,31 @@ typedef struct {
     int    had_error;
 } Parser;
 
+
+typedef enum {
+    PREC_LOWEST=0,
+    PREC_CMP,    // == != < > <= >=
+    PREC_ADD,    // + -
+    PREC_MUL,    // * / // %
+    PREC_POW,    // **
+    PREC_BIT,    // & | ^ ~
+    PREC_LOGICAL,// && ||
+    PREC_NOT,    // !
+    PREC_PRIMARY // atoms/calls
+} Precedence;
+
+static Precedence precedence_of(TokenKind k);
+static int is_binop(TokenKind k);
+static int is_right_assoc(TokenKind k);
+
+/* parse_binop_rhs is referenced from parse_primary, so declare it now */
+static Expr *parse_binop_rhs(Parser *p, Precedence min_prec, Expr *lhs);
+
+static Expr *parse_expr(Parser *p);
+static Stmt *parse_stmt(Parser *p);
+static Expr *parse_expr_continuation(Parser *p, Expr *lhs); // fwd
+static Expr *parse_primary(Parser *p); 
+
 /* ---------- Arenas ---------- */
 static Expr EXPR_ARENA[MAX_EXPRS];
 static int  EXPR_TOP = 0;
@@ -126,6 +151,30 @@ static Expr *parse_primary(Parser *p) {
         parser_next(p);
         return e;
     }
+    // List literal: [expr, ...]
+    if (p->cur.kind == TOK_LBRACKET) {
+        Token list_tok = p->cur;
+        parser_next(p);
+        e = new_expr(); if (!e) return NULL;
+        e->kind = NK_LIST;
+        e->tok = list_tok;
+        e->args.count = 0;
+        
+        if (p->cur.kind != TOK_RBRACKET) {
+            Expr *item = parse_expr(p);
+            if (item && e->args.count < MAX_ARGS)
+                e->args.items[e->args.count++] = item;
+            
+            while (accept(p, TOK_COMMA)) {
+                if (p->cur.kind == TOK_RBRACKET) break; // trailing comma
+                item = parse_expr(p);
+                if (item && e->args.count < MAX_ARGS)
+                    e->args.items[e->args.count++] = item;
+            }
+        }
+        expect(p, TOK_RBRACKET, "']'");
+        return e;
+    }
     if (p->cur.kind == TOK_IDENT) {
         e = new_expr(); if (!e) return NULL;
         e->kind = NK_IDENT;
@@ -134,6 +183,7 @@ static Expr *parse_primary(Parser *p) {
         parser_next(p);
 
         // possible call: IDENT "(" args? ")"
+        // possible subscript: IDENT "[" expr "]"
         if (accept(p, TOK_LPAREN)) {
             Expr *call = new_expr(); if (!call) return e;
             call->kind = NK_CALL;
@@ -154,9 +204,35 @@ static Expr *parse_primary(Parser *p) {
                 }
             }
             expect(p, TOK_RPAREN, "')'");
-            return call;
+            // also check for subscript after call: func()[index]
+            if (accept(p, TOK_LBRACKET)) {
+                Expr *subscript = new_expr(); if (!subscript) return call;
+                subscript->kind = NK_SUBSCRIPT;
+                subscript->tok = e->tok;
+                subscript->a = call;
+                
+                Expr *index = parse_expr(p);
+                if (index) subscript->b = index;
+                
+                expect(p, TOK_RBRACKET, "']'");
+                return parse_binop_rhs(p, PREC_CMP, subscript);
+            }
+            return parse_binop_rhs(p, PREC_CMP, call);
         }
-        return e;
+        // possible subscript: IDENT "[" expr "]"
+        if (accept(p, TOK_LBRACKET)) {
+            Expr *subscript = new_expr(); if (!subscript) return e;
+            subscript->kind = NK_SUBSCRIPT;
+            subscript->tok = e->tok;
+            subscript->a = e;
+            
+            Expr *index = parse_expr(p);
+            if (index) subscript->b = index;
+            
+            expect(p, TOK_RBRACKET, "']'");
+            return parse_binop_rhs(p, PREC_CMP, subscript);
+        }
+        return parse_binop_rhs(p, PREC_CMP, e);
     }
     if (accept(p, TOK_LPAREN)) {
         Expr *inner = parse_expr(p);
@@ -165,7 +241,20 @@ static Expr *parse_primary(Parser *p) {
         pe->kind = NK_PAREN;
         pe->tok  = p->cur;
         pe->a    = inner;
-        return pe;
+        // check for subscript after parentheses: (expr)[index]
+        if (accept(p, TOK_LBRACKET)) {
+            Expr *subscript = new_expr(); if (!subscript) return pe;
+            subscript->kind = NK_SUBSCRIPT;
+            subscript->tok = pe->tok;
+            subscript->a = pe;
+            
+            Expr *index = parse_expr(p);
+            if (index) subscript->b = index;
+            
+            expect(p, TOK_RBRACKET, "']'");
+            return parse_binop_rhs(p, PREC_CMP, subscript);
+        }
+        return parse_binop_rhs(p, PREC_CMP, pe);
     }
 
     fprintf(stderr, "Parse error: unexpected token %s '%s' at line %d\n",
@@ -177,18 +266,6 @@ static Expr *parse_primary(Parser *p) {
 }
 
 /* ---------- precedence climbing for binary ops ---------- */
-
-typedef enum {
-    PREC_LOWEST=0,
-    PREC_CMP,    // == != < > <= >=
-    PREC_ADD,    // + -
-    PREC_MUL,    // * / // %
-    PREC_POW,    // **
-    PREC_BIT,    // & | ^ ~
-    PREC_LOGICAL,// && ||
-    PREC_NOT,    // !
-    PREC_PRIMARY // atoms/calls
-} Precedence;
 
 static Precedence precedence_of(TokenKind k) {
     switch (k) {
@@ -354,13 +431,40 @@ static Expr *parse_ident_prefix_then_expr(Parser *p, const Token ident_tok) {
                     call->args.items[call->args.count++] = arg;
             }
         }
-        expect(p, TOK_RPAREN, "')'");
-        // continue with binops using call as lhs
-        return parse_binop_rhs(p, PREC_CMP, call);
-    }
+            expect(p, TOK_RPAREN, "')'");
+            // continue with binops using call as lhs
+            // also check for subscript after call
+            if (accept(p, TOK_LBRACKET)) {
+                Expr *subscript = new_expr(); if (!subscript) return call;
+                subscript->kind = NK_SUBSCRIPT;
+                subscript->tok = ident_tok;
+                subscript->a = call; // the list/array result
+                
+                Expr *index = parse_expr(p);
+                if (index) subscript->b = index;
+                
+                expect(p, TOK_RBRACKET, "']'");
+                return parse_binop_rhs(p, PREC_CMP, subscript);
+            }
+            return parse_binop_rhs(p, PREC_CMP, call);
+        }
+        // possible subscript: IDENT "[" expr "]"
+        if (accept(p, TOK_LBRACKET)) {
+            Expr *subscript = new_expr(); if (!subscript) return id;
+            subscript->kind = NK_SUBSCRIPT;
+            subscript->tok = ident_tok;
+            subscript->a = id; // the list/array
+            
+            Expr *index = parse_expr(p);
+            if (index) subscript->b = index; // the index
+            
+            expect(p, TOK_RBRACKET, "']'");
+            // continue with binops using subscript as lhs
+            return parse_binop_rhs(p, PREC_CMP, subscript);
+        }
 
-    // continue with binops using ident as lhs
-    return parse_binop_rhs(p, PREC_CMP, id);
+        // continue with binops using ident as lhs
+        return parse_binop_rhs(p, PREC_CMP, id);
 }
 
 
@@ -387,6 +491,44 @@ static Stmt *parse_stmt(Parser *p) {
     }
 
     // Possible assignment: IDENT '=' expr
+    // for loop: for IDENT in expr: stmt
+    if (is_kw(&p->cur, "for")) {
+        Token for_tok = p->cur; parser_next(p);
+        if (p->cur.kind != TOK_IDENT) {
+            fprintf(stderr, "Parse error: expected identifier after 'for' at line %d\n", p->cur.line);
+            p->had_error = 1;
+            return NULL;
+        }
+        Token var_tok = p->cur; parser_next(p);
+        
+        if (!accept_kw(p, "in")) {
+            fprintf(stderr, "Parse error: expected 'in' after variable name at line %d\n", p->cur.line);
+            p->had_error = 1;
+            return NULL;
+        }
+        
+        Expr *iterable = parse_expr(p);
+        expect(p, TOK_COLON, "':'");
+        
+        int same_line = (p->cur.kind != TOK_NEWLINE && p->cur.kind != TOK_EOF);
+        Stmt *body = NULL;
+        if (same_line) {
+            body = parse_stmt(p);
+        } else {
+            optional_newlines(p);
+            body = parse_stmt(p);
+        }
+        
+        Stmt *s = new_stmt(); if (!s) return body;
+        s->kind = SK_FOR;
+        s->tok = for_tok;
+        strncpy(s->lhs, var_tok.text, sizeof s->lhs);
+        s->expr = iterable;
+        s->body = body;
+        if (p->cur.kind == TOK_NEWLINE) parser_next(p);
+        return s;
+    }
+
     if (p->cur.kind == TOK_IDENT) {
         Token first = p->cur;         // keep name
         parser_next(p);               // consume IDENT

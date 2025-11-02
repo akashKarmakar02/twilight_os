@@ -17,7 +17,9 @@ typedef enum {
     NK_BINOP,        // a (op) b, op in sval
     NK_UNOP,         // op a, op in sval
     NK_CALL,         // a(args)
-    NK_PAREN         // (a)
+    NK_PAREN,        // (a)
+    NK_LIST,         // [expr, ...]
+    NK_SUBSCRIPT     // expr[expr]
 } ExprKind;
 
 typedef struct Expr Expr;
@@ -46,7 +48,8 @@ typedef enum {
     SK_EXPR,
     SK_RETURN,
     SK_FUNCDEF,
-    SK_ASSIGN            // NEW: name = expr
+    SK_ASSIGN,           // name = expr
+    SK_FOR               // for var in expr: stmt
 } StmtKind;
 
 typedef struct Stmt Stmt;
@@ -54,7 +57,7 @@ struct Stmt {
     StmtKind kind;
     Token    tok;
     Expr    *expr;         // EXPR/RETURN/ASSIGN uses this as RHS
-    char     lhs[64];      // NEW: for SK_ASSIGN (identifier name)
+    char     lhs[64];      // for SK_ASSIGN (identifier name), for SK_FOR (loop variable)
 
     // funcdef payload:
     char     fname[64];
@@ -81,13 +84,22 @@ ParseResult parse_module(Lexer *lx);
 void ast_dump(const Module *m);
 
 /* ---------- Evaluator API ---------- */
-typedef enum { VT_NONE=0, VT_INT, VT_STR } ValueType;
+typedef enum { VT_NONE=0, VT_INT, VT_STR, VT_LIST } ValueType;
+
+typedef struct Value Value;
 
 typedef struct {
+    Value *items;
+    int count;
+    int capacity;
+} ValueList;
+
+struct Value {
     ValueType type;
     long long i;
     const char *s;   // non-owning pointer into string pool or literal
-} Value;
+    ValueList list;  // for VT_LIST
+};
 
 // Execute module; returns 0 on success. Built-ins: print(...)
 int eval_module(const Module *m);
