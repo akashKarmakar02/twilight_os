@@ -4,7 +4,7 @@ use crate::sys::console::{get_tty, DIR};
 use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
 use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
-use crate::{print, serial_println};
+use crate::{print, sys};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -268,11 +268,19 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
         // }
     }
 
+    let mut initial_seek: usize = 0;
+    if node.metadata.file_type == FileType::File {
+        let file_len = node.metadata.size;
+        if (flags & O_APPEND) != 0 {
+            initial_seek = file_len;
+        }
+    }
+
     // Install FD
     let new_fd = process.handler.len() + 3;
     let h = Box::leak(Box::new(Handler {
         handler: Arc::new(Mutex::new(node)),
-        seek: 0,
+        seek: initial_seek,
         path: full_path,
         flags, // <-- store flags so read/write can enforce later
     }));
@@ -284,7 +292,7 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
         return -1;
     };
-    serial_println!("{path}");
+    
     #[allow(static_mut_refs)]
     let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str().trim()) }) else {
         return -2;
@@ -876,11 +884,17 @@ pub fn mkdir(path_str: usize, _mode: usize) -> i64 {
     let parent_path = parent_path(can_path.as_str());
     let dir_name = can_path.split("/").last().unwrap();
 
-    serial_println!("{} {}", parent_path, dir_name);
 
     if let Ok(_) = fs.mkdir(parent_path, dir_name) {
         0
     } else {
         -1
     }
+}
+
+pub fn setuid(uid: u64) -> i64 {
+    sys::proc::user::set_uid(uid as usize);
+    sys::proc::user::set_user_env();
+
+    0
 }

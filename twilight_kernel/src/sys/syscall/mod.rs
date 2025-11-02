@@ -68,6 +68,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_CHDIR => service::chdir(arg1 as usize),
         SYS_MKDIR => service::mkdir(arg1 as usize, arg2 as usize),
         SYS_UNLINK => service::unlink(arg1 as usize),
+        SYS_SET_UID => service::setuid(arg1),
         SYS_GET_EUID => 0,
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
         SYS_GET_TID => {

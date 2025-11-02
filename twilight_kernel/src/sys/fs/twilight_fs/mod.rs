@@ -10,7 +10,7 @@ use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
-use crate::{driver};
+use crate::driver;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -24,8 +24,8 @@ pub const FS_BLOCK_SIZE: usize = 2048;
 pub const FS_BLOCK_OFFSET: usize = 0;
 
 pub fn read_tfs_block(device: &mut dyn BlockDeviceIO, block_no: u32, buf: &mut [u8; 2048]) -> Result<(), FsError> {
-    let block_no = FS_BLOCK_OFFSET + block_no as usize;
-    let start_block = block_no * 4;
+    let block_no = block_no as usize;
+    let start_block = (block_no * 4) + (FS_BLOCK_OFFSET / 512);
     let end_block = start_block + 4;
     let mut temp_buf = [0u8; 512];
     let mut offset = 0;
@@ -42,8 +42,8 @@ pub fn read_tfs_block(device: &mut dyn BlockDeviceIO, block_no: u32, buf: &mut [
 }
 
 pub fn write_tfs_block(device: &mut dyn BlockDeviceIO, block_no: u32, buf: &[u8; 2048]) -> Result<(), FsError> {
-    let block_no = FS_BLOCK_OFFSET + block_no as usize;
-    let start_block = block_no * 4;
+    let block_no = block_no as usize;
+    let start_block = (block_no * 4) + (FS_BLOCK_OFFSET / 512);
 
     for i in 0..4 {
         let t_buf = &buf[i*512..(i+1)*512];

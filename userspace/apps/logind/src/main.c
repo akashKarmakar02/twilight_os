@@ -83,8 +83,6 @@ static char *get_password(const char *prompt) {
         close(tty_fd);
     }
     
-    printf("\n");
-    
     if (len < 0) {
         return NULL;
     }
@@ -360,39 +358,48 @@ static int authenticate_user(const char *username, const char *password) {
 
 static int do_login(void) {
     char username[USERNAME_MAX + 1];
-    char *password;
     
-    printf("Username: ");
-    fflush(stdout);
-    
-    if (!fgets(username, sizeof(username), stdin)) {
-        fprintf(stderr, "logind: failed to read username\n");
-        return 1;
+    for (;;) {
+        char *password;
+        
+        printf("Username: ");
+        fflush(stdout);
+        
+        if (!fgets(username, sizeof(username), stdin)) {
+            // EOF or error - exit
+            if (feof(stdin)) {
+                printf("\n");
+                return 1;
+            }
+            fprintf(stderr, "logind: failed to read username\n");
+            return 1;
+        }
+        
+        // Remove newline
+        size_t len = strlen(username);
+        if (len > 0 && username[len - 1] == '\n')
+            username[len - 1] = '\0';
+        
+        if (strlen(username) == 0) {
+            fprintf(stderr, "logind: username cannot be empty\n");
+            continue; // Retry
+        }
+        
+        password = get_password("Password: ");
+        if (!password || strlen(password) == 0) {
+            fprintf(stderr, "logind: password cannot be empty\n");
+            continue; // Retry
+        }
+        
+        if (!authenticate_user(username, password)) {
+            fprintf(stderr, "logind: login failed: invalid username or password\n");
+            continue; // Retry login
+        }
+        
+        // Authentication successful - break out of loop
+        break;
     }
-    
-    // Remove newline
-    size_t len = strlen(username);
-    if (len > 0 && username[len - 1] == '\n')
-        username[len - 1] = '\0';
-    
-    if (strlen(username) == 0) {
-        fprintf(stderr, "logind: username cannot be empty\n");
-        return 1;
-    }
-    
-    password = get_password("Password: ");
-    if (!password || strlen(password) == 0) {
-        fprintf(stderr, "logind: password cannot be empty\n");
-        return 1;
-    }
-    
-    if (!authenticate_user(username, password)) {
-        fprintf(stderr, "logind: login failed: invalid username or password\n");
-        return 1;
-    }
-    
-    printf("logind: login successful for user '%s'\n", username);
-    
+
     // Get user info from passwd file
     FILE *fp = fopen(PASSWD_FILE, "r");
     if (fp) {

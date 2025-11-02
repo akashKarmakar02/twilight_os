@@ -1,28 +1,31 @@
 pub mod mem;
 pub mod switch;
+pub(crate) mod user;
 
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
-use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
+use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::kernel_utils::exec::jump_to_user;
-use crate::println;
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::VfsNode;
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
+use crate::sys::proc::user::USER_ENV;
+use crate::println;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::mem::size_of;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
-use spin::Once;
 use spin::mutex::Mutex;
-use x86_64::VirtAddr;
+use spin::Once;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, OffsetPageTable, PhysFrame};
+use x86_64::VirtAddr;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -156,10 +159,8 @@ impl Process {
 
         let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
 
-        for (idx, (page, kernel_page)) in pages.enumerate() {
-            if idx > 135 {
-                *page = kernel_page.clone();
-            }
+        for (_, (page, kernel_page)) in pages.enumerate() {
+            *page = kernel_page.clone();
         }
 
         let mut addr_size_vec: Vec<(u64, usize)> = Vec::new();
@@ -287,13 +288,17 @@ impl Process {
             }
         }
 
-        let env = ["USER=akash"];
-        // Some(virt_to_phys(VirtAddr::new(0x400000)).unwrap().as_u64())
+        let mut env = Vec::new();
+        let user_env = USER_ENV.lock();
+        for env_part in user_env.iter() {
+            env.push(env_part.as_str());
+        }
+
         let user_rsp = build_initial_stack(
             user_stack_top.as_u64(),
             entry_point_addr,
             Some(args),
-            Some(&env),
+            Some(env.as_slice()),
             phdr_va,
             phent,
             phnum,
