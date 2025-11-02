@@ -111,23 +111,55 @@ static Value builtin_print(int argc, const Expr *const* argv, Env *env, RetCtx *
 }
 
 /* ---------- Expression eval ---------- */
+static long long ipow(long long base, long long exp) {
+    if (exp < 0) return 0;
+    long long result = 1;
+    while (exp) {
+        if (exp & 1) result *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return result;
+}
+
 static Value binop_apply(const char *op, Value a, Value b){
     if (a.type==VT_INT && b.type==VT_INT){
         if      (strcmp(op, "+")==0) return V_INT(a.i + b.i);
         else if (strcmp(op, "-")==0) return V_INT(a.i - b.i);
         else if (strcmp(op, "*")==0) return V_INT(a.i * b.i);
         else if (strcmp(op, "/")==0) return V_INT(b.i==0 ? 0 : a.i / b.i);
+        else if (strcmp(op, "//")==0) return V_INT(b.i==0 ? 0 : (long long)(a.i / b.i));
+        else if (strcmp(op, "%")==0) return V_INT(b.i==0 ? 0 : a.i % b.i);
+        else if (strcmp(op, "**")==0) return V_INT(ipow(a.i, b.i));
         else if (strcmp(op, "==")==0) return V_INT(a.i == b.i);
+        else if (strcmp(op, "!=")==0) return V_INT(a.i != b.i);
         else if (strcmp(op, "<")==0)  return V_INT(a.i <  b.i);
         else if (strcmp(op, "<=")==0) return V_INT(a.i <= b.i);
         else if (strcmp(op, ">")==0)  return V_INT(a.i >  b.i);
         else if (strcmp(op, ">=")==0) return V_INT(a.i >= b.i);
+        else if (strcmp(op, "&")==0) return V_INT(a.i & b.i);
+        else if (strcmp(op, "|")==0) return V_INT(a.i | b.i);
+        else if (strcmp(op, "^")==0) return V_INT(a.i ^ b.i);
+        else if (strcmp(op, "&&")==0) return V_INT(is_truthy(a) && is_truthy(b));
+        else if (strcmp(op, "||")==0) return V_INT(is_truthy(a) || is_truthy(b));
     }
     // string equality only
-    if (a.type==VT_STR && b.type==VT_STR && strcmp(op,"==")==0)
-        return V_INT( (a.s && b.s) ? strcmp(a.s,b.s)==0 : a.s==b.s );
+    if (a.type==VT_STR && b.type==VT_STR) {
+        if (strcmp(op,"==")==0)
+            return V_INT( (a.s && b.s) ? strcmp(a.s,b.s)==0 : a.s==b.s );
+        else if (strcmp(op,"!=")==0)
+            return V_INT( (a.s && b.s) ? strcmp(a.s,b.s)!=0 : a.s!=b.s );
+    }
 
     // unsupported types → None
+    return V_NONE();
+}
+
+static Value unop_apply(const char *op, Value a) {
+    if (a.type==VT_INT) {
+        if (strcmp(op, "~")==0) return V_INT(~a.i);
+        else if (strcmp(op, "!")==0) return V_INT(!is_truthy(a));
+    }
     return V_NONE();
 }
 
@@ -183,6 +215,10 @@ static Value eval_expr(const Expr *e, Env *env, RetCtx *rc){
         }
         case NK_PAREN: return eval_expr(e->a, env, rc);
         case NK_CALL:  return eval_call(e, env, rc);
+        case NK_UNOP: {
+            Value a = eval_expr(e->a, env, rc);
+            return unop_apply(e->sval, a);
+        }
         case NK_BINOP: {
             Value a = eval_expr(e->a, env, rc);
             Value b = eval_expr(e->b, env, rc);

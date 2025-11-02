@@ -3,10 +3,10 @@
 // Reads source code string and produces tokens.
 //
 // Supports:
-//  - identifiers and keywords (def, if, else, while, return, print)
+//  - identifiers and keywords (def, if, else, elif, while, for, in, return, break, continue, pass, and, or, not, import, print)
 //  - integers
 //  - strings "..." with escapes
-//  - operators: + - * / = == < > <= >= ( ) : ,
+//  - operators: + - * / // % ** = == != < > <= >= & | ^ ~ ( ) : ,
 //  - newlines, indentation tokens (for Python-like block handling)
 //
 // Usage:
@@ -23,7 +23,7 @@
 
 // ---------- keywords ----------
 static const char *kw[] = {
-    "def","if","else","while","return",NULL
+    "def","if","else","elif","while","for","in","return","break","continue","pass","and","or","not","import",NULL
 };
 
 static void set_text(Token *t, const char *s) {
@@ -165,12 +165,29 @@ Token lexer_next(Lexer *lx) {
     switch (c) {
         case '+': advance(lx); t.kind = TOK_PLUS;   set_text(&t, "+"); break;
         case '-': advance(lx); t.kind = TOK_MINUS;  set_text(&t, "-"); break;
-        case '*': advance(lx); t.kind = TOK_STAR;   set_text(&t, "*"); break;
-        case '/': advance(lx); t.kind = TOK_SLASH;  set_text(&t, "/"); break;
+        case '*': advance(lx);
+            if (peek(lx) == '*') { advance(lx); t.kind = TOK_POW; set_text(&t, "**"); }
+            else { t.kind = TOK_STAR; set_text(&t, "*"); }
+            break;
+        case '/': advance(lx);
+            if (peek(lx) == '/') { advance(lx); t.kind = TOK_FLOORDIV; set_text(&t, "//"); }
+            else { t.kind = TOK_SLASH; set_text(&t, "/"); }
+            break;
+        case '%': advance(lx); t.kind = TOK_MODULO;  set_text(&t, "%"); break;
         case '(': advance(lx); t.kind = TOK_LPAREN; set_text(&t, "("); break;
         case ')': advance(lx); t.kind = TOK_RPAREN; set_text(&t, ")"); break;
         case ':': advance(lx); t.kind = TOK_COLON;  set_text(&t, ":"); break;
         case ',': advance(lx); t.kind = TOK_COMMA;  set_text(&t, ","); break;
+        case '&': advance(lx);
+            if (peek(lx) == '&') { advance(lx); t.kind = TOK_AND; set_text(&t, "&&"); }
+            else { t.kind = TOK_BIT_AND; set_text(&t, "&"); }
+            break;
+        case '|': advance(lx);
+            if (peek(lx) == '|') { advance(lx); t.kind = TOK_OR; set_text(&t, "||"); }
+            else { t.kind = TOK_BIT_OR; set_text(&t, "|"); }
+            break;
+        case '^': advance(lx); t.kind = TOK_BIT_XOR;  set_text(&t, "^"); break;
+        case '~': advance(lx); t.kind = TOK_BIT_NOT;  set_text(&t, "~"); break;
 
         case '=':
             advance(lx);
@@ -188,6 +205,12 @@ Token lexer_next(Lexer *lx) {
             advance(lx);
             if (peek(lx) == '=') { advance(lx); t.kind = TOK_GE; set_text(&t, ">="); }
             else { t.kind = TOK_GT; set_text(&t, ">"); }
+            break;
+
+        case '!':
+            advance(lx);
+            if (peek(lx) == '=') { advance(lx); t.kind = TOK_NE; set_text(&t, "!="); }
+            else { t.kind = TOK_NOT; set_text(&t, "!"); }
             break;
 
         default:
@@ -211,12 +234,23 @@ const char *tok_name(TokenKind k){
         case TOK_MINUS: return "MINUS";
         case TOK_STAR: return "STAR";
         case TOK_SLASH: return "SLASH";
+        case TOK_MODULO: return "MODULO";
+        case TOK_POW: return "POW";
+        case TOK_FLOORDIV: return "FLOORDIV";
         case TOK_EQ: return "EQ";
         case TOK_EQEQ: return "EQEQ";
+        case TOK_NE: return "NE";
         case TOK_LT: return "LT";
         case TOK_GT: return "GT";
         case TOK_LE: return "LE";
         case TOK_GE: return "GE";
+        case TOK_BIT_AND: return "BIT_AND";
+        case TOK_BIT_OR: return "BIT_OR";
+        case TOK_BIT_XOR: return "BIT_XOR";
+        case TOK_BIT_NOT: return "BIT_NOT";
+        case TOK_AND: return "AND";
+        case TOK_OR: return "OR";
+        case TOK_NOT: return "NOT";
         case TOK_LPAREN: return "LPAREN";
         case TOK_RPAREN: return "RPAREN";
         case TOK_COLON: return "COLON";

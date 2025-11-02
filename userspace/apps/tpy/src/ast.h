@@ -15,6 +15,7 @@
 typedef enum {
     NK_NUMBER, NK_STRING, NK_IDENT,
     NK_BINOP,        // a (op) b, op in sval
+    NK_UNOP,         // op a, op in sval
     NK_CALL,         // a(args)
     NK_PAREN         // (a)
 } ExprKind;

@@ -12,4 +12,4 @@ qemu.log
 
 /userspace/target
 /userspace/twilight_c.a
-/userspace/apps/*/src/main.o
+/userspace/apps/*/src/*.o

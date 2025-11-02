@@ -95,6 +95,21 @@ static Expr *parse_expr_continuation(Parser *p, Expr *lhs); // fwd
 static Expr *parse_primary(Parser *p) {
     Expr *e = NULL;
 
+    // unary operators
+    if (p->cur.kind == TOK_NOT || p->cur.kind == TOK_BIT_NOT) {
+        Token optok = p->cur;
+        parser_next(p);
+        Expr *operand = parse_primary(p);
+        if (!operand) return NULL;
+        
+        Expr *unop = new_expr(); if (!unop) return operand;
+        unop->kind = NK_UNOP;
+        unop->tok = optok;
+        strncpy(unop->sval, optok.text, sizeof unop->sval);
+        unop->a = operand;
+        return unop;
+    }
+
     if (p->cur.kind == TOK_NUMBER) {
         e = new_expr(); if (!e) return NULL;
         e->kind = NK_NUMBER;
@@ -165,27 +180,45 @@ static Expr *parse_primary(Parser *p) {
 
 typedef enum {
     PREC_LOWEST=0,
-    PREC_CMP,    // == < > <= >=
+    PREC_CMP,    // == != < > <= >=
     PREC_ADD,    // + -
-    PREC_MUL,    // * /
+    PREC_MUL,    // * / // %
+    PREC_POW,    // **
+    PREC_BIT,    // & | ^ ~
+    PREC_LOGICAL,// && ||
+    PREC_NOT,    // !
     PREC_PRIMARY // atoms/calls
 } Precedence;
 
 static Precedence precedence_of(TokenKind k) {
     switch (k) {
-        case TOK_EQEQ: case TOK_LT: case TOK_GT: case TOK_LE: case TOK_GE:
+        case TOK_AND: case TOK_OR:
+            return PREC_LOGICAL;
+        case TOK_NOT:
+            return PREC_NOT;
+        case TOK_BIT_AND: case TOK_BIT_OR: case TOK_BIT_XOR:
+            return PREC_BIT;
+        case TOK_POW:
+            return PREC_POW;
+        case TOK_EQEQ: case TOK_NE: case TOK_LT: case TOK_GT: case TOK_LE: case TOK_GE:
             return PREC_CMP;
         case TOK_PLUS: case TOK_MINUS:
             return PREC_ADD;
-        case TOK_STAR: case TOK_SLASH:
+        case TOK_STAR: case TOK_SLASH: case TOK_FLOORDIV: case TOK_MODULO:
             return PREC_MUL;
         default: return PREC_LOWEST;
     }
 }
 
 static int is_binop(TokenKind k) {
-    return k==TOK_PLUS || k==TOK_MINUS || k==TOK_STAR || k==TOK_SLASH ||
-           k==TOK_EQEQ || k==TOK_LT || k==TOK_GT || k==TOK_LE || k==TOK_GE;
+    return k==TOK_PLUS || k==TOK_MINUS || k==TOK_STAR || k==TOK_SLASH || k==TOK_FLOORDIV || k==TOK_MODULO || k==TOK_POW ||
+           k==TOK_EQEQ || k==TOK_NE || k==TOK_LT || k==TOK_GT || k==TOK_LE || k==TOK_GE ||
+           k==TOK_BIT_AND || k==TOK_BIT_OR || k==TOK_BIT_XOR ||
+           k==TOK_AND || k==TOK_OR;
+}
+
+static int is_right_assoc(TokenKind k) {
+    return k == TOK_POW;
 }
 
 static Expr *parse_binop_rhs(Parser *p, Precedence min_prec, Expr *lhs) {
@@ -200,10 +233,17 @@ static Expr *parse_binop_rhs(Parser *p, Precedence min_prec, Expr *lhs) {
         parser_next(p); // consume op
 
         Expr *rhs = parse_primary(p);
-        // handle right associative? (we only have left-assoc here)
-        while (is_binop(p->cur.kind) &&
-               precedence_of(p->cur.kind) > prec) {
-            rhs = parse_binop_rhs(p, precedence_of(p->cur.kind), rhs);
+        // handle right associative operators: for right-assoc ops use >=, for left-assoc use >
+        if (is_right_assoc(opk)) {
+            while (is_binop(p->cur.kind) &&
+                   precedence_of(p->cur.kind) >= prec) {
+                rhs = parse_binop_rhs(p, precedence_of(p->cur.kind), rhs);
+            }
+        } else {
+            while (is_binop(p->cur.kind) &&
+                   precedence_of(p->cur.kind) > prec) {
+                rhs = parse_binop_rhs(p, precedence_of(p->cur.kind), rhs);
+            }
         }
 
         Expr *bin = new_expr(); if (!bin) return lhs;
@@ -428,6 +468,10 @@ static void dump_expr(const Expr *e, int depth) {
         case NK_STRING: pad(depth); printf("STRING \"%s\"\n", e->sval); break;
         case NK_IDENT:  pad(depth); printf("IDENT %s\n", e->sval); break;
         case NK_PAREN:  pad(depth); printf("PAREN\n"); dump_expr(e->a, depth+2); break;
+        case NK_UNOP:
+            pad(depth); printf("UNOP '%s'\n", e->sval);
+            pad(depth+2); printf("operand:\n"); dump_expr(e->a, depth+4);
+            break;
         case NK_CALL:
             pad(depth); printf("CALL\n");
             pad(depth+2); printf("callee:\n");
