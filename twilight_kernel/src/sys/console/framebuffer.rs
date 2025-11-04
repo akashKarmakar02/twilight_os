@@ -16,6 +16,7 @@ pub struct FramebufferTerminal {
     pub cursor_y: usize,
     pub color: u32,
     pub bg_color: u32,
+    pub reverse: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -39,6 +40,7 @@ impl FramebufferTerminal {
             cursor_y: 0,
             color: 0xFFFFFF,
             bg_color: 0x101010,
+            reverse: false,
         };
         term.clear();
         term
@@ -119,6 +121,9 @@ impl FramebufferTerminal {
             // if self.cursor_y > 0 { self.cursor_y -= 1; self.cursor_x = self.cols().saturating_sub(1); }
         }
     }
+    pub fn set_reverse(&mut self, v: bool) {  // NEW
+        self.reverse = v;
+    }
 
     /// Clears the framebuffer with the background color
     pub fn clear(&mut self) {
@@ -182,8 +187,11 @@ impl FramebufferTerminal {
     fn draw_char(&self, x: usize, y: usize, screen_char: ScreenChar) {
         let pitch_pixels = self.width;
         let ascii = screen_char.char;
-        let fg = convert_color(screen_char.color);
-        let bg = convert_color(self.bg_color);
+        let (fg, bg) = if self.reverse {
+            (convert_color(self.bg_color), convert_color(screen_char.color))
+        } else {
+            (convert_color(screen_char.color), convert_color(self.bg_color))
+        };
 
         // Guard index into PSF_FONTS
         let glyph_opt = if (32..=126).contains(&ascii) {

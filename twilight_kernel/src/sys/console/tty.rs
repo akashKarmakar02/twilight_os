@@ -381,14 +381,20 @@ impl Tty {
                     self.sgr_bold = false;
                     self.term.color = DEFAULT_FG;
                     self.term.bg_color = DEFAULT_BG;
+                    self.term.set_reverse(false);
                 }
                 1 => {
                     self.sgr_bold = true;
                 }
+                7 => {
+                    self.term.set_reverse(true);
+                }
                 22 => {
                     self.sgr_bold = false;
                 }
-
+                27 => {
+                    self.term.set_reverse(false);
+                }
                 30..=37 => {
                     let idx = (code - 30) as u8;
                     self.term.color = ansi16_color(idx, self.sgr_bold);
@@ -463,11 +469,13 @@ impl Tty {
                     }
                 }
 
-                3 | 4 | 5 | 7 | 27 => {
+                3 | 4 | 5 => {
                     // italic/underline/blink/invert: ignore visuals for now
                 }
 
-                _ => { /* ignore unknown SGR */ }
+                _ => {
+                    serial_println!("Unknown SGR code: {}", code);
+                }
             }
         }
     }
