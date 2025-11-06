@@ -473,9 +473,7 @@ impl Tty {
                     // italic/underline/blink/invert: ignore visuals for now
                 }
 
-                _ => {
-                    serial_println!("Unknown SGR code: {}", code);
-                }
+                _ => {}
             }
         }
     }
