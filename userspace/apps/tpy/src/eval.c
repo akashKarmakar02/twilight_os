@@ -66,6 +66,59 @@ static const char *str_pool_alloc(const char *src) {
     return s;
 }
 
+/* ---------- Expression eval ---------- */
+static long long ipow(long long base, long long exp) {
+    if (exp < 0) return 0;
+    long long result = 1;
+    while (exp) {
+        if (exp & 1) result *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return result;
+}
+
+static Value list_copy(const Value *src) {
+    Value out = V_LIST();
+    if (src->type != VT_LIST) return out;
+    if (src->list.count <= 0) return out;
+    out.list.capacity = src->list.count;
+    out.list.items = malloc(sizeof(Value) * out.list.capacity);
+    if (!out.list.items) return V_NONE();
+    for (int i=0;i<src->list.count;i++) out.list.items[i] = src->list.items[i];
+    out.list.count = src->list.count;
+    return out;
+}
+
+static Value list_with_cap(int cap) {
+    Value v = V_LIST();
+    if (cap < 1) cap = 4;
+    v.list.capacity = cap;
+    v.list.items = malloc(sizeof(Value) * v.list.capacity);
+    if (!v.list.items) return V_NONE();
+    v.list.count = 0;
+    return v;
+}
+
+static int list_push_inplace(Value *lst, Value x) {
+    if (lst->type != VT_LIST) return 0;
+    if (lst->list.count >= lst->list.capacity) {
+        int nc = lst->list.capacity ? lst->list.capacity * 2 : 4;
+        Value *ni = realloc(lst->list.items, sizeof(Value) * nc);
+        if (!ni) return 0;
+        lst->list.items = ni;
+        lst->list.capacity = nc;
+    }
+    lst->list.items[lst->list.count++] = x;
+    return 1;
+}
+
+static int clampi(int x, int lo, int hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+
 static int is_truthy(Value v){
     switch(v.type){
         case VT_INT: return v.i != 0;
@@ -161,18 +214,18 @@ static Value builtin_input(int argc, const Expr *const* argv, Env *env, RetCtx *
             fflush(stdout);
         }
     }
-    
+
     char line[1024];
     if (!fgets(line, sizeof(line), stdin)) {
         return V_STR("");
     }
-    
+
     // Remove trailing newline
     size_t len = strlen(line);
     while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
         line[--len] = '\0';
     }
-    
+
     const char *s = str_pool_alloc(line);
     return V_STR(s ? s : "");
 }
@@ -236,7 +289,7 @@ static Value builtin_max(int argc, const Expr *const* argv, Env *env, RetCtx *rc
     if (argc == 0) return V_NONE();
     Value max_val = eval_expr(argv[0], env, rc);
     if (max_val.type != VT_INT) return V_NONE();
-    
+
     for (int i = 1; i < argc; i++) {
         Value v = eval_expr(argv[i], env, rc);
         if (v.type == VT_INT && v.i > max_val.i) {
@@ -251,7 +304,7 @@ static Value builtin_min(int argc, const Expr *const* argv, Env *env, RetCtx *rc
     if (argc == 0) return V_NONE();
     Value min_val = eval_expr(argv[0], env, rc);
     if (min_val.type != VT_INT) return V_NONE();
-    
+
     for (int i = 1; i < argc; i++) {
         Value v = eval_expr(argv[i], env, rc);
         if (v.type == VT_INT && v.i < min_val.i) {
@@ -266,7 +319,7 @@ static Value builtin_range(int argc, const Expr *const* argv, Env *env, RetCtx *
     // For simplicity, range returns a string representation
     // In a full implementation, this would return an iterable
     long long start = 0, stop = 0, step = 1;
-    
+
     if (argc == 1) {
         Value v = eval_expr(argv[0], env, rc);
         if (v.type == VT_INT) stop = v.i;
@@ -290,7 +343,7 @@ static Value builtin_range(int argc, const Expr *const* argv, Env *env, RetCtx *
     } else {
         return V_NONE();
     }
-    
+
     // Build range string representation
     char buf[512];
     int pos = 0;
@@ -302,17 +355,244 @@ static Value builtin_range(int argc, const Expr *const* argv, Env *env, RetCtx *
     return V_STR(str_pool_alloc(buf));
 }
 
-/* ---------- Expression eval ---------- */
-static long long ipow(long long base, long long exp) {
-    if (exp < 0) return 0;
-    long long result = 1;
-    while (exp) {
-        if (exp & 1) result *= base;
-        base *= base;
-        exp >>= 1;
+static Value builtin_type(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 1) return V_STR("none");
+    Value v = eval_expr(argv[0], env, rc);
+    switch (v.type) {
+        case VT_INT:  return V_STR("int");
+        case VT_STR:  return V_STR("str");
+        case VT_LIST: return V_STR("list");
+        default:      return V_STR("none");
     }
-    return result;
 }
+
+/* ---------- Builtin: pow(a,b) (integers) ---------- */
+static Value builtin_powf(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 2) return V_NONE();
+    Value a = eval_expr(argv[0], env, rc);
+    Value b = eval_expr(argv[1], env, rc);
+    if (a.type != VT_INT || b.type != VT_INT) return V_NONE();
+    return V_INT(ipow(a.i, b.i));
+}
+
+/* ---------- Builtin: sum(list or variadic ints) ---------- */
+static Value builtin_sum(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    long long acc = 0;
+    if (argc == 1) {
+        Value v = eval_expr(argv[0], env, rc);
+        if (v.type == VT_LIST) {
+            for (int i=0;i<v.list.count;i++)
+                if (v.list.items[i].type == VT_INT) acc += v.list.items[i].i;
+            return V_INT(acc);
+        }
+    }
+    for (int i=0;i<argc;i++){
+        Value v = eval_expr(argv[i], env, rc);
+        if (v.type == VT_INT) acc += v.i;
+    }
+    return V_INT(acc);
+}
+
+/* ---------- Builtin: join(sep, list_of_str) -> str ---------- */
+static Value builtin_join(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 2) return V_NONE();
+    Value sepv = eval_expr(argv[0], env, rc);
+    Value lv   = eval_expr(argv[1], env, rc);
+    const char *sep = (sepv.type==VT_STR && sepv.s) ? sepv.s : "";
+    if (lv.type != VT_LIST) return V_NONE();
+
+    /* first pass: length */
+    size_t total = 1; // NUL
+    int n = lv.list.count;
+    for (int i=0;i<n;i++){
+        Value it = lv.list.items[i];
+        const char *s = (it.type==VT_STR && it.s) ? it.s : "";
+        total += strlen(s);
+        if (i+1<n) total += strlen(sep);
+    }
+    char *buf = malloc(total);
+    if (!buf) return V_NONE();
+    buf[0]=0;
+
+    /* build */
+    for (int i=0;i<n;i++){
+        Value it = lv.list.items[i];
+        const char *s = (it.type==VT_STR && it.s) ? it.s : "";
+        strcat(buf, s);
+        if (i+1<n) strcat(buf, sep);
+    }
+    const char *pooled = str_pool_alloc(buf);
+    free(buf);
+    return V_STR(pooled ? pooled : "");
+}
+
+/* ---------- Builtin: split(str, sep) -> list[str] ---------- */
+static Value builtin_split(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc < 1 || argc > 2) return V_NONE();
+    Value sv = eval_expr(argv[0], env, rc);
+    Value sepv = (argc==2) ? eval_expr(argv[1], env, rc) : V_STR(" ");
+    if (sv.type != VT_STR) return V_NONE();
+    const char *s = sv.s ? sv.s : "";
+    const char *sep = (sepv.type==VT_STR && sepv.s && sepv.s[0]) ? sepv.s : " ";
+
+    Value out = list_with_cap(8);
+    if (out.type != VT_LIST) return V_NONE();
+
+    size_t seplen = strlen(sep);
+    const char *p = s;
+    while (*p) {
+        const char *q = strstr(p, sep);
+        size_t len = q ? (size_t)(q - p) : strlen(p);
+        char *tmp = malloc(len + 1);
+        if (!tmp) return V_NONE();
+        memcpy(tmp, p, len); tmp[len] = 0;
+        const char *pooled = str_pool_alloc(tmp);
+        free(tmp);
+        if (!list_push_inplace(&out, V_STR(pooled ? pooled : ""))) return V_NONE();
+        if (!q) break;
+        p = q + seplen;
+    }
+    return out;
+}
+
+/* ---------- Builtin: substr(s, start, len) -> str ---------- */
+static Value builtin_substr(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 3) return V_NONE();
+    Value sv = eval_expr(argv[0], env, rc);
+    Value st = eval_expr(argv[1], env, rc);
+    Value ln = eval_expr(argv[2], env, rc);
+    if (sv.type!=VT_STR || st.type!=VT_INT || ln.type!=VT_INT) return V_NONE();
+    const char *s = sv.s ? sv.s : "";
+    int L = (int)strlen(s);
+    int a = clampi((int)st.i, 0, L);
+    int n = clampi((int)ln.i, 0, L - a);
+    char *buf = malloc((size_t)n + 1); if (!buf) return V_NONE();
+    memcpy(buf, s + a, (size_t)n); buf[n]=0;
+    const char *pooled = str_pool_alloc(buf);
+    free(buf);
+    return V_STR(pooled ? pooled : "");
+}
+
+/* ---------- Builtin: find(s, sub) -> index or -1 ---------- */
+static Value builtin_find(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 2) return V_NONE();
+    Value sv = eval_expr(argv[0], env, rc);
+    Value tv = eval_expr(argv[1], env, rc);
+    if (sv.type!=VT_STR || tv.type!=VT_STR) return V_INT(-1);
+    const char *s = sv.s ? sv.s : "";
+    const char *t = tv.s ? tv.s : "";
+    const char *p = strstr(s, t);
+    return V_INT(p ? (long long)(p - s) : -1);
+}
+
+/* ---------- Builtin: startswith/endswith(s, prefix/suffix) -> int 0/1 ---------- */
+static Value builtin_startswith(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 2) return V_NONE();
+    Value sv = eval_expr(argv[0], env, rc);
+    Value pv = eval_expr(argv[1], env, rc);
+    if (sv.type!=VT_STR || pv.type!=VT_STR) return V_INT(0);
+    const char *s = sv.s ? sv.s : "", *p = pv.s ? pv.s : "";
+    size_t lp = strlen(p);
+    return V_INT(strncmp(s, p, lp) == 0);
+}
+static Value builtin_endswith(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 2) return V_NONE();
+    Value sv = eval_expr(argv[0], env, rc);
+    Value pv = eval_expr(argv[1], env, rc);
+    if (sv.type!=VT_STR || pv.type!=VT_STR) return V_INT(0);
+    const char *s = sv.s ? sv.s : "", *p = pv.s ? pv.s : "";
+    size_t ls = strlen(s), lp = strlen(p);
+    if (lp > ls) return V_INT(0);
+    return V_INT(strcmp(s + (ls - lp), p) == 0);
+}
+
+/* ---------- Builtin: tolower(s)/toupper(s) ---------- */
+static Value builtin_tolower(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 1) return V_NONE();
+    Value sv = eval_expr(argv[0], env, rc);
+    if (sv.type != VT_STR) return V_NONE();
+    const char *s = sv.s ? sv.s : "";
+    size_t n = strlen(s);
+    char *buf = malloc(n+1); if (!buf) return V_NONE();
+    for (size_t i=0;i<n;i++) buf[i] = (char)tolower((unsigned char)s[i]);
+    buf[n]=0;
+    const char *pooled = str_pool_alloc(buf);
+    free(buf);
+    return V_STR(pooled ? pooled : "");
+}
+static Value builtin_toupper(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 1) return V_NONE();
+    Value sv = eval_expr(argv[0], env, rc);
+    if (sv.type != VT_STR) return V_NONE();
+    const char *s = sv.s ? sv.s : "";
+    size_t n = strlen(s);
+    char *buf = malloc(n+1); if (!buf) return V_NONE();
+    for (size_t i=0;i<n;i++) buf[i] = (char)toupper((unsigned char)s[i]);
+    buf[n]=0;
+    const char *pooled = str_pool_alloc(buf);
+    free(buf);
+    return V_STR(pooled ? pooled : "");
+}
+
+/* ---------- Builtin: ord(s)/chr(i) ---------- */
+static Value builtin_ord(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 1) return V_NONE();
+    Value sv = eval_expr(argv[0], env, rc);
+    if (sv.type != VT_STR || !sv.s || !sv.s[0]) return V_INT(0);
+    return V_INT((unsigned char)sv.s[0]);
+}
+static Value builtin_chr(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 1) return V_NONE();
+    Value iv = eval_expr(argv[0], env, rc);
+    if (iv.type != VT_INT) return V_NONE();
+    char buf[2]; buf[0] = (char)(unsigned char)(iv.i & 0xFF); buf[1]=0;
+    return V_STR(str_pool_alloc(buf));
+}
+
+/* ---------- Builtin: slice(list, start, end) -> list (non-mutating) ---------- */
+static Value builtin_slice(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 3) return V_NONE();
+    Value lv = eval_expr(argv[0], env, rc);
+    Value sv = eval_expr(argv[1], env, rc);
+    Value ev = eval_expr(argv[2], env, rc);
+    if (lv.type != VT_LIST || sv.type != VT_INT || ev.type != VT_INT) return V_NONE();
+    int n = lv.list.count;
+    int a = (int)sv.i, b = (int)ev.i;
+    if (a < 0) a += n; if (b < 0) b += n;
+    a = clampi(a, 0, n); b = clampi(b, 0, n);
+    if (b < a) b = a;
+
+    Value out = list_with_cap(b - a);
+    if (out.type != VT_LIST) return V_NONE();
+    for (int i=a;i<b;i++) list_push_inplace(&out, lv.list.items[i]);
+    return out;
+}
+
+/* ---------- Builtin: push(list, x) -> new list (non-mutating) ---------- */
+static Value builtin_push(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 2) return V_NONE();
+    Value lv = eval_expr(argv[0], env, rc);
+    Value xv = eval_expr(argv[1], env, rc);
+    if (lv.type != VT_LIST) return V_NONE();
+    Value out = list_copy(&lv);
+    if (out.type != VT_LIST) return V_NONE();
+    list_push_inplace(&out, xv);
+    return out;
+}
+
+/* ---------- Builtin: concat(list1, list2) -> new list ---------- */
+static Value builtin_concat(int argc, const Expr *const* argv, Env *env, RetCtx *rc){
+    if (argc != 2) return V_NONE();
+    Value a = eval_expr(argv[0], env, rc);
+    Value b = eval_expr(argv[1], env, rc);
+    if (a.type != VT_LIST || b.type != VT_LIST) return V_NONE();
+    Value out = list_with_cap(a.list.count + b.list.count);
+    if (out.type != VT_LIST) return V_NONE();
+    for (int i=0;i<a.list.count;i++) list_push_inplace(&out, a.list.items[i]);
+    for (int i=0;i<b.list.count;i++) list_push_inplace(&out, b.list.items[i]);
+    return out;
+}
+
 
 static Value binop_apply(const char *op, Value a, Value b){
     // String concatenation and operations
@@ -362,7 +642,7 @@ static Value binop_apply(const char *op, Value a, Value b){
             return V_STR(pooled ? pooled : "");
         }
     }
-    
+
     // String multiplication: "hello" * 3
     if (strcmp(op, "*") == 0) {
         if (a.type == VT_STR && b.type == VT_INT && b.i > 0) {
@@ -392,7 +672,7 @@ static Value binop_apply(const char *op, Value a, Value b){
             return V_STR(pooled ? pooled : "");
         }
     }
-    
+
     // Integer operations
     if (a.type==VT_INT && b.type==VT_INT){
         if      (strcmp(op, "+")==0) return V_INT(a.i + b.i);
@@ -414,7 +694,7 @@ static Value binop_apply(const char *op, Value a, Value b){
         else if (strcmp(op, "&&")==0) return V_INT(is_truthy(a) && is_truthy(b));
         else if (strcmp(op, "||")==0) return V_INT(is_truthy(a) || is_truthy(b));
     }
-    
+
     // String equality
     if (a.type==VT_STR && b.type==VT_STR) {
         if (strcmp(op,"==")==0)
@@ -460,6 +740,41 @@ static Value eval_call(const Expr *call, Env *env, RetCtx *rc){
         return builtin_min(call->args.count, (const Expr *const*)call->args.items, env, rc);
     } else if (strcmp(fn_name, "range") == 0) {
         return builtin_range(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "range") == 0) {
+        return builtin_range(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "type") == 0) {
+        return builtin_type(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "pow") == 0) {
+        return builtin_powf(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "sum") == 0) {
+        return builtin_sum(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "join") == 0) {
+        return builtin_join(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "split") == 0) {
+        return builtin_split(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "substr") == 0) {
+        return builtin_substr(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "find") == 0) {
+        return builtin_find(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "startswith") == 0) {
+        return builtin_startswith(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "endswith") == 0) {
+        return builtin_endswith(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "tolower") == 0) {
+        return builtin_tolower(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "toupper") == 0) {
+        return builtin_toupper(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "ord") == 0) {
+        return builtin_ord(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "chr") == 0) {
+        return builtin_chr(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "slice") == 0) {
+        return builtin_slice(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "push") == 0) {
+        return builtin_push(call->args.count, (const Expr *const*)call->args.items, env, rc);
+    } else if (strcmp(fn_name, "concat") == 0) {
+      return builtin_concat(call->args.count,
+                            (const Expr *const *)call->args.items, env, rc);
     }
 
     // user function
@@ -509,7 +824,7 @@ static Value eval_expr(const Expr *e, Env *env, RetCtx *rc){
             list.list.capacity = e->args.count > 0 ? e->args.count : 4;
             list.list.items = malloc(sizeof(Value) * list.list.capacity);
             if (!list.list.items) return V_NONE();
-            
+
             for (int i = 0; i < e->args.count; i++) {
                 Value item = eval_expr(e->args.items[i], env, rc);
                 if (list.list.count >= list.list.capacity) {
@@ -524,7 +839,7 @@ static Value eval_expr(const Expr *e, Env *env, RetCtx *rc){
         case NK_SUBSCRIPT: {
             Value container = eval_expr(e->a, env, rc);
             Value index_val = eval_expr(e->b, env, rc);
-            
+
             if (container.type == VT_LIST && index_val.type == VT_INT) {
                 int idx = (int)index_val.i;
                 if (idx >= 0 && idx < container.list.count) {
@@ -581,6 +896,19 @@ static void eval_stmt(const Stmt *s, Env *env, RetCtx *rc){
                 }
             }
             break;
+        }
+        case SK_IF: {
+            for (int i = 0; i < s->n_arms; i++) {
+                Value cv = eval_expr(s->conds[i], env, rc);
+                if (is_truthy(cv)) {
+                    eval_stmt(s->bodies[i], env, rc);
+                    return;
+                }
+            }
+            if (s->else_body) {
+                eval_stmt(s->else_body, env, rc);
+            }
+            return;
         }
         default:
             break;

@@ -11,6 +11,7 @@
 #define MAX_EXPRS   4096
 #define MAX_PARAMS  16
 #define MAX_ARGS    16
+#define MAX_IF_ARMS 16
 
 typedef enum {
     NK_NUMBER, NK_STRING, NK_IDENT,
@@ -49,7 +50,16 @@ typedef enum {
     SK_RETURN,
     SK_FUNCDEF,
     SK_ASSIGN,           // name = expr
-    SK_FOR               // for var in expr: stmt
+    SK_FOR,              // for var in expr: stmt
+    SK_IF,               // if expr: stmt [elif expr: stmt] [else: stmt]
+    SK_WHILE,            // while expr: stmt
+    SK_BREAK,
+    SK_CONTINUE,
+    SK_PASS,
+    SK_PRINT,            // print expr, ...
+    SK_IMPORT,           // import expr
+    SK_DEF,              // def name(params): stmt
+    SK_END,              // end of file
 } StmtKind;
 
 typedef struct Stmt Stmt;
@@ -63,6 +73,11 @@ struct Stmt {
     char     fname[64];
     ParamList params;
     Stmt    *body;
+
+    int n_arms;                         // how many if/elif arms are present
+    struct Expr *conds[MAX_IF_ARMS];    // cond for each arm
+    struct Stmt *bodies[MAX_IF_ARMS];   // body for each arm
+    struct Stmt *else_body;             // optional else body (NULL if none)
 };
 
 typedef struct {

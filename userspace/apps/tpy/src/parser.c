@@ -65,7 +65,8 @@ static Expr *parse_binop_rhs(Parser *p, Precedence min_prec, Expr *lhs);
 static Expr *parse_expr(Parser *p);
 static Stmt *parse_stmt(Parser *p);
 static Expr *parse_expr_continuation(Parser *p, Expr *lhs); // fwd
-static Expr *parse_primary(Parser *p); 
+static Expr *parse_primary(Parser *p);
+static Stmt *parse_if_stmt(Parser *p);
 
 /* ---------- Arenas ---------- */
 static Expr EXPR_ARENA[MAX_EXPRS];
@@ -529,6 +530,10 @@ static Stmt *parse_stmt(Parser *p) {
         return s;
     }
 
+    if (is_kw(&p->cur, "if")) {
+        return parse_if_stmt(p);
+    }
+
     if (p->cur.kind == TOK_IDENT) {
         Token first = p->cur;         // keep name
         parser_next(p);               // consume IDENT
@@ -556,6 +561,45 @@ static Stmt *parse_stmt(Parser *p) {
     Expr *e = parse_expr(p);
     if (p->cur.kind == TOK_NEWLINE) parser_next(p);
     return stmt_from_expr(e, e ? e->tok : p->cur);
+}
+
+static void parse_if_arm(Parser *p, Stmt *node, const char *who) {
+    Expr *cond = parse_expr(p);
+    expect(p, TOK_COLON, "':'");
+    int same_line = (p->cur.kind != TOK_NEWLINE && p->cur.kind != TOK_EOF);
+    Stmt *body = NULL;
+    if (same_line) body = parse_stmt(p); else { optional_newlines(p); body = parse_stmt(p); }
+
+    if (node->n_arms < MAX_IF_ARMS) {
+        node->conds[node->n_arms]  = cond;
+        node->bodies[node->n_arms] = body;
+        node->n_arms++;
+    } else {
+        fprintf(stderr, "Parse error: too many %s/elif arms (max %d)\n", who, MAX_IF_ARMS);
+        p->had_error = 1;
+    }
+}
+
+static Stmt *parse_if_stmt(Parser *p) {
+    Token if_tok = p->cur; parser_next(p);
+    Stmt *node = new_stmt(); if (!node) return NULL;
+    node->kind = SK_IF; node->tok = if_tok; node->n_arms = 0; node->else_body = NULL;
+
+    parse_if_arm(p, node, "if");
+    if (p->cur.kind == TOK_NEWLINE) parser_next(p);
+
+    while (is_kw(&p->cur, "elif")) { parser_next(p); parse_if_arm(p, node, "elif"); if (p->cur.kind == TOK_NEWLINE) parser_next(p); }
+
+    if (is_kw(&p->cur, "else")) {
+        parser_next(p);
+        expect(p, TOK_COLON, "':'");
+        int same_line = (p->cur.kind != TOK_NEWLINE && p->cur.kind != TOK_EOF);
+        Stmt *eb = NULL;
+        if (same_line) eb = parse_stmt(p); else { optional_newlines(p); eb = parse_stmt(p); }
+        node->else_body = eb;
+        if (p->cur.kind == TOK_NEWLINE) parser_next(p);
+    }
+    return node;
 }
 
 // Build an IDENT primary (and optional call), then continue with binops
@@ -651,6 +695,20 @@ static void dump_stmt(const Stmt *s, int depth) {
             pad(depth+2); printf("body:\n");
             dump_stmt(s->body, depth+4);
             break;
+        case SK_IF: {
+            pad(depth); printf("STMT: IF\n");
+            for (int i = 0; i < s->n_arms; i++) {
+                pad(depth+2); printf("arm %d cond:\n", i);
+                dump_expr(s->conds[i], depth+4);
+                pad(depth+2); printf("arm %d body:\n", i);
+                dump_stmt(s->bodies[i], depth+4);
+            }
+            if (s->else_body) {
+                pad(depth+2); printf("else:\n");
+                dump_stmt(s->else_body, depth+4);
+            }
+            break;
+        }
         default:
             pad(depth); printf("?(stmt)\n");
     }
