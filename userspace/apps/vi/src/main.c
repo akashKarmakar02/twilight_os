@@ -26,7 +26,7 @@
 #define CLR_COMMENT "\x1b[38;5;242m" // gray
 #define CLR_NUMBER "\x1b[38;5;141m"  // purple
 
-typedef enum { LANG_PLAIN = 0, LANG_C, LANG_HTML, LANG_PYTHON } Lang;
+typedef enum { LANG_PLAIN = 0, LANG_C, LANG_HTML, LANG_PYTHON, LANG_LUA } Lang;
 
 typedef struct {
   char **lines;
@@ -42,9 +42,10 @@ typedef struct {
   char status_msg[256];
   time_t status_at;
   Lang lang;
+  bool cursor_visible;
 } Editor;
 
-static Editor E;
+static Editor E = {0};
 
 static const char *keywords[] = {
     "int",      "char",   "void",   "if",       "else",    "for",
@@ -60,6 +61,13 @@ static const char *python_keywords[] = {
     "print",    "raise",    "return",   "try",      "while",   "with",
     "yield",    "False",    "True",     "None",     NULL};
 
+static const char *lua_keywords[] = { // NEW
+    "and", "break", "do", "else", "elseif", "end", "false", "for",
+    "function", "goto", "if", "in", "local", "nil", "not", "or",
+    "repeat", "return", "then", "true", "until", "while",
+    NULL
+};
+
 static Lang detect_lang(const char *fname) {
   const char *n = fname ? strrchr(fname, '.') : NULL;
   if (!n) return LANG_PLAIN;
@@ -72,7 +80,17 @@ static Lang detect_lang(const char *fname) {
     return LANG_HTML;
   if (!strcasecmp(n, "py") || !strcasecmp(n, "pyw"))
     return LANG_PYTHON;
+  if (!strcasecmp(n, "lua")) // NEW
+    return LANG_LUA;
   return LANG_PLAIN;
+}
+
+static void cursor_set(bool vis) {
+  static int cur = 1; // assume visible at process start
+  if ((int)vis == cur) return;
+  if (vis) write(STDOUT_FILENO, "\x1b[?25h", 6);
+  else     write(STDOUT_FILENO, "\x1b[?25l", 6);
+  cur = (int)vis;
 }
 
 static void draw_highlighted_c(const char *line) {
@@ -376,11 +394,122 @@ tag_done:
   }
 }
 
+static void draw_highlighted_lua(const char *line) { // NEW
+  const char *p = line;
+  while (*p) {
+    // Single-line comment --
+    if (p[0] == '-' && p[1] == '-') {
+      // Long comment block --[[ ... ]]
+      if (p[2] == '[' && p[3] == '[') {
+        const char *q = strstr(p + 4, "]]");
+        write(STDOUT_FILENO, CLR_COMMENT, strlen(CLR_COMMENT));
+        if (q) {
+          write(STDOUT_FILENO, p, (q + 2) - p);
+          p = q + 2;
+        } else {
+          write(STDOUT_FILENO, p, strlen(p));
+          p += strlen(p);
+        }
+        write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+        continue;
+      }
+      // Normal single-line comment
+      write(STDOUT_FILENO, CLR_COMMENT, strlen(CLR_COMMENT));
+      write(STDOUT_FILENO, p, strlen(p));
+      write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      return;
+    }
+
+    // String literals: "..." or '...' or [[ ... ]]
+    if (*p == '"' || *p == '\'') {
+      char quote = *p++;
+      write(STDOUT_FILENO, CLR_STRING, strlen(CLR_STRING));
+      write(STDOUT_FILENO, &quote, 1);
+      while (*p && *p != quote) {
+        if (*p == '\\' && p[1]) {
+          write(STDOUT_FILENO, p, 2);
+          p += 2;
+        } else {
+          write(STDOUT_FILENO, p, 1);
+          p++;
+        }
+      }
+      if (*p == quote) {
+        write(STDOUT_FILENO, p, 1);
+        p++;
+      }
+      write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      continue;
+    }
+    if (p[0] == '[' && p[1] == '[') {
+      const char *q = strstr(p + 2, "]]");
+      write(STDOUT_FILENO, CLR_STRING, strlen(CLR_STRING));
+      if (q) {
+        write(STDOUT_FILENO, p, (q + 2) - p);
+        p = q + 2;
+      } else {
+        write(STDOUT_FILENO, p, strlen(p));
+        p += strlen(p);
+      }
+      write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      continue;
+    }
+
+    // Number literal
+    if (isdigit((unsigned char)*p) &&
+        (p == line || !isalnum((unsigned char)*(p - 1)))) {
+      const char *start = p;
+      while (isdigit((unsigned char)*p) || *p == '.' || *p == 'e' || *p == 'E' ||
+             *p == '+' || *p == '-') {
+        p++;
+      }
+      write(STDOUT_FILENO, CLR_NUMBER, strlen(CLR_NUMBER));
+      write(STDOUT_FILENO, start, p - start);
+      write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      continue;
+    }
+
+    // Keywords and identifiers
+    if (isalpha((unsigned char)*p) || *p == '_') {
+      const char *start = p;
+      while (isalnum((unsigned char)*p) || *p == '_') p++;
+      size_t len = p - start;
+      bool matched = false;
+      for (int i = 0; lua_keywords[i]; i++) {
+        if (strlen(lua_keywords[i]) == len && !strncmp(start, lua_keywords[i], len)) {
+          matched = true;
+          break;
+        }
+      }
+      if (matched) {
+        write(STDOUT_FILENO, CLR_KEYWORD, strlen(CLR_KEYWORD));
+        write(STDOUT_FILENO, start, len);
+        write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+      } else {
+        // function name highlight: foo = function
+        if (strncmp(start, "function", len) == 0) {
+          write(STDOUT_FILENO, CLR_KEYWORD, strlen(CLR_KEYWORD));
+          write(STDOUT_FILENO, start, len);
+          write(STDOUT_FILENO, CLR_RESET, strlen(CLR_RESET));
+        } else {
+          write(STDOUT_FILENO, start, len);
+        }
+      }
+      continue;
+    }
+
+    // Default char
+    write(STDOUT_FILENO, p, 1);
+    p++;
+  }
+}
+
 static void draw_highlighted(const char *line) {
   switch (E.lang) {
     case LANG_HTML: draw_highlighted_html(line); break;
     case LANG_C:    draw_highlighted_c(line);    break;
     case LANG_PYTHON: draw_highlighted_python(line); break;
+    case LANG_LUA:    draw_highlighted_lua(line);     break;
     default:        write(STDOUT_FILENO, line, strlen(line)); break;
   }
 }
@@ -389,7 +518,8 @@ struct termios orig_termios;
 
 static void die(const char *msg) {
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-  write(STDOUT_FILENO, "\x1b[?25h\x1b[0m\x1b[H\x1b[2J", 17);
+  cursor_set(true);                           // ensure visible
+  write(STDOUT_FILENO, "\x1b[0m\x1b[H\x1b[2J", 10);
   perror(msg);
   exit(1);
 }
@@ -397,6 +527,7 @@ static void die(const char *msg) {
 static void disable_raw(void) {
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
   write(STDOUT_FILENO, "\x1b[?25h", 6);
+  cursor_set(true);
 }
 
 static void enable_raw(void) {
@@ -414,7 +545,7 @@ static void enable_raw(void) {
   if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
     die("tcsetattr");
 
-  write(STDOUT_FILENO, "\x1b[?25l\x1b[2J\x1b[H", 12);
+  write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
 }
 
 static int term_rows = 49, term_cols = 160;
@@ -861,6 +992,7 @@ int main(int argc, char **argv) {
 
   const char *path = argc > 1 ? argv[1] : NULL;
   buf_load(&E.buf, path ? path : NULL);
+  E.cursor_visible = true;
 
   update_winsize();
   enable_raw();
@@ -875,6 +1007,11 @@ int main(int argc, char **argv) {
     if (c == CTRL_KEY('c')) {
       write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
       break;
+    }
+    if (c == CTRL_KEY('v')) {          // Ctrl+V toggles visibility
+       E.cursor_visible = !E.cursor_visible;
+       set_status("cursor %s", E.cursor_visible ? "shown" : "hidden");
+       continue;
     }
     if (c == CTRL_KEY('s')) {
       if (buf_save(&E.buf) == 0)
