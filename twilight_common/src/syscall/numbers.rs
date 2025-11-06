@@ -20,6 +20,7 @@ pub const SYS_UNAME: usize = 63;
 pub const SYS_GETCWD: usize = 79;
 pub const SYS_CHDIR: usize = 80;
 pub const SYS_MKDIR: usize = 83;
+pub const SYS_RMDIR: usize = 84;
 pub const SYS_UNLINK: usize = 87;
 pub const SYS_SET_UID: usize = 105;
 pub const SYS_GET_EUID: usize = 107;

@@ -3,7 +3,7 @@ use crate::driver::disk::dummy_blockdev;
 use crate::sys::console::{get_tty, DIR};
 use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
 use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
-use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, UserPtr};
+use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, format_path, UserPtr};
 use crate::{print, sys};
 use alloc::boxed::Box;
 use alloc::format;
@@ -865,14 +865,7 @@ pub fn mkdir(path_str: usize, _mode: usize) -> i64 {
         return -1;
     };
 
-    #[allow(static_mut_refs)]
-    let process = unsafe { PROCESS_TABLE.get_mut().unwrap_unchecked().get_process(crate::sys::proc::id()).unwrap_unchecked() };
-
-    let can_path = if path.starts_with("/") {
-        path
-    } else {
-        format!("{}/{}",process.pwd, path)
-    };
+    let can_path = format_path(path);
 
     #[allow(static_mut_refs)]
     let fs = unsafe { VFS.get_mut() };
@@ -886,6 +879,21 @@ pub fn mkdir(path_str: usize, _mode: usize) -> i64 {
 
 
     if let Ok(_) = fs.mkdir(parent_path, dir_name) {
+        0
+    } else {
+        -1
+    }
+}
+
+pub fn rmdir(path_str: usize) -> i64 {
+    let Ok(path) = copy_cstr_from_user(UserPtr(path_str as *const u8), 4096) else {
+        return -1;
+    };
+    let can_path = format_path(path);
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if let Ok(_) = fs.rmdir(can_path.as_str()) {
         0
     } else {
         -1

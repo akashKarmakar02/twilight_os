@@ -1,5 +1,7 @@
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use crate::sys::proc::PROCESS_TABLE;
 
 const USER_MAX: usize = 0x0000_7fff_ffff_ffff; // canonical userspace (48-bit, upper cleared)
 
@@ -73,6 +75,18 @@ fn in_user_range(addr: usize, len: usize) -> Result<(), UserCopyError> {
     let end = addr.checked_add(len).ok_or(UserCopyError::TooLong)?;
     if end - 1 > USER_MAX { return Err(UserCopyError::Fault); }
     Ok(())
+}
+
+pub fn format_path(path: String) -> String {
+    #[allow(static_mut_refs)]
+    let process = unsafe { PROCESS_TABLE.get_mut().unwrap_unchecked().get_process(crate::sys::proc::id()).unwrap_unchecked() };
+
+    let can_path = if path.starts_with("/") {
+        path
+    } else {
+        format!("{}/{}",process.pwd, path)
+    };
+    can_path
 }
 
 pub fn copy_user_ptr_array(
