@@ -72,6 +72,12 @@ pub fn keyboard_interrupt(scancode: u8) {
                 if ps2_keyboard_state.is_ctrl_pressed && character == 'c' {
                     put_char_in_tty(0x03);
                 }
+                if character == '\t' {
+                    put_char_in_tty(b' ');
+                    put_char_in_tty(b' ');
+                    put_char_in_tty(b' ');
+                    put_char_in_tty(b' ');
+                }
                 if !ps2_keyboard_state.is_ctrl_pressed {
                     put_char_in_tty(character as u8);
                 }
