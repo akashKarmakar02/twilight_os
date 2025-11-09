@@ -41,6 +41,21 @@ pub struct Iovec {
     pub iov_len: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
+pub const POLLIN: i16 = 0x0001;
+pub const POLLPRI: i16 = 0x0002;
+pub const POLLOUT: i16 = 0x0004;
+pub const POLLERR: i16 = 0x0008;
+pub const POLLHUP: i16 = 0x0010;
+pub const POLLNVAL: i16 = 0x0020;
+
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Timespec {

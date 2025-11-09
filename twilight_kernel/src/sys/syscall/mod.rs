@@ -7,11 +7,12 @@ use crate::driver::timer::cmos::CMOS;
 use crate::serial_println;
 use crate::sys::syscall::service::read;
 use crate::sys::syscall::utils::{copy_cstr_from_user, UserPtr};
-use crate::task::executor::sleep;
 use alloc::string::String;
 use twilight_common::syscall::numbers::*;
 use twilight_common::syscall::types::{Rlimit64, Timespec};
 use x86_64::structures::idt::InterruptStackFrame;
+use crate::driver::timer::wait;
+use crate::sys::syscall::SyscallError::ENOSYS;
 
 #[allow(dead_code)]
 pub extern "sysv64" fn syscall_handler(
@@ -47,10 +48,7 @@ pub extern "sysv64" fn syscall_handler(
         }
         SYS_STAT => service::stat(arg1 as usize, arg2 as usize),
         SYS_FSTAT => service::fstat(arg1 as usize, arg2 as usize),
-        SYS_POLL => {
-            // mock implementation of poll
-            1
-        }
+        SYS_POLL => service::poll(arg1 as usize, arg2 as usize, arg3 as isize),
         SYS_LSEEK => service::lseek(arg1 as usize, arg2, arg3 as u8),
         SYS_MMAP => memory::mmap(arg1, arg2 as usize, arg3 as usize, arg4 as usize, arg5, arg6),
         SYS_MUNMAP => memory::munmap(arg1, arg2 as usize),
@@ -92,7 +90,7 @@ pub extern "sysv64" fn syscall_handler(
             unsafe {
                 if !req_timespec_ptr.is_null() {
                     let req = &*req_timespec_ptr;
-                    sleep(req.tv_sec as f64 + req.tv_nsec as f64 / 1000000000.0);
+                    wait(req.tv_nsec as u64 + req.tv_sec as u64 * 1000000000);
                 }
             }
 
@@ -107,25 +105,11 @@ pub extern "sysv64" fn syscall_handler(
             service::getdent64(fd, buf, buf_len as usize)
         }
         SYS_SETTID_ADDR => {
-            // this is a demo implementation of settid_addr
             arg1 as i64
         }
         SYS_CLOCK_GETTIME => {
-            if arg1 == 0 {
-                let timespec_ptr = arg2 as *mut Timespec;
-                let mut cmos = CMOS::new();
-                let unix_time: u64 = cmos.unix_time();
-
-                unsafe {
-                    if !timespec_ptr.is_null() {
-                        let timespec = &mut *timespec_ptr;
-                        timespec.tv_sec = unix_time as i64;
-                        timespec.tv_nsec = 0;
-                    }
-                }
-            }
-
-            0
+            let timespec_ptr = arg2 as *mut Timespec;
+            crate::driver::timer::pit::sys_clock_gettime(arg1 as i32, timespec_ptr)
         }
         SYS_EXIT_GROUP => service::exit(),
         SYS_OPENAT => {
@@ -164,12 +148,13 @@ pub extern "sysv64" fn syscall_handler(
 
             service::pr_limit64(pid as i32, resource, new_limit, old_limit)
         },
+        273 | 318 => -(ENOSYS as i64),
         334 => {
             -38
         }
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
-            -1
+            0
         }
     };
 

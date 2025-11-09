@@ -220,7 +220,7 @@ pub fn init_pics() {
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    crate::driver::timer::pit::tick();
+    crate::driver::timer::pit::pit_tick_isr();
 
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(0));

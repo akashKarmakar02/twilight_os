@@ -1,9 +1,11 @@
 use crate::arch::x86_64::io::{rdmsr, wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::driver::disk::dummy_blockdev;
+use crate::driver::timer::pit::uptime;
 use crate::sys::console::{get_tty, DIR};
 use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
 use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, format_path, UserPtr};
+use crate::task::executor::halt;
 use crate::{print, sys};
 use alloc::boxed::Box;
 use alloc::format;
@@ -905,4 +907,139 @@ pub fn setuid(uid: u64) -> i64 {
     sys::proc::user::set_user_env();
 
     0
+}
+
+fn poll_fd_set(fds: &mut [PollFd], process: &mut Process) -> Result<usize, i64> {
+    let mut ready_count = 0;
+
+    for pfd in fds.iter_mut() {
+        pfd.revents = 0;
+        let fd = pfd.fd;
+        if fd < 0 {
+            continue;
+        }
+
+        let want_in = (pfd.events & POLLIN) != 0;
+        let want_out = (pfd.events & POLLOUT) != 0;
+        let mut revents: i16 = 0;
+
+        match fd {
+            0 => {
+                if want_in {
+                    let tty = get_tty();
+                    let mut dev = dummy_blockdev();
+                    match tty.poll(&mut dev) {
+                        Ok(true) => revents |= POLLIN,
+                        Ok(false) => {}
+                        Err(_) => revents |= POLLERR,
+                    }
+                }
+                if want_out {
+                    revents |= POLLOUT;
+                }
+            }
+            1 | 2 => {
+                if want_out {
+                    revents |= POLLOUT;
+                }
+            }
+            _ => {
+                if fd < 3 {
+                    pfd.revents = POLLNVAL;
+                    ready_count += 1;
+                    continue;
+                }
+                let idx = (fd - 3) as usize;
+                if idx >= process.handler.len() {
+                    pfd.revents = POLLNVAL;
+                    ready_count += 1;
+                    continue;
+                }
+                let Some(handler) = process.handler.get_mut(idx) else {
+                    pfd.revents = POLLNVAL;
+                    ready_count += 1;
+                    continue;
+                };
+                let mut node = handler.handler.lock();
+                if want_in {
+                    match node.poll() {
+                        Ok(true) => revents |= POLLIN,
+                        Ok(false) => {}
+                        Err(_) => revents |= POLLERR,
+                    }
+                }
+                if want_out {
+                    revents |= POLLOUT;
+                }
+            }
+        }
+
+        if revents != 0 {
+            pfd.revents = revents;
+            ready_count += 1;
+        }
+    }
+
+    Ok(ready_count)
+}
+
+pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
+    if nfds == 0 {
+        return 0;
+    }
+    if fds_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let fds = unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds) };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let mut ready = match poll_fd_set(fds, process) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    if ready > 0 {
+        return ready as i64;
+    }
+    if timeout_ms == 0 {
+        return 0;
+    }
+
+    let infinite = timeout_ms < 0;
+    let start = uptime();
+    let deadline = if infinite {
+        None
+    } else {
+        Some(start + (timeout_ms as f64) / 1000.0)
+    };
+
+    loop {
+        if let Some(limit) = deadline {
+            if uptime() >= limit {
+                return 0;
+            }
+        }
+
+        halt();
+
+        ready = match poll_fd_set(fds, process) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+
+        if ready > 0 {
+            return ready as i64;
+        }
+    }
 }
