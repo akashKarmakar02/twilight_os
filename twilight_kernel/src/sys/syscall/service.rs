@@ -6,7 +6,7 @@ use crate::sys::fs::vfs::{FileType, VfsNodeOps, VFS};
 use crate::sys::proc::{Handler, Process, PROCESS_TABLE, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{copy_cstr_from_user, copy_user_ptr_array, format_path, UserPtr};
 use crate::task::executor::halt;
-use crate::{print, sys};
+use crate::{logger, print, sys};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -100,7 +100,6 @@ fn split_parent_name(path: &str) -> (&str, &str) {
     }
 }
 
-
 pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     let file_descriptor = arg1;
     let buf = arg2 as *const u8;
@@ -142,8 +141,35 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     res
 }
 
-pub fn read(handler: usize, buf: &mut [u8]) -> i64 {
+pub fn close(fd: i32) -> i64 {
+    if fd < 0 {
+        return -(EBADF as i64);
+    }
+    if fd <= 2 {
+        return 0;
+    }
 
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    let idx = (fd - 3) as usize;
+    if idx >= process.handler.len() {
+        return -(EBADF as i64);
+    }
+
+    // TODO: reclaim descriptor storage when handler tracking supports it.
+    0
+}
+
+pub fn read(handler: usize, buf: &mut [u8]) -> i64 {
     if handler == 0 || handler <= 2 {
         let tty = get_tty();
         if let Ok(v) = tty.read(&mut dummy_blockdev(), 0, buf) {
@@ -163,11 +189,23 @@ pub fn read(handler: usize, buf: &mut [u8]) -> i64 {
     };
 
     if let Some(node) = process.handler.get_mut(handler - 3) {
-        if node.handler.lock().metadata.file_type == FileType::Dir {
+        let mut vfs_node = node.handler.lock();
+        if vfs_node.metadata.file_type == FileType::Dir {
             return -EISDIR as i64;
         }
+        if vfs_node.metadata.file_type == FileType::CharDevice {
+            if let Ok(content) = vfs_node.read_with_hint(buf.len()) {
+                let copy_len = content.len().min(buf.len());
+                if copy_len > 0 {
+                    buf[..copy_len].copy_from_slice(&content[..copy_len]);
+                }
+                return copy_len as i64;
+            }
+            return -1;
+        }
+
         let seek = node.seek;
-        if let Ok(content) = node.handler.lock().read() {
+        if let Ok(content) = vfs_node.read() {
             let copy_len = if seek < content.len() {
                 (content.len() - seek).min(buf.len())
             } else {
@@ -209,7 +247,6 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
             Err(e) => return e as i64,
         }
     };
-
 
     // Try open existing
     let mut existed = true;
@@ -294,7 +331,7 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
         return -1;
     };
-    
+
     #[allow(static_mut_refs)]
     let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str().trim()) }) else {
         return -2;
@@ -371,6 +408,7 @@ pub fn uname(ptr: usize) -> i64 {
 }
 
 pub fn arch_prctl(code: u64, addr: u64) -> i64 {
+    logger!("arch_prctl: code=0x{:x}, arg=0x{:x}", code, addr);
     match code {
         ARCH_SET_FS => {
             wrmsr(IA32_FS_BASE, addr);
@@ -382,7 +420,7 @@ pub fn arch_prctl(code: u64, addr: u64) -> i64 {
             0
         }
         ARCH_GET_GS => rdmsr(IA32_GS_BASE) as i64,
-        _ => -1,
+        _ => EINVAL as i64,
     }
 }
 
@@ -412,6 +450,51 @@ pub fn writev(fd: i32, iov_ptr: u64, iovcnt: i32) -> i64 {
         }
     }
     total
+}
+
+pub fn fcntl(fd: i32, cmd: i32, _arg: u64) -> i64 {
+    const F_DUPFD: i32 = 0;
+    const F_GETFD: i32 = 1;
+    const F_SETFD: i32 = 2;
+    const F_GETFL: i32 = 3;
+    const F_SETFL: i32 = 4;
+
+    if fd < 0 {
+        return -(EBADF as i64);
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    if fd <= 2 {
+        return match cmd {
+            F_GETFD | F_SETFD | F_GETFL | F_SETFL => 0,
+            F_DUPFD => fd as i64,
+            _ => -(EINVAL as i64),
+        };
+    }
+
+    let idx = (fd - 3) as usize;
+    if idx >= process.handler.len() {
+        return -(EBADF as i64);
+    }
+
+    match cmd {
+        F_GETFD => 0,
+        F_SETFD => 0,
+        F_GETFL => 0,
+        F_SETFL => 0,
+        F_DUPFD => -(EINVAL as i64),
+        _ => -(EINVAL as i64),
+    }
 }
 
 pub fn pr_limit64(
@@ -699,7 +782,6 @@ pub fn chdir(path_ptr: usize) -> i64 {
         } else {
             vec.join("/")
         }
-
     } else {
         dir_path
     };
@@ -768,23 +850,18 @@ pub fn lseek(fd: usize, offset: u64, seek: u8) -> i64 {
             .unwrap()
     };
 
-
     if let Some(node) = process.handler.get_mut(fd - 3) {
         match seek {
             0 => {
                 node.seek = offset as usize;
                 0
             }
-            1 => {
-                node.seek as i64
-            }
+            1 => node.seek as i64,
             2 => {
                 node.seek = node.handler.lock().metadata.size;
                 node.seek as i64
             }
-            _ => {
-                -1
-            }
+            _ => -1,
         }
     } else {
         -1
@@ -825,7 +902,16 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
     }
 
     #[allow(static_mut_refs)]
-    let handler = unsafe { PROCESS_TABLE.get_mut().unwrap_unchecked().get_process(crate::sys::proc::id()).unwrap_unchecked().handler.get_mut(fd - 3).unwrap_unchecked() };
+    let handler = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap_unchecked()
+            .get_process(crate::sys::proc::id())
+            .unwrap_unchecked()
+            .handler
+            .get_mut(fd - 3)
+            .unwrap_unchecked()
+    };
 
     handler.handler.lock().ioctl(cmd as u64, arg).unwrap()
 }
@@ -834,31 +920,34 @@ pub fn utimenat(dirfd: i32, str_ptr: usize, _time_ptr: usize, _flags: usize) -> 
     if dirfd != -100 {
         return -1;
     }
-    
+
     let usr_ptr = UserPtr(str_ptr as *const u8);
-    
+
     let Ok(path) = copy_cstr_from_user(usr_ptr, 4096) else {
         return -(EFAULT as i64);
     };
-    
+
     #[allow(static_mut_refs)]
-    let process = unsafe { PROCESS_TABLE.get_mut_unchecked().get_process(crate::sys::proc::id()).unwrap() };
-    
-    
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut_unchecked()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
+
     let can_path = if path.starts_with("/") {
         path
     } else {
-        format!("{}/{}",process.pwd, path)
+        format!("{}/{}", process.pwd, path)
     };
-    
+
     #[allow(static_mut_refs)]
     let fs = unsafe { VFS.get_mut() };
-    
+
     let Ok(_node) = fs.open(can_path.as_str()) else {
         return -ENOENT as i64;
     };
-    
-    
+
     0
 }
 
@@ -878,7 +967,6 @@ pub fn mkdir(path_str: usize, _mode: usize) -> i64 {
 
     let parent_path = parent_path(can_path.as_str());
     let dir_name = can_path.split("/").last().unwrap();
-
 
     if let Ok(_) = fs.mkdir(parent_path, dir_name) {
         0

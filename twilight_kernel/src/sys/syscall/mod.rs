@@ -1,18 +1,18 @@
+mod memory;
 pub mod service;
 mod utils;
-mod memory;
 
 use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
 use crate::serial_println;
 use crate::sys::syscall::service::read;
 use crate::sys::syscall::utils::{copy_cstr_from_user, UserPtr};
+use crate::sys::syscall::SyscallError::ENOSYS;
+use crate::task::executor::sleep;
 use alloc::string::String;
 use twilight_common::syscall::numbers::*;
 use twilight_common::syscall::types::{Rlimit64, Timespec};
 use x86_64::structures::idt::InterruptStackFrame;
-use crate::driver::timer::wait;
-use crate::sys::syscall::SyscallError::ENOSYS;
 
 #[allow(dead_code)]
 pub extern "sysv64" fn syscall_handler(
@@ -46,17 +46,27 @@ pub extern "sysv64" fn syscall_handler(
             let mode = arg3 as i32;
             service::open(&path, flags, mode as u32)
         }
+        SYS_CLOSE => service::close(arg1 as i32),
         SYS_STAT => service::stat(arg1 as usize, arg2 as usize),
         SYS_FSTAT => service::fstat(arg1 as usize, arg2 as usize),
         SYS_POLL => service::poll(arg1 as usize, arg2 as usize, arg3 as isize),
         SYS_LSEEK => service::lseek(arg1 as usize, arg2, arg3 as u8),
-        SYS_MMAP => memory::mmap(arg1, arg2 as usize, arg3 as usize, arg4 as usize, arg5, arg6),
+        SYS_MMAP => memory::mmap(
+            arg1,
+            arg2 as usize,
+            arg3 as usize,
+            arg4 as usize,
+            arg5,
+            arg6,
+        ),
+        SYS_MPROTECT => memory::mprotect(arg1, arg2 as usize, arg3 as usize),
         SYS_MUNMAP => memory::munmap(arg1, arg2 as usize),
         SYS_BRK => memory::brk(arg1 as usize),
         SYS_IOCTL => {
             service::ioctl(arg1 as usize, arg2 as usize, arg3 as usize)
             // 0
-        },
+        }
+        SYS_FCNTL => service::fcntl(arg1 as i32, arg2 as i32, arg3),
         SYS_READV => service::readv(arg1 as usize, arg2, arg3),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
         SYS_EXECVE => service::execev(arg1 as usize, arg2 as usize, arg3 as usize),
@@ -70,9 +80,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_SET_UID => service::setuid(arg1),
         SYS_GET_EUID => 0,
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
-        SYS_GET_TID => {
-            crate::sys::proc::id() as i64
-        }
+        SYS_GET_TID => crate::sys::proc::id() as i64,
         SYS_TIME => {
             let out_ptr = arg1 as *mut i64; // time_t is i64
             let mut cmos = CMOS::new();
@@ -90,7 +98,7 @@ pub extern "sysv64" fn syscall_handler(
             unsafe {
                 if !req_timespec_ptr.is_null() {
                     let req = &*req_timespec_ptr;
-                    wait(req.tv_nsec as u64 + req.tv_sec as u64 * 1000000000);
+                    sleep((req.tv_nsec as f64 / 10000000000.0) + req.tv_sec as f64);
                 }
             }
 
@@ -101,12 +109,9 @@ pub extern "sysv64" fn syscall_handler(
             let buf = arg2 as *mut u8;
             let buf_len = arg3;
 
-
             service::getdent64(fd, buf, buf_len as usize)
         }
-        SYS_SETTID_ADDR => {
-            arg1 as i64
-        }
+        SYS_SETTID_ADDR => arg1 as i64,
         SYS_CLOCK_GETTIME => {
             let timespec_ptr = arg2 as *mut Timespec;
             crate::driver::timer::pit::sys_clock_gettime(arg1 as i32, timespec_ptr)
@@ -123,9 +128,7 @@ pub extern "sysv64" fn syscall_handler(
             let mode = arg4 as i32;
             service::openat(arg1 as i32, path.as_str(), flags, mode as u32)
         }
-        SYS_UTIMENAT => {
-            service::utimenat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize)
-        }
+        SYS_UTIMENAT => service::utimenat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize),
         SYS_PR_LIMIT64 => {
             let pid = arg1;
             let resource = arg2 as u32;
@@ -145,16 +148,11 @@ pub extern "sysv64" fn syscall_handler(
                 Some(unsafe { &mut *old_limit_ptr })
             };
 
-
             service::pr_limit64(pid as i32, resource, new_limit, old_limit)
-        },
-        273 | 318 => -(ENOSYS as i64),
-        334 => {
-            -38
         }
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
-            0
+            -(ENOSYS as i64)
         }
     };
 

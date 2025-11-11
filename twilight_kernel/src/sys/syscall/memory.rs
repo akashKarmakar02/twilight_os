@@ -5,37 +5,55 @@ use crate::sys::proc::PROCESS_TABLE;
 
 // minimal flag bits
 #[allow(dead_code)]
-pub const PROT_READ:  usize = 1;
+pub const PROT_READ: usize = 1;
 pub const PROT_WRITE: usize = 2;
 #[allow(dead_code)]
-pub const PROT_EXEC:  usize = 4;
+pub const PROT_EXEC: usize = 4;
 
 #[allow(dead_code)]
-pub const MAP_SHARED:    usize = 0x01;
-pub const MAP_PRIVATE:   usize = 0x02;
-pub const MAP_FIXED:     usize = 0x10;
+pub const MAP_SHARED: usize = 0x01;
+pub const MAP_PRIVATE: usize = 0x02;
+pub const MAP_FIXED: usize = 0x10;
 pub const MAP_ANONYMOUS: usize = 0x20;
 
 const EINVAL: i64 = -22;
 const ENOMEM: i64 = -12;
 const ENOSYS: i64 = -38;
-const ESRCH:  i64 = -3;
+const ESRCH: i64 = -3;
 
 pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: u64) -> i64 {
     #[allow(static_mut_refs)]
-    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()) };
-    let process = match proc { Some(p) => p, None => return ESRCH };
+    let proc = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let process = match proc {
+        Some(p) => p,
+        None => return ESRCH,
+    };
 
-    if size == 0 { return EINVAL; }
-    if (flags & MAP_ANONYMOUS) == 0 { return ENOSYS; }         // file-backed not implemented yet
-    if (flags & MAP_PRIVATE) == 0   { return ENOSYS; }          // keep it simple for now
-    if (offset as usize) & (crate::sys::proc::mem::PAGE - 1) != 0 { return EINVAL; }   // must be page-aligned
+    if size == 0 {
+        return EINVAL;
+    }
+    if (flags & MAP_ANONYMOUS) == 0 {
+        return ENOSYS;
+    } // file-backed not implemented yet
+    if (flags & MAP_PRIVATE) == 0 {
+        return ENOSYS;
+    } // keep it simple for now
+    if (offset as usize) & (crate::sys::proc::mem::PAGE - 1) != 0 {
+        return EINVAL;
+    } // must be page-aligned
 
     let len = align_up(size, crate::sys::proc::mem::PAGE);
     let writable = (prot & PROT_WRITE) != 0;
 
     let va = if (flags & MAP_FIXED) != 0 {
-        if addr == 0 || (addr as usize & (crate::sys::proc::mem::PAGE - 1)) != 0 { return EINVAL; }
+        if addr == 0 || (addr as usize & (crate::sys::proc::mem::PAGE - 1)) != 0 {
+            return EINVAL;
+        }
         addr as usize
     } else {
         // ignore addr if 0; otherwise you can treat it as a hint later
@@ -46,7 +64,9 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     };
 
     // never map page 0
-    if va == 0 { return EINVAL; }
+    if va == 0 {
+        return EINVAL;
+    }
 
     if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, true, writable) {
         return ENOMEM;
@@ -55,19 +75,43 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     va as i64
 }
 
+pub fn mprotect(addr: u64, size: usize, prot: usize) -> i64 {
+    if size == 0 {
+        return EINVAL;
+    }
+    logger!(
+        "mprotect: addr=0x{:x}, size=0x{:x}, prot=0x{:x}",
+        addr,
+        size,
+        prot
+    );
+    0
+}
 
 pub fn brk(addr: usize) -> i64 {
     #[allow(static_mut_refs)]
-    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()) };
-    let process = match proc { Some(p) => p, None => return -3 /* -ESRCH */ };
+    let proc = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let process = match proc {
+        Some(p) => p,
+        None => return -3, /* -ESRCH */
+    };
 
     if addr == 0 {
-        logger!("brk:- addr: {:#X} => {:#X}", addr, process.proc_mm.curr_brk());
+        logger!(
+            "brk:- addr: {:#X} => {:#X}",
+            addr,
+            process.proc_mm.curr_brk()
+        );
         return process.proc_mm.curr_brk() as i64; // report current break
     }
     let res = match process.proc_mm.set_brk(&mut process.mapper, addr) {
-        Ok(end) => end as i64,         // success: return new break
-        Err(_)  => process.proc_mm.curr_brk() as i64, // failure: return current break
+        Ok(end) => end as i64,                       // success: return new break
+        Err(_) => process.proc_mm.curr_brk() as i64, // failure: return current break
     };
 
     logger!("brk:- addr: {:#X} => {:#X}", addr, res);
@@ -76,7 +120,12 @@ pub fn brk(addr: usize) -> i64 {
 
 pub fn munmap(addr: u64, size: usize) -> i64 {
     #[allow(static_mut_refs)]
-    let Some(p) = (unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()) }) else {
+    let Some(p) = (unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    }) else {
         return -1;
     };
 
