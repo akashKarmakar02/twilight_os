@@ -1,12 +1,13 @@
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use spin::mutex::Mutex;
-use spin::rwlock::RwLock;
 use crate::driver::disk::BlockDeviceIO;
 use crate::sys::fs::twilight_fs::inode::Inode;
 use crate::sys::fs::twilight_fs::TfsError;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use spin::mutex::Mutex;
+use spin::rwlock::RwLock;
 
 pub static mut VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
 
@@ -75,7 +76,6 @@ impl Metadata {
 }
 pub type BlockDev = Arc<Mutex<Box<dyn BlockDeviceIO + Send>>>;
 
-
 pub trait FsCtx {
     fn block_size(&self) -> usize;
 
@@ -98,11 +98,22 @@ pub struct VfsNode {
 
 impl VfsNode {
     pub fn new(device: BlockDev, metadata: Metadata, node: Arc<RwLock<dyn VfsNodeOps>>) -> Self {
-        Self { device, metadata, node }
+        Self {
+            device,
+            metadata,
+            node,
+        }
     }
 
     pub fn read(&mut self) -> Result<Vec<u8>, ()> {
         self.node.read().read(&mut self.device, 0, &mut [])
+    }
+
+    pub fn read_with_hint(&mut self, hint: usize) -> Result<Vec<u8>, ()> {
+        let mut scratch = vec![0u8; hint.max(1)];
+        self.node
+            .read()
+            .read(&mut self.device, 0, scratch.as_mut_slice())
     }
 
     pub fn write(&mut self, lba: usize, data: &[u8]) -> Result<(), ()> {
@@ -149,22 +160,31 @@ unsafe impl Sync for Vfs {}
 
 #[allow(dead_code)]
 impl Vfs {
-    pub const fn new() -> Self { Self { mount_points: Vec::new() } }
+    pub const fn new() -> Self {
+        Self {
+            mount_points: Vec::new(),
+        }
+    }
 
     pub fn mount(&mut self, prefix: &'static str, fs: Arc<Mutex<dyn FileSystem>>) {
         self.mount_points.push((prefix, fs));
-        self.mount_points.sort_by(|(a,_),(b,_)| b.len().cmp(&a.len()));
+        self.mount_points
+            .sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()));
     }
 
     pub fn unmount(&mut self, prefix: &str) -> bool {
-        if let Some(i) = self.mount_points.iter().position(|(p,_)| *p == prefix) {
-            self.mount_points.remove(i); true
-        } else { false }
+        if let Some(i) = self.mount_points.iter().position(|(p, _)| *p == prefix) {
+            self.mount_points.remove(i);
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]
     fn route<'a>(&self, path: &'a str) -> Option<(&'a str, &Arc<Mutex<dyn FileSystem>>)> {
-        self.mount_points.iter()
+        self.mount_points
+            .iter()
             .find(|(p, _)| path.starts_with(*p))
             .map(|(prefix, fs)| {
                 let rel = &path[prefix.len()..];

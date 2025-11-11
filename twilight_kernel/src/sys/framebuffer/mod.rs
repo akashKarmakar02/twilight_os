@@ -50,10 +50,7 @@ impl TwilightFrameBuffer {
         let byte_len = width * height * (bits_per_pixel / 8);
 
         let framebuffer = unsafe {
-            core::slice::from_raw_parts_mut::<u32>(
-                fb.addr().cast::<u32>(),
-                byte_len / 4,
-            )
+            core::slice::from_raw_parts_mut::<u32>(fb.addr().cast::<u32>(), byte_len / 4)
         };
 
         assert_eq!(framebuffer.len(), (width * height));
@@ -62,7 +59,7 @@ impl TwilightFrameBuffer {
             video_buf: framebuffer,
             width: width as u64,
             height: height as u64,
-            pitch: fb.pitch(),                    // bytes per scanline in VRAM
+            pitch: fb.pitch(), // bytes per scanline in VRAM
             pixel_buf: vec![0; (width * height) as usize], // compact RGBx buffer (u32 per pixel)
         }
     }
@@ -125,7 +122,8 @@ impl TwilightFrameBuffer {
             return;
         }
 
-        self.video_buf[(start as usize)..(end as usize)].copy_from_slice(&self.pixel_buf.as_slice()[(start as usize)..(end as usize)]);
+        self.video_buf[(start as usize)..(end as usize)]
+            .copy_from_slice(&self.pixel_buf.as_slice()[(start as usize)..(end as usize)]);
     }
 
     pub fn scroll_up(&mut self, lines: u64, fill_color: u32) {
@@ -413,7 +411,12 @@ fn uptime_ms() -> u64 {
 }
 
 impl VfsNodeOps for TwilightFrameBuffer {
-    fn read(&self, _device: &mut BlockDev, _offset: usize, _buffer: &mut [u8]) -> Result<Vec<u8>, ()> {
+    fn read(
+        &self,
+        _device: &mut BlockDev,
+        _offset: usize,
+        _buffer: &mut [u8],
+    ) -> Result<Vec<u8>, ()> {
         Err(())
     }
 
@@ -422,9 +425,8 @@ impl VfsNodeOps for TwilightFrameBuffer {
             return Err(());
         }
 
-        let buf_u32 = unsafe {
-            core::slice::from_raw_parts(buffer.as_ptr() as *const u32, buffer.len() / 4)
-        };
+        let buf_u32 =
+            unsafe { core::slice::from_raw_parts(buffer.as_ptr() as *const u32, buffer.len() / 4) };
 
         self.video_buf[offset..(offset) + buf_u32.len()].copy_from_slice(buf_u32);
         self.pixel_buf[offset..(offset) + buf_u32.len()].copy_from_slice(buf_u32);
@@ -530,5 +532,32 @@ pub fn get_framebuffer_mut() -> &'static mut TwilightFrameBuffer {
     #[allow(static_mut_refs)]
     unsafe {
         FRAMEBUFFER.get_mut().unwrap()
+    }
+}
+
+/// Exposes the single global framebuffer instance via /dev/fb0 without cloning
+/// the backbuffer. This keeps the kernel console's cached pixel buffer and
+/// userspace writes in sync, avoiding display flicker when both touch the fb.
+pub struct FramebufferDev;
+
+impl VfsNodeOps for FramebufferDev {
+    fn read(&self, device: &mut BlockDev, offset: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
+        get_framebuffer().read(device, offset, buf)
+    }
+
+    fn write(&mut self, device: &mut BlockDev, offset: usize, data: &[u8]) -> Result<(), ()> {
+        get_framebuffer_mut().write(device, offset, data)
+    }
+
+    fn poll(&self, device: &mut BlockDev) -> Result<bool, ()> {
+        get_framebuffer().poll(device)
+    }
+
+    fn ioctl(&mut self, device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()> {
+        get_framebuffer_mut().ioctl(device, cmd, arg)
+    }
+
+    fn unlink(&mut self, device: &mut BlockDev) -> Result<i32, ()> {
+        get_framebuffer_mut().unlink(device)
     }
 }

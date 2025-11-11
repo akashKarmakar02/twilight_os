@@ -20,34 +20,34 @@ const IOCTL_TCSETSW: u64 = 0x5403;
 const IOCTL_TCSETSF: u64 = 0x5404;
 
 // Order matches Linux <termios.h> (x86_64/musl)
-pub const VINTR:    usize = 0;
-pub const VQUIT:    usize = 1;
-pub const VERASE:   usize = 2;
-pub const VKILL:    usize = 3;
-pub const VEOF:     usize = 4;
-pub const VTIME:    usize = 5;
-pub const VMIN:     usize = 6;
-pub const VSWTC:    usize = 7;
-pub const VSTART:   usize = 8;
-pub const VSTOP:    usize = 9;
-pub const VSUSP:    usize = 10;
-pub const VEOL:     usize = 11;
+pub const VINTR: usize = 0;
+pub const VQUIT: usize = 1;
+pub const VERASE: usize = 2;
+pub const VKILL: usize = 3;
+pub const VEOF: usize = 4;
+pub const VTIME: usize = 5;
+pub const VMIN: usize = 6;
+pub const VSWTC: usize = 7;
+pub const VSTART: usize = 8;
+pub const VSTOP: usize = 9;
+pub const VSUSP: usize = 10;
+pub const VEOL: usize = 11;
 pub const VREPRINT: usize = 12;
 pub const VDISCARD: usize = 13;
-pub const VWERASE:  usize = 14;
-pub const VLNEXT:   usize = 15;
-pub const VEOL2:    usize = 16;
+pub const VWERASE: usize = 14;
+pub const VLNEXT: usize = 15;
+pub const VEOL2: usize = 16;
 
-const LFLAG_ECHO:   u32 = 0x0008;     // ECHO
-const LFLAG_ICANON: u32 = 0x0002;     // ICANON
-const LFLAG_ISIG:   u32 = 0x0001;     // ISIG
-const LFLAG_IEXTEN: u32 = 0x8000;     // IEXTEN
+const LFLAG_ECHO: u32 = 0x0008; // ECHO
+const LFLAG_ICANON: u32 = 0x0002; // ICANON
+const LFLAG_ISIG: u32 = 0x0001; // ISIG
+const LFLAG_IEXTEN: u32 = 0x8000; // IEXTEN
 
-const IFLAG_ICRNL:  u32 = 0x0100;     // ICRNL
-const IFLAG_IXON:   u32 = 0x0400;     // IXON
+const IFLAG_ICRNL: u32 = 0x0100; // ICRNL
+const IFLAG_IXON: u32 = 0x0400; // IXON
 
-const OFLAG_OPOST:  u32 = 0x0001;     // OPOST
-const OFLAG_ONLCR:  u32 = 0x0004;     // ONLCR
+const OFLAG_OPOST: u32 = 0x0001; // OPOST
+const OFLAG_ONLCR: u32 = 0x0004; // ONLCR
 
 #[repr(C)]
 struct Winsize {
@@ -71,56 +71,55 @@ impl Winsize {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct Termios {
-    pub c_iflag:  u32,
-    pub c_oflag:  u32,
-    pub c_cflag:  u32,
-    pub c_lflag:  u32,
-    pub c_line:   u8,
-    pub c_cc:     [u8; 32],  // NCCS = 32 on Linux x86_64
-    pub c_ispeed: u32,       // speed_t
-    pub c_ospeed: u32,       // speed_t
+    pub c_iflag: u32,
+    pub c_oflag: u32,
+    pub c_cflag: u32,
+    pub c_lflag: u32,
+    pub c_line: u8,
+    pub c_cc: [u8; 32], // NCCS = 32 on Linux x86_64
+    pub c_ispeed: u32,  // speed_t
+    pub c_ospeed: u32,  // speed_t
 }
 
 impl Termios {
     pub fn default() -> Self {
         let mut cc = [0u8; 32];
-        cc[VINTR]    = 0x03; // ^C
-        cc[VQUIT]    = 0x1C; // ^\
-        cc[VERASE]   = 0x7F; // DEL
-        cc[VKILL]    = 0x15; // ^U
-        cc[VEOF]     = 0x04; // ^D
-        cc[VTIME]    = 0;    // deciseconds
-        cc[VMIN]     = 1;    // canonical ignores this; raw often sets 1
-        cc[VSTART]   = 0x11; // ^Q
-        cc[VSTOP]    = 0x13; // ^S
-        cc[VSUSP]    = 0x1A; // ^Z
-        cc[VEOL]     = 0;
+        cc[VINTR] = 0x03; // ^C
+        cc[VQUIT] = 0x1C; // ^\
+        cc[VERASE] = 0x7F; // DEL
+        cc[VKILL] = 0x15; // ^U
+        cc[VEOF] = 0x04; // ^D
+        cc[VTIME] = 0; // deciseconds
+        cc[VMIN] = 1; // canonical ignores this; raw often sets 1
+        cc[VSTART] = 0x11; // ^Q
+        cc[VSTOP] = 0x13; // ^S
+        cc[VSUSP] = 0x1A; // ^Z
+        cc[VEOL] = 0;
         cc[VREPRINT] = 0x12; // ^R
         cc[VDISCARD] = 0x0F; // ^O
-        cc[VWERASE]  = 0x17; // ^W
-        cc[VLNEXT]   = 0x16; // ^V
-        cc[VEOL2]    = 0;
+        cc[VWERASE] = 0x17; // ^W
+        cc[VLNEXT] = 0x16; // ^V
+        cc[VEOL2] = 0;
 
         // Flags: these mimic what your C editor expects before it switches to raw mode
-        const ICRNL:  u32 = 0x00000100;
-        const IXON:   u32 = 0x00000400;
-        const OPOST:  u32 = 0x00000001;
-        const ONLCR:  u32 = 0x00000004;
-        const CREAD:  u32 = 0x00000800;
-        const CS8:    u32 = 0x00000030;
-        const ISIG:   u32 = 0x00000001;
+        const ICRNL: u32 = 0x00000100;
+        const IXON: u32 = 0x00000400;
+        const OPOST: u32 = 0x00000001;
+        const ONLCR: u32 = 0x00000004;
+        const CREAD: u32 = 0x00000800;
+        const CS8: u32 = 0x00000030;
+        const ISIG: u32 = 0x00000001;
         const ICANON: u32 = 0x00000002;
         const IEXTEN: u32 = 0x00008000;
-        const ECHO:   u32 = 0x00000008;
-
+        const ECHO: u32 = 0x00000008;
 
         Termios {
-            c_iflag:  ICRNL | IXON,
-            c_oflag:  OPOST | ONLCR,
-            c_cflag:  CREAD | CS8,
-            c_lflag:  ISIG | ICANON | IEXTEN | ECHO,
-            c_line:   0,
-            c_cc:     cc,
+            c_iflag: ICRNL | IXON,
+            c_oflag: OPOST | ONLCR,
+            c_cflag: CREAD | CS8,
+            c_lflag: ISIG | ICANON | IEXTEN | ECHO,
+            c_line: 0,
+            c_cc: cc,
             c_ispeed: 38400, // any value; many libcs ignore and use c_cflag Bxxxx
             c_ospeed: 38400,
         }
@@ -147,7 +146,7 @@ pub struct Tty {
     sgr_bold: bool,
     termios: Termios,
     output_buffer: Mutex<VecDeque<u8>>,
-    input_buffer: Mutex<VecDeque<u8>>
+    input_buffer: Mutex<VecDeque<u8>>,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -177,7 +176,6 @@ impl Tty {
             vmin: tios.c_cc[VMIN],
             vtime: tios.c_cc[VTIME],
 
-
             ansi_state: AnsiState::Ground,
             read_to_count: Mutex::new(0),
             csi_buf: Vec::with_capacity(32),
@@ -195,9 +193,9 @@ impl Tty {
         }
     }
     fn is_raw_mode(&self) -> bool {
-        (self.termios.c_lflag & (LFLAG_ECHO | LFLAG_ICANON | LFLAG_ISIG | LFLAG_IEXTEN)) == 0 &&
-            (self.termios.c_iflag & (IFLAG_ICRNL | IFLAG_IXON)) == 0 &&
-            (self.termios.c_oflag & OFLAG_OPOST) == 0
+        (self.termios.c_lflag & (LFLAG_ECHO | LFLAG_ICANON | LFLAG_ISIG | LFLAG_IEXTEN)) == 0
+            && (self.termios.c_iflag & (IFLAG_ICRNL | IFLAG_IXON)) == 0
+            && (self.termios.c_oflag & OFLAG_OPOST) == 0
     }
 
     #[inline]
@@ -280,9 +278,13 @@ impl Tty {
         }
 
         let final_byte = *buf.last().unwrap();
-        let raw_params = &buf[..buf.len() - 1];                  // params bytes
+        let raw_params = &buf[..buf.len() - 1]; // params bytes
         let is_private = raw_params.first() == Some(&b'?');
-        let params_bytes = if is_private { &raw_params[1..] } else { raw_params };
+        let params_bytes = if is_private {
+            &raw_params[1..]
+        } else {
+            raw_params
+        };
 
         // If you need a &str, decode from the local `buf` (not from self)
         let params_str = core::str::from_utf8(params_bytes).unwrap_or("");
@@ -291,7 +293,10 @@ impl Tty {
         let nums: Vec<i32> = if params_str.is_empty() {
             Vec::new()
         } else {
-            params_str.split(';').map(|s| s.parse::<i32>().unwrap_or(-1)).collect()
+            params_str
+                .split(';')
+                .map(|s| s.parse::<i32>().unwrap_or(-1))
+                .collect()
         };
 
         // Now it's safe to mutate `self` again
@@ -313,9 +318,9 @@ impl Tty {
 
     fn csi_el(&mut self, nums: &[i32]) {
         match *nums.get(0).unwrap_or(&2) {
-            2 => self.term.erase_line(),                 // clear whole line
-            1 => self.term.erase_in_line_to_cursor(),    // BOL..cursor
-            _ => self.term.erase_in_line_from_cursor(),  // cursor..EOL (default 0)
+            2 => self.term.erase_line(),                // clear whole line
+            1 => self.term.erase_in_line_to_cursor(),   // BOL..cursor
+            _ => self.term.erase_in_line_from_cursor(), // cursor..EOL (default 0)
         }
     }
 
@@ -324,14 +329,18 @@ impl Tty {
         let row = nums.get(0).copied().unwrap_or(1).max(1) as usize;
         let col = nums.get(1).copied().unwrap_or(1).max(1) as usize;
         let max_rows = (self.term.height / 16).max(1);
-        let max_cols = (self.term.width  / 8 ).max(1);
+        let max_cols = (self.term.width / 8).max(1);
         self.term.cursor_y = row.saturating_sub(1).min(max_rows - 1);
         self.term.cursor_x = col.saturating_sub(1).min(max_cols - 1);
     }
 
     fn csi_ed(&mut self, nums: &[i32]) {
         match *nums.get(0).unwrap_or(&0) {
-            2 => { self.term.clear(); self.term.cursor_x = 0; self.term.cursor_y = 0; }
+            2 => {
+                self.term.clear();
+                self.term.cursor_x = 0;
+                self.term.cursor_y = 0;
+            }
             1 => self.term.erase_display_to_cursor(),
             _ => self.term.erase_display_from_cursor(),
         }
@@ -339,12 +348,16 @@ impl Tty {
 
     fn csi_dec_private_set(&mut self, nums: &[i32]) {
         for n in nums {
-            if *n == 25 { self.term.set_cursor_visible(true); } // ?25h
+            if *n == 25 {
+                self.term.set_cursor_visible(true);
+            } // ?25h
         }
     }
     fn csi_dec_private_reset(&mut self, nums: &[i32]) {
         for n in nums {
-            if *n == 25 { self.term.set_cursor_visible(false); } // ?25l
+            if *n == 25 {
+                self.term.set_cursor_visible(false);
+            } // ?25l
         }
     }
 
@@ -353,7 +366,7 @@ impl Tty {
         self.echo = (self.termios.c_lflag & LFLAG_ECHO) != 0;
 
         // Cache VMIN / VTIME (used only when ICANON is OFF)
-        self.vmin  = self.termios.c_cc[VMIN];
+        self.vmin = self.termios.c_cc[VMIN];
         self.vtime = self.termios.c_cc[VTIME];
 
         // TODO (optional but recommended):
@@ -565,7 +578,9 @@ impl VfsNodeOps for Tty {
                 if self.input_buffer.lock().is_empty() {
                     halt();
                 } else {
-                    unsafe{ break self.input_buffer.lock().pop_front().unwrap_unchecked(); };
+                    unsafe {
+                        break self.input_buffer.lock().pop_front().unwrap_unchecked();
+                    };
                 }
             };
             buf[i] = c;
@@ -658,7 +673,9 @@ impl VfsNodeOps for Tty {
                 }
             }
             IOCTL_TCSETS | IOCTL_TCSETSW | IOCTL_TCSETSF => {
-                if arg == 0 { return Ok(-(EFAULT as i64)); }
+                if arg == 0 {
+                    return Ok(-(EFAULT as i64));
+                }
                 // Copy termios FROM user
                 let newt = unsafe { *(arg as *const Termios) };
                 // Install and apply
@@ -700,6 +717,36 @@ pub fn get_tty() -> &'static mut Tty {
     #[allow(static_mut_refs)]
     unsafe {
         TTY.get_mut().unwrap()
+    }
+}
+
+/// Lightweight VFS wrapper that forwards /dev/tty ops to the single global TTY.
+pub struct TtyDev;
+
+impl VfsNodeOps for TtyDev {
+    fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
+        let tty = get_tty();
+        tty.read(device, lba, buf)
+    }
+
+    fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()> {
+        let tty = get_tty();
+        tty.write(device, lba, data)
+    }
+
+    fn poll(&self, device: &mut BlockDev) -> Result<bool, ()> {
+        let tty = get_tty();
+        tty.poll(device)
+    }
+
+    fn ioctl(&mut self, device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()> {
+        let tty = get_tty();
+        tty.ioctl(device, cmd, arg)
+    }
+
+    fn unlink(&mut self, device: &mut BlockDev) -> Result<i32, ()> {
+        let tty = get_tty();
+        tty.unlink(device)
     }
 }
 

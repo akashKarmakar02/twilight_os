@@ -3,9 +3,9 @@ use crate::sys::{
     framebuffer::{convert_color, get_framebuffer, FRAMEBUFFER},
 };
 
-use alloc::vec;
 use crate::driver::disk::dummy_blockdev;
 use crate::sys::fs::vfs::VfsNodeOps;
+use alloc::vec;
 
 /// A framebuffer-based terminal backend (no ANSI parsing, pure rendering)
 #[derive(Clone, Copy, Debug)]
@@ -103,7 +103,8 @@ impl FramebufferTerminal {
             let fb = FRAMEBUFFER.get_mut().unwrap();
             for row in 0..h {
                 let pixel_offset = (y + row) * pitch_pixels + x; // pixel index, not bytes
-                fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf).unwrap();
+                fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf)
+                    .unwrap();
             }
             // If you have a cheap partial sync, sync the whole rect; otherwise skip.
             fb.sync_partial(((y * pitch_pixels) + x) as u64, (w * h) as u64);
@@ -115,13 +116,21 @@ impl FramebufferTerminal {
             self.cursor_x -= 1;
             let x = self.cursor_x * Self::CHAR_W;
             let y = self.cursor_y * Self::CHAR_H;
-            self.draw_char(x, y, ScreenChar { char: b' ', color: self.color });
+            self.draw_char(
+                x,
+                y,
+                ScreenChar {
+                    char: b' ',
+                    color: self.color,
+                },
+            );
         } else {
             // At column 0: keep it simple (no wrap). If you want wrap:
             // if self.cursor_y > 0 { self.cursor_y -= 1; self.cursor_x = self.cols().saturating_sub(1); }
         }
     }
-    pub fn set_reverse(&mut self, v: bool) {  // NEW
+    pub fn set_reverse(&mut self, v: bool) {
+        // NEW
         self.reverse = v;
     }
 
@@ -135,9 +144,18 @@ impl FramebufferTerminal {
     /// Write a single character at the current cursor position
     pub fn put_char(&mut self, c: u8) {
         match c {
-            b'\n' => { self.new_line(); return; }
-            0x08 | 0x7F => { self.backspace(); return; }
-            b'\r' => { self.cursor_x = 0; return; }
+            b'\n' => {
+                self.new_line();
+                return;
+            }
+            0x08 | 0x7F => {
+                self.backspace();
+                return;
+            }
+            b'\r' => {
+                self.cursor_x = 0;
+                return;
+            }
             _ => {}
         }
 
@@ -146,7 +164,14 @@ impl FramebufferTerminal {
 
         let x = self.cursor_x * Self::CHAR_W;
         let y = self.cursor_y * Self::CHAR_H;
-        self.draw_char(x, y, ScreenChar { char: ch, color: self.color });
+        self.draw_char(
+            x,
+            y,
+            ScreenChar {
+                char: ch,
+                color: self.color,
+            },
+        );
 
         self.cursor_x += 1;
         if self.cursor_x * Self::CHAR_W > self.width {
@@ -188,9 +213,15 @@ impl FramebufferTerminal {
         let pitch_pixels = self.width;
         let ascii = screen_char.char;
         let (fg, bg) = if self.reverse {
-            (convert_color(self.bg_color), convert_color(screen_char.color))
+            (
+                convert_color(self.bg_color),
+                convert_color(screen_char.color),
+            )
         } else {
-            (convert_color(screen_char.color), convert_color(self.bg_color))
+            (
+                convert_color(screen_char.color),
+                convert_color(self.bg_color),
+            )
         };
 
         // Guard index into PSF_FONTS
@@ -219,7 +250,8 @@ impl FramebufferTerminal {
                     }
 
                     let pixel_offset = (y + row) * pitch_pixels + x; // pixel index
-                    fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf).unwrap();
+                    fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf)
+                        .unwrap();
                 }
 
                 // Optional: sync only the glyph area

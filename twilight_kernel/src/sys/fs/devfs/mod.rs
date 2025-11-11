@@ -1,9 +1,16 @@
+mod full;
 mod null;
+mod random;
+mod zero;
 
 use crate::driver::disk::dummy_blockdev;
 use crate::fs::vfs::Metadata;
-use crate::sys::framebuffer::{get_framebuffer_mut, TwilightFrameBuffer};
+use crate::sys::console::tty::TtyDev;
+use crate::sys::framebuffer::FramebufferDev;
+use crate::sys::fs::devfs::full::Full;
 use crate::sys::fs::devfs::null::Null;
+use crate::sys::fs::devfs::random::{RandomDev, URandomDev};
+use crate::sys::fs::devfs::zero::Zero;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, VfsNode, VfsNodeOps};
 use alloc::format;
 use alloc::string::ToString;
@@ -19,17 +26,47 @@ impl DevFs {
     pub fn new() -> Self {
         let mut devices = Vec::new();
         let null_meta = Metadata::chr(2, "null");
-        devices.push(VfsNode::new(dummy_blockdev(), null_meta, Arc::new(RwLock::new(Null))));
+        devices.push(VfsNode::new(
+            dummy_blockdev(),
+            null_meta,
+            Arc::new(RwLock::new(Null)),
+        ));
         let fb_meta = Metadata::chr(3, "fb0");
-        let existing_framebuffer = get_framebuffer_mut();
-        let fb = TwilightFrameBuffer {
-            video_buf: existing_framebuffer.video_buf,
-            height: existing_framebuffer.height,
-            width: existing_framebuffer.width,
-            pitch: existing_framebuffer.pitch,
-            pixel_buf: existing_framebuffer.pixel_buf.clone(),
-        };
-        devices.push(VfsNode::new(dummy_blockdev(), fb_meta, Arc::new(RwLock::new(fb))));
+        devices.push(VfsNode::new(
+            dummy_blockdev(),
+            fb_meta,
+            Arc::new(RwLock::new(FramebufferDev)),
+        ));
+        let tty_meta = Metadata::chr(4, "tty");
+        devices.push(VfsNode::new(
+            dummy_blockdev(),
+            tty_meta,
+            Arc::new(RwLock::new(TtyDev)),
+        ));
+        let zero_meta = Metadata::chr(5, "zero");
+        devices.push(VfsNode::new(
+            dummy_blockdev(),
+            zero_meta,
+            Arc::new(RwLock::new(Zero)),
+        ));
+        let random_meta = Metadata::chr(6, "random");
+        devices.push(VfsNode::new(
+            dummy_blockdev(),
+            random_meta,
+            Arc::new(RwLock::new(RandomDev)),
+        ));
+        let urandom_meta = Metadata::chr(7, "urandom");
+        devices.push(VfsNode::new(
+            dummy_blockdev(),
+            urandom_meta,
+            Arc::new(RwLock::new(URandomDev)),
+        ));
+        let full_meta = Metadata::chr(8, "full");
+        devices.push(VfsNode::new(
+            dummy_blockdev(),
+            full_meta,
+            Arc::new(RwLock::new(Full)),
+        ));
 
         DevFs {
             file_structure: devices,
@@ -70,25 +107,36 @@ impl VfsNodeOps for DirNodeOps {
     }
 }
 
-
 impl FileSystem for DevFs {
     fn open(&mut self, path: &str) -> Result<VfsNode, ()> {
         if Self::is_root(path) {
             let meta = self.root_metadata();
-            return Ok(VfsNode::new(dummy_blockdev(), meta, Arc::new(RwLock::new(DirNodeOps))));
+            return Ok(VfsNode::new(
+                dummy_blockdev(),
+                meta,
+                Arc::new(RwLock::new(DirNodeOps)),
+            ));
         }
 
         for dev in &self.file_structure {
             if format!("/{}", dev.metadata.name).as_str() == path.to_string() {
-                return Ok(VfsNode{ device: dev.device.clone(), metadata: dev.metadata.clone(), node: dev.node.clone() });
+                return Ok(VfsNode {
+                    device: dev.device.clone(),
+                    metadata: dev.metadata.clone(),
+                    node: dev.node.clone(),
+                });
             }
         }
 
         Err(())
     }
 
-    fn mkdir(&mut self, _parent_dir: &str, _path: &str) -> Result<(), ()> { Err(()) }
-    fn rmdir(&mut self, _path: &str) -> Result<(), ()> { Err(()) }
+    fn mkdir(&mut self, _parent_dir: &str, _path: &str) -> Result<(), ()> {
+        Err(())
+    }
+    fn rmdir(&mut self, _path: &str) -> Result<(), ()> {
+        Err(())
+    }
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
         if Self::is_root(path) {
             let mut devices = Vec::new();
@@ -100,9 +148,13 @@ impl FileSystem for DevFs {
             Err(())
         }
     }
-    fn rm(&mut self, _path: &str) -> Result<(), ()> { Err(()) }
+    fn rm(&mut self, _path: &str) -> Result<(), ()> {
+        Err(())
+    }
 
-    fn touch(&mut self, _parent_path: &str, _filename: &str) -> Result<(), ()> { Err(()) }
+    fn touch(&mut self, _parent_path: &str, _filename: &str) -> Result<(), ()> {
+        Err(())
+    }
 
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
         if Self::is_root(path) {
