@@ -5,13 +5,13 @@ pub(crate) mod user;
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
 use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::kernel_utils::exec::jump_to_user;
+use crate::println;
 use crate::sys::console::init_console;
-use crate::sys::fs::vfs::VfsNode;
+use crate::sys::fs::vfs::{VfsNode, VFS};
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
 use crate::sys::proc::user::USER_ENV;
-use crate::println;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
@@ -32,6 +32,8 @@ pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
 pub const USER_STACK_SIZE: usize = 0x64000;
+const MAIN_DYN_LOAD_BASE: u64 = 0x4000_0000;
+const INTERP_DYN_LOAD_BASE: u64 = 0x6000_0000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
 
@@ -174,118 +176,65 @@ impl Process {
 
         let user_stack_top = VirtAddr::new(USER_STACK_TOP);
 
-        let mut entry_point_addr: u64 = 0;
-        let mut phdr_va: u64 = 0;
-        let mut phent: u64 = 0;
-        let mut phnum: u64 = 0;
-        let mut max_end: u64 = 0;
-        let interp_path: Option<String>;
+        let mut entry_point_addr: u64;
+        let aux_entry_point: u64;
+        let mut at_base: u64 = 0;
+        let phdr_va: u64;
+        let phent: u64;
+        let phnum: u64;
+        let mut max_end: u64;
+
         if content_buf.get(0..4) == Some(&ELF_MAGIC) {
-            if let Ok(obj) = object::File::parse(content_buf.as_slice()) {
-                let eh = unsafe { &*(content_buf.as_ptr() as *const Elf64Ehdr) };
-                let e_phoff = eh.e_phoff;
-                let e_phentsize = eh.e_phentsize as u64; // 56
-                let e_phnum = eh.e_phnum as u64;
+            match load_elf_image(
+                content_buf.as_slice(),
+                &mut mapper,
+                &mut addr_size_vec,
+                Some(MAIN_DYN_LOAD_BASE),
+                true,
+            ) {
+                Ok(main_img) => {
+                    entry_point_addr = main_img.entry_point;
+                    aux_entry_point = entry_point_addr;
+                    phdr_va = main_img.phdr_va;
+                    phent = main_img.phent;
+                    phnum = main_img.phnum;
+                    max_end = main_img.max_end;
 
-                let load_bias: u64 = if eh.e_type == 3 /* ET_DYN */ { 0x40000000 } else { 0 };
-                phdr_va = 0;
-
-                // Try PT_PHDR first
-                for i in 0..e_phnum {
-                    let ph = unsafe {
-                        &*(content_buf
-                            .as_ptr()
-                            .add((e_phoff + i * e_phentsize) as usize)
-                            as *const Elf64Phdr)
-                    };
-                    if ph.p_type == PT_PHDR {
-                        phdr_va = load_bias + ph.p_vaddr;
-                    } else if ph.p_type == PT_INTERP {
-                        println!("dynamic binary is not supported yet...");
-                        let start = ph.p_offset as usize;
-                        let len = ph.p_filesz as usize;
-                        if start + len <= content_buf.len() {
-                            let s = core::str::from_utf8(&content_buf[start..start + len])
-                                .unwrap_or("");
-                            interp_path = Some(s.trim_end_matches('\0').to_string());
-                            println!("interp_path: {:?}", interp_path);
-                            return Err(());
-                        }
-                        break;
-                    }
-                }
-
-                // Fallback: translate file offset via containing PT_LOAD
-                if phdr_va == 0 {
-                    let ph_tbl_start = e_phoff;
-                    let ph_tbl_end = e_phoff + e_phentsize * e_phnum;
-                    for i in 0..e_phnum {
-                        let ph = unsafe {
-                            &*(content_buf
-                                .as_ptr()
-                                .add((e_phoff + i * e_phentsize) as usize)
-                                as *const Elf64Phdr)
-                        };
-                        if ph.p_type == PT_LOAD {
-                            let seg_start = ph.p_offset;
-                            let seg_end = ph.p_offset + ph.p_filesz;
-                            if ph_tbl_start >= seg_start && ph_tbl_end <= seg_end {
-                                phdr_va = load_bias + ph.p_vaddr + (e_phoff - ph.p_offset);
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                entry_point_addr = eh.e_entry + load_bias;
-                phent = e_phentsize;
-                phnum = e_phnum;
-
-                for segment in obj.segments() {
-                    if let Ok(data) = segment.data() {
-                        let seg_vaddr = segment.address();
-                        let size = segment.size() as usize;
-                        let base_addr = load_bias + seg_vaddr;
-                        let seg_end = base_addr + size as u64;
-                        if seg_end > max_end {
-                            max_end = seg_end;
-                        }
-
-                        let flags = segment.flags();
-                        match flags {
-                            SegmentFlags::Elf { p_flags } => {
-                                let _is_writable = (p_flags & object::elf::PF_W) != 0;
-                                let _is_executable = (p_flags & object::elf::PF_X) != 0;
-                                if let Ok(_) = alloc_pages(&mut mapper, base_addr, size, true, true)
-                                {
-                                    addr_size_vec.push((base_addr, size));
+                    if let Some(interp_path) = main_img.interp_path {
+                        match load_interpreter_image(
+                            interp_path.as_str(),
+                            &mut mapper,
+                            &mut addr_size_vec,
+                        ) {
+                            Ok(interp_img) => {
+                                entry_point_addr = interp_img.entry_point;
+                                at_base = interp_img.load_base;
+                                if interp_img.max_end > max_end {
+                                    max_end = interp_img.max_end;
                                 }
                             }
-                            _ => {}
-                        }
-
-                        // copy data after allocating
-                        let src = data.as_ptr();
-                        let dst = base_addr as *mut u8;
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(src, dst, data.len());
-                            if size > data.len() {
-                                core::ptr::write_bytes(dst.add(data.len()), 0, size - data.len());
+                            Err(_) => {
+                                println!("ksh: failed to load interpreter {}", interp_path);
+                                return Err(());
                             }
                         }
                     }
-                }
 
-                let user_stack_base = user_stack_top.as_u64() - USER_STACK_SIZE as u64;
-                if let Ok(_) =
-                    alloc_pages(&mut mapper, user_stack_base, USER_STACK_SIZE, true, false)
-                {
-                    addr_size_vec.push((user_stack_base, USER_STACK_SIZE));
+                    let user_stack_base = user_stack_top.as_u64() - USER_STACK_SIZE as u64;
+                    if let Ok(_) =
+                        alloc_pages(&mut mapper, user_stack_base, USER_STACK_SIZE, true, false)
+                    {
+                        addr_size_vec.push((user_stack_base, USER_STACK_SIZE));
+                    }
                 }
-            } else {
-                println!("ksh: invalid ELF file");
-                return Err(());
+                Err(_) => {
+                    println!("ksh: invalid ELF file");
+                    return Err(());
+                }
             }
+        } else {
+            println!("ksh: invalid ELF file");
+            return Err(());
         }
 
         let mut env = Vec::new();
@@ -296,7 +245,8 @@ impl Process {
 
         let user_rsp = build_initial_stack(
             user_stack_top.as_u64(),
-            entry_point_addr,
+            aux_entry_point,
+            at_base,
             Some(args),
             Some(env.as_slice()),
             phdr_va,
@@ -349,10 +299,8 @@ impl Process {
             }
         }
 
-        with_frame_allocator(|allocator| {
-            unsafe {
-                allocator.deallocate_frame(table_frame);
-            }
+        with_frame_allocator(|allocator| unsafe {
+            allocator.deallocate_frame(table_frame);
         });
     }
 }
@@ -433,7 +381,8 @@ struct AuxvEntry {
 
 fn build_initial_stack(
     mut rsp: u64,
-    entry_point: u64,
+    aux_entry: u64,
+    at_base: u64,
     argv: Option<&[&str]>,
     envp: Option<&[&str]>,
     phdr_addr: u64, // runtime VA (load_base + e_phoff)
@@ -506,12 +455,16 @@ fn build_initial_stack(
             value: phnum,
         }, // AT_PHNUM
         AuxvEntry {
+            key: 7,
+            value: at_base,
+        }, // AT_BASE
+        AuxvEntry {
             key: 6,
             value: 4096,
         }, // AT_PAGESZ
         AuxvEntry {
             key: 9,
-            value: entry_point,
+            value: aux_entry,
         }, // AT_ENTRY
         AuxvEntry {
             key: 25,
@@ -576,4 +529,142 @@ fn build_initial_stack(
     }
 
     rsp
+}
+
+struct LoadedImage {
+    entry_point: u64,
+    phdr_va: u64,
+    phent: u64,
+    phnum: u64,
+    max_end: u64,
+    load_base: u64,
+    interp_path: Option<String>,
+}
+
+fn load_elf_image(
+    content_buf: &[u8],
+    mapper: &mut OffsetPageTable<'_>,
+    addr_size_vec: &mut Vec<(u64, usize)>,
+    dyn_base_hint: Option<u64>,
+    capture_interp: bool,
+) -> Result<LoadedImage, ()> {
+    if content_buf.get(0..4) != Some(&ELF_MAGIC) {
+        return Err(());
+    }
+
+    let obj = object::File::parse(content_buf).map_err(|_| ())?;
+    let eh = unsafe { &*(content_buf.as_ptr() as *const Elf64Ehdr) };
+    let e_phoff = eh.e_phoff;
+    let e_phentsize = eh.e_phentsize as u64;
+    let e_phnum = eh.e_phnum as u64;
+
+    let mut load_bias = 0;
+    if eh.e_type == 3 {
+        load_bias = dyn_base_hint.unwrap_or(MAIN_DYN_LOAD_BASE);
+    }
+
+    let mut phdr_va = 0;
+    let mut interp_path = None;
+
+    for i in 0..e_phnum {
+        let ph = unsafe {
+            &*(content_buf
+                .as_ptr()
+                .add((e_phoff + i * e_phentsize) as usize) as *const Elf64Phdr)
+        };
+        if ph.p_type == PT_PHDR {
+            phdr_va = load_bias + ph.p_vaddr;
+        } else if capture_interp && ph.p_type == PT_INTERP {
+            let start = ph.p_offset as usize;
+            let len = ph.p_filesz as usize;
+            if start + len <= content_buf.len() {
+                if let Ok(s) = core::str::from_utf8(&content_buf[start..start + len]) {
+                    interp_path = Some(s.trim_end_matches('\0').to_string());
+                }
+            }
+        }
+    }
+
+    if phdr_va == 0 {
+        let ph_tbl_start = e_phoff;
+        let ph_tbl_end = e_phoff + e_phentsize * e_phnum;
+        for i in 0..e_phnum {
+            let ph = unsafe {
+                &*(content_buf
+                    .as_ptr()
+                    .add((e_phoff + i * e_phentsize) as usize)
+                    as *const Elf64Phdr)
+            };
+            if ph.p_type == PT_LOAD {
+                let seg_start = ph.p_offset;
+                let seg_end = ph.p_offset + ph.p_filesz;
+                if ph_tbl_start >= seg_start && ph_tbl_end <= seg_end {
+                    phdr_va = load_bias + ph.p_vaddr + (e_phoff - ph.p_offset);
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut max_end = 0;
+    for segment in obj.segments() {
+        if let Ok(data) = segment.data() {
+            let size = segment.size() as usize;
+            if size == 0 {
+                continue;
+            }
+            let base_addr = load_bias + segment.address();
+            let seg_end = base_addr + size as u64;
+            if seg_end > max_end {
+                max_end = seg_end;
+            }
+
+            if let SegmentFlags::Elf { .. } = segment.flags() {
+                if alloc_pages(mapper, base_addr, size, true, true).is_err() {
+                    return Err(());
+                }
+                addr_size_vec.push((base_addr, size));
+
+                let src = data.as_ptr();
+                let dst = base_addr as *mut u8;
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src, dst, data.len());
+                    if size > data.len() {
+                        core::ptr::write_bytes(dst.add(data.len()), 0, size - data.len());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(LoadedImage {
+        entry_point: eh.e_entry + load_bias,
+        phdr_va,
+        phent: e_phentsize,
+        phnum: e_phnum,
+        max_end,
+        load_base: load_bias,
+        interp_path,
+    })
+}
+
+fn load_interpreter_image(
+    path: &str,
+    mapper: &mut OffsetPageTable<'_>,
+    addr_size_vec: &mut Vec<(u64, usize)>,
+) -> Result<LoadedImage, ()> {
+    #[allow(static_mut_refs)]
+    let interp_buf = {
+        let vfs = unsafe { VFS.read() };
+        let mut node = vfs.open(path).map_err(|_| ())?;
+        node.read().map_err(|_| ())?
+    };
+
+    load_elf_image(
+        interp_buf.as_slice(),
+        mapper,
+        addr_size_vec,
+        Some(INTERP_DYN_LOAD_BASE),
+        false,
+    )
 }

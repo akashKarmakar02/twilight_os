@@ -1,12 +1,17 @@
-use x86_64::structures::paging::OffsetPageTable;
 use crate::sys::memory::{alloc_pages, dealloc_pages};
+use x86_64::structures::paging::OffsetPageTable;
 pub const PAGE: usize = 4096;
-#[inline] pub fn align_up(x: usize, a: usize) -> usize { (x + a - 1) & !(a - 1) }
-#[inline] pub fn align_dn(x: usize, a: usize) -> usize { x & !(a - 1) }
+#[inline]
+pub fn align_up(x: usize, a: usize) -> usize {
+    (x + a - 1) & !(a - 1)
+}
+#[inline]
+pub fn align_dn(x: usize, a: usize) -> usize {
+    x & !(a - 1)
+}
 
 const USER_LOWER: usize = 0x0000_0000_4000_0000; // pick what fits your layout
 const USER_UPPER: usize = 0x0000_7FFF_F000_0000; // below USER_STACK_TOP
-
 
 pub struct ProcMM {
     /// Start of the heap (page-aligned), typically align_up(max_end_of_loaded_segments).
@@ -39,14 +44,14 @@ impl ProcMM {
 
         if new_end > self.mapped_heap_end {
             let grow_from = self.mapped_heap_end;
-            let grow_len  = new_end - grow_from;
+            let grow_len = new_end - grow_from;
             // Map as user, writable. (You can thread executable/NX if needed.)
             alloc_pages(mapper, grow_from as u64, grow_len, true, true)?;
             self.mapped_heap_end = new_end;
         } else if new_end < self.mapped_heap_end {
             // Optional: actually release pages. Safe to ignore errors here.
             let shrink_from = new_end;
-            let shrink_len  = self.mapped_heap_end - new_end;
+            let shrink_len = self.mapped_heap_end - new_end;
             let _ = dealloc_pages(mapper, shrink_from as u64, shrink_len);
             self.mapped_heap_end = new_end;
         }
@@ -56,7 +61,9 @@ impl ProcMM {
     }
 
     pub fn brk_grow_by(&mut self, mapper: &mut OffsetPageTable, size: usize) -> Result<usize, ()> {
-        if size == 0 { return Ok(self.brk_cur); }
+        if size == 0 {
+            return Ok(self.brk_cur);
+        }
         self.set_brk(mapper, self.brk_cur.saturating_add(size))
     }
 
@@ -76,12 +83,16 @@ impl ProcMM {
         self.ensure_mmap_base();
         let len = align_up(length, PAGE);
         let base = align_up(self.mmap_base_hint, PAGE);
-        let end  = base.checked_add(len)?;
-        if end >= USER_UPPER { return None; }
+        let end = base.checked_add(len)?;
+        if end >= USER_UPPER {
+            return None;
+        }
         self.mmap_base_hint = end;
         Some(base)
     }
 
     #[inline]
-    pub fn curr_brk(&self) -> usize { self.brk_cur }
+    pub fn curr_brk(&self) -> usize {
+        self.brk_cur
+    }
 }
