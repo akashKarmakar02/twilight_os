@@ -1,6 +1,7 @@
 pub mod twilight_fs;
 pub mod ram_fs;
 pub mod vfs;
+pub mod partition;
 mod devfs;
 mod gdt;
 

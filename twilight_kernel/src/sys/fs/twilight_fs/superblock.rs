@@ -1,5 +1,6 @@
 use crate::driver::disk::BlockDeviceIO;
 use crate::println;
+use crate::sys::fs::partition;
 use crate::sys::fs::twilight_fs::inode::Inode;
 use crate::sys::fs::twilight_fs::{read_tfs_block, write_tfs_block, FS_BLOCK_SIZE};
 
@@ -37,7 +38,7 @@ impl Superblock {
         Ok(())
     }
 
-    pub fn write(device: &mut dyn BlockDeviceIO) -> Result<Self, &'static str> {
+    pub fn write(device: &mut dyn BlockDeviceIO, partition_sector_count: u32) -> Result<Self, &'static str> {
         let block_size = FS_BLOCK_SIZE as u64;          // 2048
         let bits_per_block = block_size * 8;            // 16384
         let inode_size = size_of::<Inode>() as u64;     // typically 64
@@ -47,7 +48,8 @@ impl Superblock {
 
         // ---- device geometry (sector-level/IO Level) ----
         let dev_sector_size = device.block_size() as u64;       // 512
-        let dev_sectors     = device.block_count() as u64;      // in 512B units
+        debug_assert_eq!(dev_sector_size, partition::SECTOR_SIZE as u64);
+        let dev_sectors     = partition_sector_count as u64;    // limited to Twilight partition
         let sectors_per_fs_block = block_size / dev_sector_size; // 2048/512 = 4
 
         // total FS blocks & zones on the device

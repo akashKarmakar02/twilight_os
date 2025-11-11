@@ -6,6 +6,7 @@ pub mod metadata;
 
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
+use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
 use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
@@ -17,15 +18,36 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::rwlock::RwLock;
 use spin::Mutex;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
-pub const FS_BLOCK_OFFSET: usize = 0;
+static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+#[inline]
+pub fn fs_block_offset_bytes() -> usize {
+    FS_BLOCK_OFFSET.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_fs_block_offset_bytes(offset: usize) {
+    FS_BLOCK_OFFSET.store(offset, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn set_fs_block_offset_lba(start_lba: u32) {
+    set_fs_block_offset_bytes((start_lba as usize) * partition::SECTOR_SIZE as usize);
+}
+
+#[inline]
+fn fs_block_offset_sectors() -> usize {
+    fs_block_offset_bytes() / partition::SECTOR_SIZE as usize
+}
 
 pub fn read_tfs_block(device: &mut dyn BlockDeviceIO, block_no: u32, buf: &mut [u8; 2048]) -> Result<(), FsError> {
     let block_no = block_no as usize;
-    let start_block = (block_no * 4) + (FS_BLOCK_OFFSET / 512);
+    let start_block = (block_no * 4) + fs_block_offset_sectors();
     let end_block = start_block + 4;
     let mut temp_buf = [0u8; 512];
     let mut offset = 0;
@@ -43,17 +65,13 @@ pub fn read_tfs_block(device: &mut dyn BlockDeviceIO, block_no: u32, buf: &mut [
 
 pub fn write_tfs_block(device: &mut dyn BlockDeviceIO, block_no: u32, buf: &[u8; 2048]) -> Result<(), FsError> {
     let block_no = block_no as usize;
-    let start_block = (block_no * 4) + (FS_BLOCK_OFFSET / 512);
+    let start_block = (block_no * 4) + fs_block_offset_sectors();
 
     for i in 0..4 {
         let t_buf = &buf[i*512..(i+1)*512];
         if device.write(i as u32 + start_block as u32, t_buf).is_err() {
             return Err(InvalidInode);
         }
-    }
-
-    if device.write(block_no as u32, buf).is_err() {
-        return Err(InvalidInode);
     }
 
     Ok(())
@@ -77,11 +95,28 @@ pub enum FsError {
     FileSizeTooLarge,
 }
 
+fn detect_twilight_partition(bus: u8, dsk: u8) -> Option<PartitionEntry> {
+    let mut sector = [0u8; 512];
+    if driver::disk::ata::read(bus, dsk, 0, &mut sector).is_err() {
+        return None;
+    }
+
+    if !partition::has_signature(&sector) {
+        return None;
+    }
+
+    let entries = partition::decode_entries(&sector);
+    partition::find_entry(&entries, TWILIGHT_PARTITION_TYPE)
+}
+
 
 pub fn format_superblock(
-    block_device: &'static mut dyn BlockDeviceIO
+    block_device: &'static mut dyn BlockDeviceIO,
+    partition_start_lba: u32,
+    partition_sector_count: u32,
 ) -> Result<TwilightFs, &'static str> {
-    let sb = Superblock::write(block_device)?;
+    set_fs_block_offset_lba(partition_start_lba);
+    let sb = Superblock::write(block_device, partition_sector_count)?;
     let device_box: Box<dyn BlockDeviceIO + Send + 'static> = unsafe { Box::from_raw(block_device as *mut _) };
     let device_arc = Arc::new(Mutex::new(device_box));
     Ok(TwilightFs { superblock: sb, device: device_arc })
@@ -89,10 +124,10 @@ pub fn format_superblock(
 
 
 pub fn read_superblock(device: &mut dyn BlockDeviceIO) -> Result<Superblock, &'static str> {
-    let mut buf = [0u8; 512];
-    if device.read(0, &mut buf[0..512]).is_err() {
-
-    } // Superblock is usually at block 0
+    let mut buf = [0u8; FS_BLOCK_SIZE];
+    if read_tfs_block(device, 0, &mut buf).is_err() {
+        return Err("Failed to read TwilightFS superblock");
+    }
     let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
 
     if !sb.is_valid() {
@@ -141,33 +176,32 @@ impl TwilightFs {
     }
 
     pub fn check_ata(bus: u8, dsk: u8) -> Result<Self, &'static str> {
-        let mut buf = [0u8; 2048];
-
-        // Try to read block 0 (superblock)
-        if driver::disk::ata::read(bus, dsk, 0, &mut buf).is_err() {
-            return Err("Failed to read block 0");
+        if let Some(entry) = detect_twilight_partition(bus, dsk) {
+            set_fs_block_offset_lba(entry.lba_start);
+        } else {
+            set_fs_block_offset_bytes(0);
         }
 
-        // Interpret as Superblock
-        let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
+        let mut device = driver::disk::AtaBlockDevice::new(bus, dsk)
+            .ok_or("Failed to open ATA device")?;
 
-        // Validate magic number
+        let mut buf = [0u8; FS_BLOCK_SIZE];
+        if read_tfs_block(&mut device, 0, &mut buf).is_err() {
+            return Err("Failed to read Twilight FS superblock");
+        }
+
+        let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
         if !sb.is_valid() {
             return Err("Invalid Twilight FS superblock magic");
         }
 
-        // Open the device
-        if let Some(device) = driver::disk::AtaBlockDevice::new(bus, dsk) {
-            let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(device);
-            let device_arc = Arc::new(Mutex::new(device_box));
+        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(device);
+        let device_arc = Arc::new(Mutex::new(device_box));
 
-            Ok(TwilightFs {
-                superblock: sb,
-                device: device_arc,
-            })
-        } else {
-            Err("Failed to open ATA device")
-        }
+        Ok(TwilightFs {
+            superblock: sb,
+            device: device_arc,
+        })
     }
 
     pub fn allocate_zone(&mut self) -> Result<u32, TfsError> {
