@@ -111,23 +111,17 @@ unsafe extern "C" fn kmain() -> ! {
         cpio_response.unwrap(),
     );
 
-    // println!("\x1b[96m                                                     ,,    ,,    ,,            ,,                                        ");
-    // println!("                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd ");
-    // println!("                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y ");
-    // println!("                                MM `7M'    ,A    `MF'`7MM    MM  `7MM  .P\"Ybmmm  MMpMMMb.mmMMmm     dM'      `MM `MMb.     ");
-    // println!("                                MM   VA   ,VAA   ,V    MM    MM    MM :MI  I8    MM    MM  MM       MM        MM   `YMMNq. ");
-    // println!("                                MM    VA ,V  VA ,V     MM    MM    MM  WmmmP\"    MM    MM  MM       MM.      ,MP .     `MM ");
-    // println!("                                MM     VVV    VVV      MM    MM    MM  8M         MM    MM  MM       `Mb.    ,dP' Mb     dM ");
-    // println!("                              .JMML.    W      W     .JMML..JMML..JMML.YMMMMMb .JMML  JMML.`Mbmo      `\"bmmd\"'   P\"Ybmmd\"  ");
-    // println!("                                                                       6'     dP                                             ");
-    // println!("                                                                       Ybmmmd'                                               \x1b[0m");
+    println!("\x1b[96m                                                     ,,    ,,    ,,            ,,                                        ");
+    println!("                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd ");
+    println!("                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y ");
+    println!("                                MM `7M'    ,A    `MF'`7MM    MM  `7MM  .P\"Ybmmm  MMpMMMb.mmMMmm     dM'      `MM `MMb.     ");
+    println!("                                MM   VA   ,VAA   ,V    MM    MM    MM :MI  I8    MM    MM  MM       MM        MM   `YMMNq. ");
+    println!("                                MM    VA ,V  VA ,V     MM    MM    MM  WmmmP\"    MM    MM  MM       MM.      ,MP .     `MM ");
+    println!("                                MM     VVV    VVV      MM    MM    MM  8M         MM    MM  MM       `Mb.    ,dP' Mb     dM ");
+    println!("                              .JMML.    W      W     .JMML..JMML..JMML.YMMMMMb .JMML  JMML.`Mbmo      `\"bmmd\"'   P\"Ybmmd\"  ");
+    println!("                                                                       6'     dP                                             ");
+    println!("                                                                       Ybmmmd'                                               \x1b[0m");
 
-    println!(r"___________       .__.__  .__       .__     __    ________    _________ ");
-    println!(r"\__    ___/_  _  _|__|  | |__| ____ |  |___/  |_  \_____  \  /   _____/ ");
-    println!(r"  |    |  \ \/ \/ /  |  | |  |/ ___\|  |  \   __\  /   |   \ \_____  \  ");
-    println!(r"  |    |   \     /|  |  |_|  / /_/  |   Y  \  |   /    |    \/        \ ");
-    println!(r"  |____|    \/\_/ |__|____/__\___  /|___|  /__|   \_______  /_______  / ");
-    println!(r"                            /_____/      \/               \/        \/  ");
     // sys::proc::switch::switch_demo();
     // sys::console::framebuffer::init();
     sys::console::init_console();
@@ -156,6 +150,7 @@ fn hcf() -> ! {
 use crate::kernel_utils::install::INITRAMFS;
 use crate::sys::console::init_tty;
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
+use crate::sys::rng;
 use crate::task::executor;
 use sys::framebuffer::init_framebuffer;
 use sys::{fs, memory};
@@ -187,6 +182,8 @@ pub fn init(
 
     executor::init_executor();
 
+    rng::init();
+
     // init_writer();
     init_tty();
     sys::pci::init();
@@ -205,6 +202,7 @@ pub fn init(
     sys::proc::init();
 
     x86_64::instructions::interrupts::enable();
+    driver::timer::init();
 
     let cpio_buf = unsafe {
         core::slice::from_raw_parts(cpio_file.addr() as *const u8, cpio_file.size() as usize)
@@ -216,13 +214,6 @@ pub fn init(
     }
 
     kernel_utils::dhcp::main();
-
-    // #[allow(static_mut_refs)]
-    // if let Some(fb) = unsafe { FRAMEBUFFER.get_mut() } {
-    //     fb.animate_bouncing_rect(3000);
-    //     fb.clear_buf(0x101010);
-    //     fb.sync_full();
-    // }
 }
 
 #[macro_export]
