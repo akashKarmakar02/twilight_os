@@ -1,14 +1,14 @@
-use crate::{log};
+use crate::log;
 
+use crate::driver::disk::ata::{FileIO, IO};
+use crate::driver::timer::cmos::CMOS;
+use crate::driver::timer::pit::uptime;
 use lazy_static::lazy_static;
 use rand::{RngCore, SeedableRng};
 use rand_hc::Hc128Rng;
 use sha2::{Digest, Sha256};
 use spin::Mutex;
 use x86_64::instructions::random::RdRand;
-use crate::driver::disk::ata::{FileIO, IO};
-use crate::driver::timer::cmos::CMOS;
-use crate::driver::timer::pit::uptime;
 
 lazy_static! {
     static ref RNG: Mutex<Hc128Rng> = Mutex::new(Hc128Rng::from_seed([0; 32]));
@@ -41,9 +41,9 @@ impl FileIO for Random {
     fn close(&mut self) {}
 
     fn poll(&mut self, event: IO) -> bool {
-        match event { 
-            IO::Read => { true },
-            IO::Write => { false },
+        match event {
+            IO::Read => true,
+            IO::Write => false,
         }
     }
 }
@@ -67,7 +67,8 @@ pub fn init() {
         for chunk in seed.chunks_mut(8) {
             // NOTE: Intel's Software Developer's Manual, Volume 1, 7.3.17.1
             let mut retry = true;
-            for _ in 0..10 { // Retry up to 10 times
+            for _ in 0..10 {
+                // Retry up to 10 times
                 if let Some(num) = rng.get_u64() {
                     chunk.clone_from_slice(&num.to_be_bytes());
                     retry = false;

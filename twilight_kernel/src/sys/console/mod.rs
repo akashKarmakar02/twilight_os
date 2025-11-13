@@ -2,9 +2,9 @@ extern crate alloc;
 
 use crate::arch::x86_64::halt;
 use crate::driver::disk::dummy_blockdev;
-pub(crate) use crate::sys::console::tty::{get_tty, Tty};
-use crate::sys::fs::vfs::{VfsNodeOps, VFS};
-use crate::sys::proc::{Process, PROCESS_TABLE};
+pub(crate) use crate::sys::console::tty::{Tty, get_tty};
+use crate::sys::fs::vfs::{VFS, VfsNodeOps};
+use crate::sys::proc::{PROCESS_TABLE, Process};
 use crate::{print, println, serial_println};
 use alloc::format;
 use alloc::string::String;
@@ -65,7 +65,9 @@ fn handle_console_input() {
         halt();
         let mut buf = [0u8; 1];
         unsafe {
-            get_tty().read(&mut dummy_blockdev(), 0, &mut buf).unwrap_unchecked();
+            get_tty()
+                .read(&mut dummy_blockdev(), 0, &mut buf)
+                .unwrap_unchecked();
         }
         let c = buf[0] as char;
         match c {

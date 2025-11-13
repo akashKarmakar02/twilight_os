@@ -67,12 +67,8 @@ pub fn decode_entries(mbr: &[u8; 512]) -> [PartitionEntry; 4] {
         entry.chs_start.copy_from_slice(&mbr[base + 1..base + 4]);
         entry.partition_type = mbr[base + 4];
         entry.chs_end.copy_from_slice(&mbr[base + 5..base + 8]);
-        entry.lba_start = u32::from_le_bytes(
-            mbr[base + 8..base + 12].try_into().unwrap(),
-        );
-        entry.sectors = u32::from_le_bytes(
-            mbr[base + 12..base + 16].try_into().unwrap(),
-        );
+        entry.lba_start = u32::from_le_bytes(mbr[base + 8..base + 12].try_into().unwrap());
+        entry.sectors = u32::from_le_bytes(mbr[base + 12..base + 16].try_into().unwrap());
     }
 
     entries

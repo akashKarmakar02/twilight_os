@@ -44,13 +44,13 @@ impl Uart {
         }
 
         let mut port: Port<u8> = Port::new(self.port + 2);
-        
+
         unsafe {
             port.write(0xC7u8); // Enable FIFO, clear them, with 14-byte threshold
         }
-        
+
         let mut port: Port<u8> = Port::new(self.port + 4);
-        
+
         unsafe {
             port.write(0x0Bu8); // IRQs enabled, RTS/DSR set
         }
@@ -86,7 +86,7 @@ pub fn init() {
     unsafe {
         let uart = Uart::new(0x3f8);
         uart.init();
-        
+
         UART = Some(uart);
     }
 }

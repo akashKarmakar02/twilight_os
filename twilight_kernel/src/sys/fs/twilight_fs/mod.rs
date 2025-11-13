@@ -1,17 +1,19 @@
-pub mod superblock;
 pub mod blockgroup;
-pub mod inode;
 pub mod dir_entry;
+pub mod inode;
 pub mod metadata;
+pub mod superblock;
 
+use crate::driver;
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
+use crate::sys::fs::twilight_fs::FsError::{
+    FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode,
+};
 use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
-use crate::sys::fs::twilight_fs::FsError::{FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode};
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
-use crate::driver;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -19,8 +21,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::rwlock::RwLock;
 use spin::Mutex;
+use spin::rwlock::RwLock;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
 static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);
@@ -45,7 +47,11 @@ fn fs_block_offset_sectors() -> usize {
     fs_block_offset_bytes() / partition::SECTOR_SIZE as usize
 }
 
-pub fn read_tfs_block(device: &mut dyn BlockDeviceIO, block_no: u32, buf: &mut [u8; 2048]) -> Result<(), FsError> {
+pub fn read_tfs_block(
+    device: &mut dyn BlockDeviceIO,
+    block_no: u32,
+    buf: &mut [u8; 2048],
+) -> Result<(), FsError> {
     let block_no = block_no as usize;
     let start_block = (block_no * 4) + fs_block_offset_sectors();
     let end_block = start_block + 4;
@@ -56,19 +62,23 @@ pub fn read_tfs_block(device: &mut dyn BlockDeviceIO, block_no: u32, buf: &mut [
         if device.read(i as u32, &mut temp_buf[0..512]).is_err() {
             return Err(InvalidInode);
         }
-        buf[offset..offset+512].copy_from_slice(&temp_buf[0..512]);
+        buf[offset..offset + 512].copy_from_slice(&temp_buf[0..512]);
         offset += 512;
     }
 
     Ok(())
 }
 
-pub fn write_tfs_block(device: &mut dyn BlockDeviceIO, block_no: u32, buf: &[u8; 2048]) -> Result<(), FsError> {
+pub fn write_tfs_block(
+    device: &mut dyn BlockDeviceIO,
+    block_no: u32,
+    buf: &[u8; 2048],
+) -> Result<(), FsError> {
     let block_no = block_no as usize;
     let start_block = (block_no * 4) + fs_block_offset_sectors();
 
     for i in 0..4 {
-        let t_buf = &buf[i*512..(i+1)*512];
+        let t_buf = &buf[i * 512..(i + 1) * 512];
         if device.write(i as u32 + start_block as u32, t_buf).is_err() {
             return Err(InvalidInode);
         }
@@ -109,7 +119,6 @@ fn detect_twilight_partition(bus: u8, dsk: u8) -> Option<PartitionEntry> {
     partition::find_entry(&entries, TWILIGHT_PARTITION_TYPE)
 }
 
-
 pub fn format_superblock(
     block_device: &'static mut dyn BlockDeviceIO,
     partition_start_lba: u32,
@@ -117,11 +126,14 @@ pub fn format_superblock(
 ) -> Result<TwilightFs, &'static str> {
     set_fs_block_offset_lba(partition_start_lba);
     let sb = Superblock::write(block_device, partition_sector_count)?;
-    let device_box: Box<dyn BlockDeviceIO + Send + 'static> = unsafe { Box::from_raw(block_device as *mut _) };
+    let device_box: Box<dyn BlockDeviceIO + Send + 'static> =
+        unsafe { Box::from_raw(block_device as *mut _) };
     let device_arc = Arc::new(Mutex::new(device_box));
-    Ok(TwilightFs { superblock: sb, device: device_arc })
+    Ok(TwilightFs {
+        superblock: sb,
+        device: device_arc,
+    })
 }
-
 
 pub fn read_superblock(device: &mut dyn BlockDeviceIO) -> Result<Superblock, &'static str> {
     let mut buf = [0u8; FS_BLOCK_SIZE];
@@ -182,8 +194,8 @@ impl TwilightFs {
             set_fs_block_offset_bytes(0);
         }
 
-        let mut device = driver::disk::AtaBlockDevice::new(bus, dsk)
-            .ok_or("Failed to open ATA device")?;
+        let mut device =
+            driver::disk::AtaBlockDevice::new(bus, dsk).ok_or("Failed to open ATA device")?;
 
         let mut buf = [0u8; FS_BLOCK_SIZE];
         if read_tfs_block(&mut device, 0, &mut buf).is_err() {
@@ -219,7 +231,9 @@ impl TwilightFs {
                     for bit in 0..8 {
                         if buf[byte_idx] & (1 << bit) == 0 {
                             buf[byte_idx] |= 1 << bit;
-                            if write_tfs_block(self.device.lock().as_mut(), zmap_start + i, &buf).is_err() {
+                            if write_tfs_block(self.device.lock().as_mut(), zmap_start + i, &buf)
+                                .is_err()
+                            {
                                 return Err(TfsError::IoError);
                             }
 
@@ -233,7 +247,6 @@ impl TwilightFs {
 
         Err(TfsError::NoSpaceLeft)
     }
-
 
     pub fn allocate_inode(&mut self) -> Result<u32, TfsError> {
         let bits_per_block = self.superblock.block_size as usize * 8;
@@ -252,13 +265,16 @@ impl TwilightFs {
                 if byte != 0xFF {
                     for bit in 0..8 {
                         if byte & (1 << bit) == 0 {
-                            let inode_idx = (block_idx as usize * bits_per_block) + (byte_idx * 8) + bit;
+                            let inode_idx =
+                                (block_idx as usize * bits_per_block) + (byte_idx * 8) + bit;
                             if inode_idx >= total_inodes {
                                 break;
                             }
 
                             buf[byte_idx] |= 1 << bit;
-                            if write_tfs_block(self.device.lock().as_mut(), imap_block_lba, &buf).is_err() {
+                            if write_tfs_block(self.device.lock().as_mut(), imap_block_lba, &buf)
+                                .is_err()
+                            {
                                 return Err(TfsError::IoError);
                             }
                             return Ok(inode_idx as u32);
@@ -334,7 +350,6 @@ impl TwilightFs {
         Ok(())
     }
 
-
     // TODO: move this to inode impl
     pub fn write_inode(&mut self, inode_num: u32, inode: &Inode) -> Result<(), &'static str> {
         if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
@@ -357,10 +372,7 @@ impl TwilightFs {
         }
 
         let inode_bytes = unsafe {
-            core::slice::from_raw_parts(
-                inode as *const _ as *const u8,
-                size_of::<Inode>(),
-            )
+            core::slice::from_raw_parts(inode as *const _ as *const u8, size_of::<Inode>())
         };
         buffer[byte_offset..byte_offset + inode_size].copy_from_slice(inode_bytes);
 
@@ -376,7 +388,6 @@ impl TwilightFs {
         if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
             return Err("Invalid inode number");
         }
-
 
         let inode_index = (inode_num - 1) as usize;
         let inode_size = size_of::<Inode>();
@@ -447,14 +458,16 @@ impl TwilightFs {
 
             for j in 0..entries_per_block {
                 let offset = j * dir_entry_size;
-                let inode_field = u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset+3]]);
+                let inode_field = u32::from_le_bytes([
+                    buf[offset],
+                    buf[offset + 1],
+                    buf[offset + 2],
+                    buf[offset + 3],
+                ]);
                 if inode_field == 0 {
                     // Found empty slot
                     let entry_bytes = unsafe {
-                        core::slice::from_raw_parts(
-                            &entry as *const _ as *const u8,
-                            dir_entry_size,
-                        )
+                        core::slice::from_raw_parts(&entry as *const _ as *const u8, dir_entry_size)
                     };
                     buf[offset..offset + dir_entry_size].copy_from_slice(entry_bytes);
                     if write_tfs_block(self.device.lock().as_mut(), block.into(), &buf).is_err() {
@@ -557,7 +570,8 @@ impl TwilightFs {
 
         self.write_inode(new_inode_num, &inode).unwrap();
 
-        self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
+        self.create_dir_entry(parent_inode_num, name, new_inode_num)
+            .unwrap();
 
         Ok(new_inode_num)
     }
@@ -607,10 +621,14 @@ impl TwilightFs {
             }
 
             let mut indirect_block = [0u8; FS_BLOCK_SIZE];
-            write_tfs_block(self.device.lock().as_mut(), inode.indirect_zones, &mut indirect_block)?;
+            write_tfs_block(
+                self.device.lock().as_mut(),
+                inode.indirect_zones,
+                &mut indirect_block,
+            )?;
 
             let zone_entries = FS_BLOCK_SIZE / 4;
-            for i in 0..(zone_entries-1) {
+            for i in 0..(zone_entries - 1) {
                 if remaining == 0 {
                     break;
                 }
@@ -633,7 +651,8 @@ impl TwilightFs {
                 let mut buffer = [0u8; FS_BLOCK_SIZE];
                 let copy_size = core::cmp::min(block_size, remaining);
 
-                buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                buffer[..copy_size]
+                    .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
                 write_tfs_block(self.device.lock().as_mut(), zone, &buffer)?;
 
                 bytes_written += copy_size;
@@ -641,30 +660,48 @@ impl TwilightFs {
             }
 
             // store updated indirect block
-            write_tfs_block(self.device.lock().as_mut(), inode.indirect_zones, &indirect_block)?;
+            write_tfs_block(
+                self.device.lock().as_mut(),
+                inode.indirect_zones,
+                &indirect_block,
+            )?;
         }
 
         if remaining > 0 {
             if inode.double_indirect_zones == 0 {
                 inode.double_indirect_zones = self.allocate_zone().unwrap();
                 let zero_block = [0u8; FS_BLOCK_SIZE];
-                write_tfs_block(self.device.lock().as_mut(), inode.double_indirect_zones, &zero_block)?;
+                write_tfs_block(
+                    self.device.lock().as_mut(),
+                    inode.double_indirect_zones,
+                    &zero_block,
+                )?;
             }
 
             let mut double_indirect_block = [0u8; FS_BLOCK_SIZE];
-            read_tfs_block(self.device.lock().as_mut(), inode.double_indirect_zones, &mut double_indirect_block)?;
+            read_tfs_block(
+                self.device.lock().as_mut(),
+                inode.double_indirect_zones,
+                &mut double_indirect_block,
+            )?;
 
             let zone_entries = FS_BLOCK_SIZE / 4;
-            for i in 0..(zone_entries-1) {
+            for i in 0..(zone_entries - 1) {
                 if remaining == 0 {
                     break;
                 }
 
                 let indirect_zone = {
-                    let entry = u32::from_le_bytes([double_indirect_block[i*4], double_indirect_block[i*4+1], double_indirect_block[i*4+2], double_indirect_block[i*4+3]]);
+                    let entry = u32::from_le_bytes([
+                        double_indirect_block[i * 4],
+                        double_indirect_block[i * 4 + 1],
+                        double_indirect_block[i * 4 + 2],
+                        double_indirect_block[i * 4 + 3],
+                    ]);
                     if entry == 0 {
                         let new_zone = self.allocate_zone().unwrap();
-                        double_indirect_block[i*4..i*4+4].copy_from_slice(&new_zone.to_le_bytes());
+                        double_indirect_block[i * 4..i * 4 + 4]
+                            .copy_from_slice(&new_zone.to_le_bytes());
                         let zero_block = [0u8; FS_BLOCK_SIZE];
                         write_tfs_block(self.device.lock().as_mut(), new_zone, &zero_block)?;
                         new_zone
@@ -674,19 +711,29 @@ impl TwilightFs {
                 };
 
                 let mut indirect_block = [0u8; FS_BLOCK_SIZE];
-                read_tfs_block(self.device.lock().as_mut(), indirect_zone, &mut indirect_block)?;
+                read_tfs_block(
+                    self.device.lock().as_mut(),
+                    indirect_zone,
+                    &mut indirect_block,
+                )?;
 
                 let zone_entries = FS_BLOCK_SIZE / 4;
-                for j in 0..(zone_entries-1) {
+                for j in 0..(zone_entries - 1) {
                     if remaining == 0 {
                         break;
                     }
 
                     let zone = {
-                        let entry = u32::from_le_bytes([indirect_block[j*4], indirect_block[j*4+1], indirect_block[j*4+2], indirect_block[j*4+3]]);
+                        let entry = u32::from_le_bytes([
+                            indirect_block[j * 4],
+                            indirect_block[j * 4 + 1],
+                            indirect_block[j * 4 + 2],
+                            indirect_block[j * 4 + 3],
+                        ]);
                         if entry == 0 {
                             let new_zone = self.allocate_zone().unwrap();
-                            indirect_block[j*4..j*4+4].copy_from_slice(&new_zone.to_le_bytes());
+                            indirect_block[j * 4..j * 4 + 4]
+                                .copy_from_slice(&new_zone.to_le_bytes());
                             let zero_block = [0u8; FS_BLOCK_SIZE];
                             write_tfs_block(self.device.lock().as_mut(), new_zone, &zero_block)?;
                             new_zone
@@ -698,7 +745,8 @@ impl TwilightFs {
                     let mut buffer = [0u8; FS_BLOCK_SIZE];
                     let copy_size = core::cmp::min(block_size, remaining);
 
-                    buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                    buffer[..copy_size]
+                        .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
                     write_tfs_block(self.device.lock().as_mut(), zone, &buffer)?;
 
                     bytes_written += copy_size;
@@ -710,7 +758,11 @@ impl TwilightFs {
             }
 
             // store updated double indirect block
-            write_tfs_block(self.device.lock().as_mut(), inode.double_indirect_zones, &double_indirect_block)?;
+            write_tfs_block(
+                self.device.lock().as_mut(),
+                inode.double_indirect_zones,
+                &double_indirect_block,
+            )?;
         }
 
         inode.size = bytes_written as u64;
@@ -730,7 +782,6 @@ impl TwilightFs {
         let mut bytes_processed = 0;
         let total_size = dir_inode.size as usize;
         let zones = dir_inode.zones;
-
 
         for &zone_num in zones.iter() {
             if zone_num == 0 {
@@ -762,7 +813,11 @@ impl TwilightFs {
                     FileType::Dir
                 };
 
-                let name_end = entry.name.iter().position(|&b| b == 0).unwrap_or(entry.name.len());
+                let name_end = entry
+                    .name
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(entry.name.len());
                 let name_bytes = &entry.name[..name_end];
 
                 match core::str::from_utf8(name_bytes) {
@@ -833,14 +888,16 @@ impl TwilightFs {
         inode.zones[0] = new_zone;
         self.write_inode(new_inode_num, &inode).unwrap();
 
-        self.create_dir_entry(parent_inode_num, name, new_inode_num).unwrap();
+        self.create_dir_entry(parent_inode_num, name, new_inode_num)
+            .unwrap();
 
-        self.create_dir_entry(new_inode_num, ".", new_inode_num).unwrap();
-        self.create_dir_entry(new_inode_num, "..", parent_inode_num).unwrap();
+        self.create_dir_entry(new_inode_num, ".", new_inode_num)
+            .unwrap();
+        self.create_dir_entry(new_inode_num, "..", parent_inode_num)
+            .unwrap();
 
         Ok(new_inode_num)
     }
-
 
     pub fn find_dir_entry(
         &mut self,
@@ -868,9 +925,8 @@ impl TwilightFs {
 
             for i in 0..entries_per_block {
                 let offset = i * dir_entry_size;
-                let entry = unsafe {
-                    core::ptr::read(buffer[offset..].as_ptr() as *const DirEntry)
-                };
+                let entry =
+                    unsafe { core::ptr::read(buffer[offset..].as_ptr() as *const DirEntry) };
 
                 if entry.inode != 0 {
                     let entry_name = core::str::from_utf8(&entry.name)
@@ -913,10 +969,17 @@ impl TwilightFs {
         }
 
         if inode.indirect_zones != 0 {
-            read_tfs_block(self.device.lock().as_mut(), inode.indirect_zones, &mut buffer).unwrap();
+            read_tfs_block(
+                self.device.lock().as_mut(),
+                inode.indirect_zones,
+                &mut buffer,
+            )
+            .unwrap();
             let zone_size = FS_BLOCK_SIZE / 4;
             for i in 0..(zone_size - 1) {
-                let zone_id_buf: [u8; 4] = buffer[i*4..(i+1)*4].try_into().expect("invalid zone id size");
+                let zone_id_buf: [u8; 4] = buffer[i * 4..(i + 1) * 4]
+                    .try_into()
+                    .expect("invalid zone id size");
                 let zone_id = u32::from_le_bytes(zone_id_buf);
                 if zone_id == 0 {
                     break;
@@ -926,10 +989,14 @@ impl TwilightFs {
 
                 let mut indirect_content_buf = [0u8; FS_BLOCK_SIZE];
 
-                read_tfs_block(self.device.lock().as_mut(), zone_id, &mut indirect_content_buf).unwrap();
+                read_tfs_block(
+                    self.device.lock().as_mut(),
+                    zone_id,
+                    &mut indirect_content_buf,
+                )
+                .unwrap();
 
                 content.extend_from_slice(&indirect_content_buf[..to_read]);
-
 
                 remaining -= to_read;
                 if remaining == 0 {
@@ -939,24 +1006,38 @@ impl TwilightFs {
         }
 
         if inode.double_indirect_zones != 0 {
-            read_tfs_block(self.device.lock().as_mut(), inode.double_indirect_zones, &mut buffer).unwrap();
+            read_tfs_block(
+                self.device.lock().as_mut(),
+                inode.double_indirect_zones,
+                &mut buffer,
+            )
+            .unwrap();
             let zone_size = FS_BLOCK_SIZE / 4;
             for i in 0..(zone_size - 1) {
                 if remaining == 0 {
                     break;
                 }
-                let zone_id_buf: [u8; 4] = buffer[i*4..(i+1)*4].try_into().expect("invalid zone id size");
+                let zone_id_buf: [u8; 4] = buffer[i * 4..(i + 1) * 4]
+                    .try_into()
+                    .expect("invalid zone id size");
                 let zone_id = u32::from_le_bytes(zone_id_buf);
                 if zone_id == 0 {
                     break;
                 }
 
                 let mut indirect_zones_buf = [0u8; FS_BLOCK_SIZE];
-                read_tfs_block(self.device.lock().as_mut(), zone_id, &mut indirect_zones_buf).unwrap();
+                read_tfs_block(
+                    self.device.lock().as_mut(),
+                    zone_id,
+                    &mut indirect_zones_buf,
+                )
+                .unwrap();
 
                 let zone_entries = FS_BLOCK_SIZE / 4;
                 for j in 0..(zone_entries - 1) {
-                    let zone_id_buf: [u8; 4] = indirect_zones_buf[j*4..(j+1)*4].try_into().expect("invalid zone id size");
+                    let zone_id_buf: [u8; 4] = indirect_zones_buf[j * 4..(j + 1) * 4]
+                        .try_into()
+                        .expect("invalid zone id size");
                     let zone_id = u32::from_le_bytes(zone_id_buf);
                     if zone_id == 0 {
                         break;
@@ -968,8 +1049,6 @@ impl TwilightFs {
                     read_tfs_block(self.device.lock().as_mut(), zone_id, &mut zone_buf).unwrap();
 
                     content.extend_from_slice(zone_buf.as_slice());
-
-
 
                     remaining -= to_read;
                     if remaining == 0 {
@@ -1014,9 +1093,7 @@ impl TwilightFs {
 
             for i in 0..entries_per_block {
                 let offset = i * dir_entry_size;
-                let entry = unsafe {
-                    core::ptr::read(buf[offset..].as_ptr() as *const DirEntry)
-                };
+                let entry = unsafe { core::ptr::read(buf[offset..].as_ptr() as *const DirEntry) };
 
                 let entry_name = core::str::from_utf8(&entry.name)
                     .unwrap_or("")
@@ -1066,7 +1143,11 @@ impl FsCtx for TwilightFs {
             return Err(());
         }
 
-        if let Err(_) = read_tfs_block(self.device.lock().as_mut(), lba, <&mut [u8; 2048]>::try_from(buf).unwrap()) {
+        if let Err(_) = read_tfs_block(
+            self.device.lock().as_mut(),
+            lba,
+            <&mut [u8; 2048]>::try_from(buf).unwrap(),
+        ) {
             return Err(());
         }
 
@@ -1078,7 +1159,11 @@ impl FsCtx for TwilightFs {
             return Err(());
         }
 
-        if let Err(_) = write_tfs_block(self.device.lock().as_mut(), lba, <&[u8; 2048]>::try_from(buf).unwrap()) {
+        if let Err(_) = write_tfs_block(
+            self.device.lock().as_mut(),
+            lba,
+            <&[u8; 2048]>::try_from(buf).unwrap(),
+        ) {
             return Err(());
         }
 
@@ -1133,14 +1218,13 @@ impl FileSystem for TwilightFs {
                 },
                 Arc::new(RwLock::new(TFSVfsNode {
                     inode,
-                    ctx: Arc::new(
-                        Mutex::new(
-                            TwilightFs { device: self.device.clone(), superblock: self.superblock.clone() }
-                        )
-                    ),
+                    ctx: Arc::new(Mutex::new(TwilightFs {
+                        device: self.device.clone(),
+                        superblock: self.superblock.clone(),
+                    })),
                     full_path: path.to_string(),
-                    inode_no
-                }))
+                    inode_no,
+                })),
             );
             Ok(node)
         } else {
@@ -1149,7 +1233,7 @@ impl FileSystem for TwilightFs {
     }
 
     fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
-        if let Ok(inode_num) =  self.resolve_path(parent_dir) {
+        if let Ok(inode_num) = self.resolve_path(parent_dir) {
             if let Ok(_) = self.resolve_path(format!("{}/{}", parent_dir, path).as_str()) {
                 return Err(());
             }
@@ -1180,7 +1264,7 @@ impl FileSystem for TwilightFs {
         if let Ok(inode) = self.resolve_path(path) {
             match self.list_dir(inode) {
                 Ok(entries) => Ok(entries),
-                Err(_) => Err(())
+                Err(_) => Err(()),
             }
         } else {
             Err(())
@@ -1196,7 +1280,7 @@ impl FileSystem for TwilightFs {
     }
 
     fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
-        if let Ok(inode_num) =  self.resolve_path(parent_path) {
+        if let Ok(inode_num) = self.resolve_path(parent_path) {
             if let Ok(_) = self.resolve_path(format!("{}/{}", parent_path, filename).as_str()) {
                 return Err(());
             }

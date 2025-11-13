@@ -1,4 +1,5 @@
 use crate::driver::timer::cmos::CMOS;
+use crate::driver::timer::pit::uptime;
 use crate::println;
 use crate::sys::net::socket::SOCKETS;
 use crate::task::executor::sleep;
@@ -8,7 +9,6 @@ use smoltcp::socket::dhcpv4;
 use smoltcp::socket::dhcpv4::Event;
 use smoltcp::time::Instant;
 use smoltcp::wire::IpCidr;
-use crate::driver::timer::pit::uptime;
 
 pub fn main() {
     let mut dhcp_config = None;
@@ -39,7 +39,9 @@ pub fn main() {
                 Some(Event::Configured(config)) => {
                     iface.update_ip_addrs(|addrs| {
                         addrs.clear();
-                        addrs.push(IpCidr::from_str(config.address.to_string().as_str()).unwrap()).unwrap();
+                        addrs
+                            .push(IpCidr::from_str(config.address.to_string().as_str()).unwrap())
+                            .unwrap();
                     });
                     if let Some(gw) = config.router {
                         if gw.to_string() == "0.0.0.0" {
@@ -63,7 +65,10 @@ pub fn main() {
 
     if let Some((ip, _, _)) = dhcp_config {
         let uptime = uptime();
-        println!("\x1b[93m[{uptime:.6}]\x1b[0m DHCP Config Done! IP Address: {}", ip);
+        println!(
+            "\x1b[93m[{uptime:.6}]\x1b[0m DHCP Config Done! IP Address: {}",
+            ip
+        );
     } else {
         println!("dhcp failed");
     }

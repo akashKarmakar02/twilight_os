@@ -31,8 +31,13 @@ struct fb_fix_screeninfo {
 
 enum { CHIP8_MEM_SIZE = 4096, CHIP8_REGS = 16, CHIP8_STACK = 16 };
 enum { CHIP8_WIDTH = 64, CHIP8_HEIGHT = 32 };
+enum { CHIP8_MAX_WIDTH = 128, CHIP8_MAX_HEIGHT = 64 };
+enum { CHIP8_PLANE_SIZE = CHIP8_MAX_WIDTH * CHIP8_MAX_HEIGHT };
 enum { CHIP8_PROG_START = 0x200 };
 enum { CHIP8_KEYS = 16 };
+enum { CHIP8_FONT_START = 0x000, CHIP8_FONT_SIZE = 16 * 5 };
+enum { CHIP8_FONT_LARGE_START = CHIP8_FONT_START + CHIP8_FONT_SIZE };
+enum { CHIP8_FONT_LARGE_SIZE = 16 * 10 };
 
 typedef struct {
     uint8_t mem[CHIP8_MEM_SIZE];
@@ -43,16 +48,40 @@ typedef struct {
     uint8_t sp;
     uint8_t delay;
     uint8_t sound;
-    uint8_t gfx[CHIP8_WIDTH * CHIP8_HEIGHT];
+    uint8_t gfx[CHIP8_PLANE_SIZE];
     uint8_t draw_flag;
     uint8_t wait_for_key;
     uint8_t wait_reg;
     uint8_t keys[CHIP8_KEYS];
     uint64_t key_hold_until[CHIP8_KEYS];
+    uint8_t rpl_flags[16];
+    uint16_t screen_width;
+    uint16_t screen_height;
+    uint8_t high_res;
+    uint8_t halted;
 } Chip8;
 
 static struct termios term_old;
 static int raw_installed = 0;
+
+static const uint8_t base_fontset[CHIP8_FONT_SIZE] = {
+    0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+    0x20, 0x60, 0x20, 0x20, 0x70, // 1
+    0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+    0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+    0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+    0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+    0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+    0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+    0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+    0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+    0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+    0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+    0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+    0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+    0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+    0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+};
 
 static uint64_t ms_now(void) {
     struct timespec ts;
@@ -61,27 +90,41 @@ static uint64_t ms_now(void) {
     return now;
 }
 
+static void chip8_generate_large_fonts(uint8_t *dest) {
+    for (int digit = 0; digit < 16; ++digit) {
+        for (int row = 0; row < 5; ++row) {
+            uint8_t pattern = base_fontset[digit * 5 + row];
+            uint8_t expanded = 0;
+            for (int col = 0; col < 4; ++col) {
+                if (pattern & (0x80 >> col)) {
+                    int bit = 7 - (col * 2);
+                    expanded |= (1u << bit);
+                    expanded |= (1u << (bit - 1));
+                }
+            }
+            dest[digit * 10 + row * 2 + 0] = expanded;
+            dest[digit * 10 + row * 2 + 1] = expanded;
+        }
+    }
+}
+
+static void chip8_clear_display(Chip8 *c) {
+    memset(c->gfx, 0, sizeof(c->gfx));
+    c->draw_flag = 1;
+}
+
+static void chip8_set_resolution(Chip8 *c, int high) {
+    c->high_res = high ? 1 : 0;
+    c->screen_width = high ? CHIP8_MAX_WIDTH : CHIP8_WIDTH;
+    c->screen_height = high ? CHIP8_MAX_HEIGHT : CHIP8_HEIGHT;
+    chip8_clear_display(c);
+}
+
 static void chip8_reset(Chip8 *c) {
     memset(c, 0, sizeof(*c));
-    static const uint8_t fontset[80] = {
-        0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
-        0x20, 0x60, 0x20, 0x20, 0x70, // 1
-        0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
-        0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
-        0x90, 0x90, 0xF0, 0x10, 0x10, // 4
-        0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
-        0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
-        0xF0, 0x10, 0x20, 0x40, 0x40, // 7
-        0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
-        0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
-        0xF0, 0x90, 0xF0, 0x90, 0x90, // A
-        0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
-        0xF0, 0x80, 0x80, 0x80, 0xF0, // C
-        0xE0, 0x90, 0x90, 0x90, 0xE0, // D
-        0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
-        0xF0, 0x80, 0xF0, 0x80, 0x80  // F
-    };
-    memcpy(c->mem, fontset, sizeof(fontset));
+    memcpy(c->mem + CHIP8_FONT_START, base_fontset, CHIP8_FONT_SIZE);
+    chip8_generate_large_fonts(c->mem + CHIP8_FONT_LARGE_START);
+    chip8_set_resolution(c, 0);
     c->pc = CHIP8_PROG_START;
 }
 
@@ -138,17 +181,99 @@ static void chip8_update_keys(Chip8 *c, uint64_t now) {
     }
 }
 
+static void chip8_scroll_down(Chip8 *c, uint8_t rows) {
+    uint16_t shift = rows % c->screen_height;
+    if (shift == 0) {
+        return;
+    }
+    if (shift >= c->screen_height) {
+        chip8_clear_display(c);
+        return;
+    }
+    uint16_t w = c->screen_width;
+    uint16_t h = c->screen_height;
+
+    for (int y = (int)h - 1; y >= 0; --y) {
+        int src = y - (int)shift;
+        for (uint16_t x = 0; x < w; ++x) {
+            size_t dst_idx = (size_t)y * w + x;
+            if (src >= 0) {
+                c->gfx[dst_idx] = c->gfx[(size_t)src * w + x];
+            } else {
+                c->gfx[dst_idx] = 0;
+            }
+        }
+    }
+    c->draw_flag = 1;
+}
+
+static void chip8_scroll_right(Chip8 *c) {
+    uint16_t w = c->screen_width;
+    uint16_t h = c->screen_height;
+    if (w <= 4) {
+        chip8_clear_display(c);
+        return;
+    }
+    for (uint16_t y = 0; y < h; ++y) {
+        size_t row_off = (size_t)y * w;
+        for (int x = (int)w - 1; x >= 0; --x) {
+            int src = x - 4;
+            size_t dst = row_off + (size_t)x;
+            c->gfx[dst] = (src >= 0) ? c->gfx[row_off + (size_t)src] : 0;
+        }
+    }
+    c->draw_flag = 1;
+}
+
+static void chip8_scroll_left(Chip8 *c) {
+    uint16_t w = c->screen_width;
+    uint16_t h = c->screen_height;
+    if (w <= 4) {
+        chip8_clear_display(c);
+        return;
+    }
+    for (uint16_t y = 0; y < h; ++y) {
+        size_t row_off = (size_t)y * w;
+        for (uint16_t x = 0; x < w; ++x) {
+            size_t dst = row_off + x;
+            uint16_t src = x + 4;
+            c->gfx[dst] = (src < w) ? c->gfx[row_off + src] : 0;
+        }
+    }
+    c->draw_flag = 1;
+}
+
 static void chip8_draw_sprite(Chip8 *c, uint8_t x, uint8_t y, uint8_t height) {
+    uint8_t rows = height ? height : 16;
+    uint8_t sprite_width = 8;
+    uint8_t row_bytes = 1;
+
+    if (height == 0) {
+        if (c->high_res) {
+            sprite_width = 16;
+            row_bytes = 2;
+        }
+        rows = 16;
+    }
+
     c->V[0xF] = 0;
-    for (uint8_t row = 0; row < height; ++row) {
-        uint8_t sprite_byte = c->mem[c->I + row];
-        for (uint8_t col = 0; col < 8; ++col) {
-            if ((sprite_byte & (0x80 >> col)) == 0) {
+    for (uint8_t row = 0; row < rows; ++row) {
+        uint16_t sprite_bits;
+        if (row_bytes == 1) {
+            sprite_bits = c->mem[c->I + row];
+        } else {
+            size_t idx = (size_t)c->I + (size_t)row * row_bytes;
+            sprite_bits = ((uint16_t)c->mem[idx] << 8) | c->mem[idx + 1];
+        }
+
+        for (uint8_t col = 0; col < sprite_width; ++col) {
+            uint16_t mask = (row_bytes == 1) ? (0x80 >> col) : (0x8000 >> col);
+            if ((sprite_bits & mask) == 0) {
                 continue;
             }
-            uint8_t px = (x + col) % CHIP8_WIDTH;
-            uint8_t py = (y + row) % CHIP8_HEIGHT;
-            size_t index = py * CHIP8_WIDTH + px;
+            uint16_t px = (x + col) % c->screen_width;
+            uint16_t py = (y + row) % c->screen_height;
+            size_t index = (size_t)py * c->screen_width + px;
             if (c->gfx[index]) {
                 c->V[0xF] = 1;
             }
@@ -159,7 +284,7 @@ static void chip8_draw_sprite(Chip8 *c, uint8_t x, uint8_t y, uint8_t height) {
 }
 
 static void chip8_step(Chip8 *c) {
-    if (c->wait_for_key) {
+    if (c->wait_for_key || c->halted) {
         return;
     }
     uint16_t opcode = (c->mem[c->pc] << 8) | c->mem[c->pc + 1];
@@ -172,13 +297,36 @@ static void chip8_step(Chip8 *c) {
 
     switch (opcode & 0xF000) {
     case 0x0000:
-        if (opcode == 0x00E0) {
-            memset(c->gfx, 0, sizeof(c->gfx));
-            c->draw_flag = 1;
-        } else if (opcode == 0x00EE) {
-            if (c->sp > 0) {
-                --c->sp;
-                c->pc = c->stack[c->sp];
+        if ((opcode & 0xF0F0) == 0x00C0) {
+            chip8_scroll_down(c, opcode & 0x000F);
+        } else {
+            switch (opcode & 0x00FF) {
+            case 0xE0:
+                chip8_clear_display(c);
+                break;
+            case 0xEE:
+                if (c->sp > 0) {
+                    --c->sp;
+                    c->pc = c->stack[c->sp];
+                }
+                break;
+            case 0xFB:
+                chip8_scroll_right(c);
+                break;
+            case 0xFC:
+                chip8_scroll_left(c);
+                break;
+            case 0xFD:
+                c->halted = 1;
+                break;
+            case 0xFE:
+                chip8_set_resolution(c, 0);
+                break;
+            case 0xFF:
+                chip8_set_resolution(c, 1);
+                break;
+            default:
+                break;
             }
         }
         break;
@@ -278,8 +426,17 @@ static void chip8_step(Chip8 *c) {
             break;
         case 0x15: c->delay = c->V[x]; break;
         case 0x18: c->sound = c->V[x]; break;
-        case 0x1E: c->I += c->V[x]; break;
-        case 0x29: c->I = (c->V[x] & 0xF) * 5; break;
+        case 0x1E: {
+            uint16_t sum = c->I + c->V[x];
+            c->V[0xF] = sum > 0x0FFF;
+            c->I = sum & 0x0FFF;
+        } break;
+        case 0x29:
+            c->I = CHIP8_FONT_START + (c->V[x] & 0xF) * 5;
+            break;
+        case 0x30:
+            c->I = CHIP8_FONT_LARGE_START + (c->V[x] & 0xF) * 10;
+            break;
         case 0x33: {
             uint8_t val = c->V[x];
             c->mem[c->I + 0] = val / 100;
@@ -297,6 +454,16 @@ static void chip8_step(Chip8 *c) {
                 c->V[i] = c->mem[c->I + i];
             }
             c->I += x + 1;
+            break;
+        case 0x75:
+            for (uint8_t i = 0; i <= x && i < 16; ++i) {
+                c->rpl_flags[i] = c->V[i];
+            }
+            break;
+        case 0x85:
+            for (uint8_t i = 0; i <= x && i < 16; ++i) {
+                c->V[i] = c->rpl_flags[i];
+            }
             break;
         default:
             break;
@@ -431,21 +598,22 @@ static void render_framebuffer(uint32_t *fb, uint32_t width, uint32_t height, co
         fb[i] = bg;
     }
 
-    int scale_x = width / CHIP8_WIDTH;
-    int scale_y = height / CHIP8_HEIGHT;
+    int scale_x = width / c->screen_width;
+    int scale_y = height / c->screen_height;
     int scale = scale_x < scale_y ? scale_x : scale_y;
     if (scale < 1) {
         scale = 1;
     }
-    int disp_w = scale * CHIP8_WIDTH;
-    int disp_h = scale * CHIP8_HEIGHT;
+    int disp_w = scale * c->screen_width;
+    int disp_h = scale * c->screen_height;
     int off_x = (int)(width - disp_w) / 2;
     int off_y = (int)(height - disp_h) / 2;
 
-    for (int y = 0; y < CHIP8_HEIGHT; ++y) {
-        for (int x = 0; x < CHIP8_WIDTH; ++x) {
-            uint32_t color = c->gfx[y * CHIP8_WIDTH + x] ? fg : bg;
-            if (!c->gfx[y * CHIP8_WIDTH + x]) {
+    for (uint16_t y = 0; y < c->screen_height; ++y) {
+        for (uint16_t x = 0; x < c->screen_width; ++x) {
+            size_t idx = (size_t)y * c->screen_width + x;
+            uint32_t color = c->gfx[idx] ? fg : bg;
+            if (!c->gfx[idx]) {
                 continue;
             }
             draw_rect(fb, width, height,
@@ -527,7 +695,7 @@ int main(int argc, char **argv) {
     uint64_t last_timer = ms_now();
     const uint64_t timer_interval = 1000 / 60;
     const int cycles_per_frame = 10;
-    struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 1 * 1000 * 1000 };
+    struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 1 * 1000 /60 };
     int running = 1;
 
     while (running) {
@@ -541,8 +709,11 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        for (int i = 0; i < cycles_per_frame; ++i) {
+        for (int i = 0; i < cycles_per_frame && !chip.halted; ++i) {
             chip8_step(&chip);
+        }
+        if (chip.halted) {
+            running = 0;
         }
 
         uint64_t now = ms_now();

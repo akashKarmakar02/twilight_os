@@ -2,8 +2,8 @@
 
 use crate::arch::x86_64::halt;
 use crate::driver::keyboard::KeyboardListener;
-use crate::sys::console::framebuffer::FramebufferTerminal;
 use crate::sys::console::TTY;
+use crate::sys::console::framebuffer::FramebufferTerminal;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;

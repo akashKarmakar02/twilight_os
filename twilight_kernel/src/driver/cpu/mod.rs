@@ -1,4 +1,4 @@
-use crate::arch::x86_64::syscall::{rdmsr, wrmsr, IA32_EFER};
+use crate::arch::x86_64::syscall::{IA32_EFER, rdmsr, wrmsr};
 use crate::{driver, println};
 use alloc::string::String;
 use limine::response::MpResponse;
@@ -7,7 +7,7 @@ use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::xcontrol::{XCr0, XCr0Flags};
 
 unsafe extern "C" fn ap_main(cpu: &limine::mp::Cpu) -> ! {
-    use x86_64::instructions::{hlt};
+    use x86_64::instructions::hlt;
 
     crate::arch::x86_64::cpu_local::init(cpu.id as usize);
 

@@ -1,8 +1,8 @@
-pub mod keyboard;
-pub mod timer;
-pub mod disk;
 pub mod cpu;
-pub mod uart;
+pub mod disk;
+pub mod keyboard;
 pub mod nic;
-pub mod usb;
+pub mod timer;
 pub mod tty;
+pub mod uart;
+pub mod usb;

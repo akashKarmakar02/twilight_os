@@ -1,4 +1,6 @@
+pub mod anirect;
 pub mod cd;
+pub mod curl;
 pub mod df;
 pub mod dhcp;
 pub mod exec;
@@ -8,7 +10,5 @@ pub mod meminfo;
 pub mod mkdir;
 pub mod readelf;
 pub mod rmdir;
-pub mod shutdown;
-pub mod anirect;
-pub mod curl;
 pub mod serve;
+pub mod shutdown;

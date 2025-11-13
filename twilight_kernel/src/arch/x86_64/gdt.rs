@@ -13,7 +13,6 @@ pub const GENERAL_PROTECTION_FAULT_IST: u16 = 2;
 const BOOT_GDT_ENTRY_COUNT: usize = 4;
 const GDT_ENTRY_COUNT: usize = 10;
 
-
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone)]
     struct GdtEntryFlags: u8 {
@@ -35,7 +34,6 @@ impl PrivilegeLevel {
     }
 }
 
-
 struct GdtAccessFlags;
 
 impl GdtAccessFlags {
@@ -48,7 +46,6 @@ impl GdtAccessFlags {
     const SYSTEM: u8 = 1 << 4;
     const TSS_AVAIL: u8 = 9;
 }
-
 
 static mut BOOT_GDT: [GdtEntry; BOOT_GDT_ENTRY_COUNT] = [
     // GDT null descriptor.
@@ -263,7 +260,6 @@ impl GdtEntry {
     }
 }
 
-
 pub struct GdtEntryIndex;
 
 #[rustfmt::skip]
@@ -307,7 +303,6 @@ impl SegmentSelector {
     }
 }
 
-
 pub fn init() {
     let gdt_descriptor = {
         GdtDescriptor::new(
@@ -315,7 +310,6 @@ pub fn init() {
             addr_of!(BOOT_GDT).addr() as u64,
         )
     };
-
 
     load_gdt(&gdt_descriptor);
 
@@ -351,7 +345,6 @@ pub fn init() {
     ));
 }
 
-
 static STK: [u8; 4096 * 16] = [0; 4096 * 16];
 
 pub const USER_SS: SegmentSelector =
@@ -359,7 +352,6 @@ pub const USER_SS: SegmentSelector =
 
 pub const USER_CS: SegmentSelector =
     SegmentSelector::new(GdtEntryIndex::USER_CODE, PrivilegeLevel::Ring3);
-
 
 pub fn init_after_boot() {
     let gdt = unsafe {
@@ -375,7 +367,6 @@ pub fn init_after_boot() {
 
     // Copy over the GDT template:
     gdt.copy_from_slice(&GDT);
-
 
     unsafe {
         TSS.ist[DOUBLE_FAULT_IST_INDEX as usize] = {
@@ -465,37 +456,27 @@ fn load_cs(selector: SegmentSelector) {
 
 #[inline(always)]
 fn load_ds(selector: SegmentSelector) {
-    unsafe {
-        asm!("mov ds, {0:x}", in(reg) selector.bits(), options(nomem, nostack))
-    }
+    unsafe { asm!("mov ds, {0:x}", in(reg) selector.bits(), options(nomem, nostack)) }
 }
 
 #[inline(always)]
 fn load_es(selector: SegmentSelector) {
-    unsafe {
-        asm!("mov es, {0:x}", in(reg) selector.bits(), options(nomem, nostack))
-    }
+    unsafe { asm!("mov es, {0:x}", in(reg) selector.bits(), options(nomem, nostack)) }
 }
 
 #[inline(always)]
 fn load_fs(selector: SegmentSelector) {
-    unsafe {
-        asm!("mov fs, {0:x}", in(reg) selector.bits(), options(nomem, nostack))
-    }
+    unsafe { asm!("mov fs, {0:x}", in(reg) selector.bits(), options(nomem, nostack)) }
 }
 
 #[inline(always)]
 fn load_gs(selector: SegmentSelector) {
-    unsafe {
-        asm!("mov gs, {0:x}", in(reg) selector.bits(), options(nomem, nostack))
-    }
+    unsafe { asm!("mov gs, {0:x}", in(reg) selector.bits(), options(nomem, nostack)) }
 }
 
 #[inline(always)]
 fn load_ss(selector: SegmentSelector) {
-    unsafe {
-        asm!("mov ss, {0:x}", in(reg) selector.bits(), options(nomem, nostack))
-    }
+    unsafe { asm!("mov ss, {0:x}", in(reg) selector.bits(), options(nomem, nostack)) }
 }
 
 #[inline(always)]

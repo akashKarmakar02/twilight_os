@@ -1,15 +1,15 @@
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
+use crate::println;
 use crate::sys::fs::init;
 use crate::sys::fs::partition::{self, PartitionEntry};
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
-use crate::println;
+use crate::sys::fs::twilight_fs::inode::Inode;
 use alloc::format;
 use alloc::vec::Vec;
 use core::cmp;
 use lazy_static::lazy_static;
 use spin::mutex::Mutex;
-use crate::sys::fs::twilight_fs::inode::Inode;
 
 lazy_static! {
     pub static ref INITRAMFS: Mutex<CpioIterator> = Mutex::new(CpioIterator::default());
@@ -48,8 +48,7 @@ pub fn main() {
                 let boot_size_mib = sectors_to_mebibytes(boot.sectors);
                 println!(
                     "Reserved boot partition at LBA {} ({} MiB)",
-                    boot_lba,
-                    boot_size_mib
+                    boot_lba, boot_size_mib
                 );
             }
 
@@ -117,7 +116,11 @@ pub fn main() {
             match cpio_res {
                 Ok(entry) => {
                     if entry.header.is_regular_file() {
-                        copy_file(format!("/{}", entry.filename().unwrap()).as_str(), entry.data, true);
+                        copy_file(
+                            format!("/{}", entry.filename().unwrap()).as_str(),
+                            entry.data,
+                            true,
+                        );
                     }
                 }
                 Err(_e) => {}
@@ -126,7 +129,9 @@ pub fn main() {
     }
 }
 
-fn ensure_partition_table(device: &mut dyn BlockDeviceIO) -> Result<TwilightPartitionLayout, &'static str> {
+fn ensure_partition_table(
+    device: &mut dyn BlockDeviceIO,
+) -> Result<TwilightPartitionLayout, &'static str> {
     let total_sectors = cmp::min(device.block_count() as u64, u32::MAX as u64);
     if total_sectors <= (PARTITION_ALIGNMENT_SECTORS as u64) * 2 {
         return Err("disk is too small to partition");
@@ -140,7 +145,10 @@ fn ensure_partition_table(device: &mut dyn BlockDeviceIO) -> Result<TwilightPart
     let mut boot_sectors = reserved_boot;
     let min_twilight = MIN_TWILIGHT_SECTORS as u64;
 
-    let mut twilight_start = align_up_u64(boot_start + boot_sectors, PARTITION_ALIGNMENT_SECTORS as u64);
+    let mut twilight_start = align_up_u64(
+        boot_start + boot_sectors,
+        PARTITION_ALIGNMENT_SECTORS as u64,
+    );
     if total_sectors <= twilight_start + min_twilight {
         boot_sectors = 0;
         twilight_start = boot_start;

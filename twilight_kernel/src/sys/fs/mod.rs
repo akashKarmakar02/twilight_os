@@ -1,14 +1,16 @@
-pub mod twilight_fs;
-pub mod ram_fs;
-pub mod vfs;
-pub mod partition;
 mod devfs;
 mod gdt;
+pub mod partition;
+pub mod ram_fs;
+pub mod twilight_fs;
+pub mod vfs;
+pub mod fat32;
+pub mod fat16;
 
+use crate::println;
 use crate::sys::fs::devfs::DevFs;
 use crate::sys::fs::twilight_fs::TwilightFs;
 use crate::sys::fs::vfs::VFS;
-use crate::println;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -40,11 +42,15 @@ pub fn init(show_log: bool) {
                 }
                 #[allow(static_mut_refs)]
                 unsafe {
-                    VFS.get_mut().mount("/", Arc::new(Mutex::new(TwilightFs::check_ata(bus, dsk).unwrap())));
+                    VFS.get_mut().mount(
+                        "/",
+                        Arc::new(Mutex::new(TwilightFs::check_ata(bus, dsk).unwrap())),
+                    );
                 }
                 #[allow(static_mut_refs)]
                 unsafe {
-                    VFS.get_mut().mount("/dev", Arc::new(Mutex::new(DevFs::new())));
+                    VFS.get_mut()
+                        .mount("/dev", Arc::new(Mutex::new(DevFs::new())));
                 }
                 if show_log {
                     println!(
@@ -58,9 +64,13 @@ pub fn init(show_log: bool) {
     }
     #[allow(static_mut_refs)]
     unsafe {
-        VFS.get_mut().mount("/dev", Arc::new(Mutex::new(DevFs::new())));
+        VFS.get_mut()
+            .mount("/dev", Arc::new(Mutex::new(DevFs::new())));
     }
-    println!("\x1b[93m[{:.6}]\x1b[0m No TwilightFS Superblock found", uptime);
+    println!(
+        "\x1b[93m[{:.6}]\x1b[0m No TwilightFS Superblock found",
+        uptime
+    );
     println!("\x1b[93mWarning\x1b[0m Trying running 'install' to install Twilight OS");
 }
 

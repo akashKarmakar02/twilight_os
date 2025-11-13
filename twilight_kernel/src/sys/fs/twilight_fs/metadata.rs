@@ -6,16 +6,16 @@ enum MetadataBlockKind {
     Inode = 0,
     DirEntry = 1,
     IndexNode = 2,
-    Free = 3
+    Free = 3,
 }
 
 #[repr(C)]
 struct MetadataBlockHeader {
     kind: MetadataBlockKind,
-    _pad1: [u8; 7],       // alignment padding
+    _pad1: [u8; 7], // alignment padding
     generation: u64,
     checksum: u32,
-    _pad2: [u8; 4],       // align to 8 bytes
+    _pad2: [u8; 4], // align to 8 bytes
 }
 
 #[repr(C)]

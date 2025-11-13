@@ -5,15 +5,9 @@ use crate::println;
 
 pub fn main() {
     let data = rdmsr(IA32_GS_BASE);
-    println!(
-        "GS: {:#x}",
-        data
-    );
+    println!("GS: {:#x}", data);
     let k_data = rdmsr(IA32_KERNEL_GS_BASE);
-    println!(
-        "Kernel GS: {:#x}",
-        k_data
-    );
+    println!("Kernel GS: {:#x}", k_data);
 
     let rsp = rdmsr(IA32_SYSENTER_ESP);
 

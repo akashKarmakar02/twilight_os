@@ -1,6 +1,6 @@
-use alloc::string::String;
 use crate::arch::x86_64::gdt;
 use crate::{print, println, serial_println};
+use alloc::string::String;
 use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
@@ -10,8 +10,8 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, Pag
 pub struct Registers {
     pub r11: u64, // clobbered by SYSCALL
     pub r10: u64, // 4th arg (Linux ABI)
-    pub r9:  u64, // 6th arg
-    pub r8:  u64, // 5th arg
+    pub r9: u64,  // 6th arg
+    pub r8: u64,  // 5th arg
     pub rdi: u64, // 1st arg
     pub rsi: u64, // 2nd
     pub rdx: u64, // 3rd
@@ -32,8 +32,7 @@ lazy_static! {
             .set_handler_fn(stack_segment_fault_handler);
         idt.segment_not_present
             .set_handler_fn(segment_not_present_handler);
-        idt.invalid_opcode
-            .set_handler_fn(invalid_opcode_handler);
+        idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
         unsafe {
             idt.page_fault
                 .set_handler_fn(page_fault_handler)
@@ -44,7 +43,9 @@ lazy_static! {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-            idt[NIC_IRQ_VECTOR].set_handler_fn(nic_irq_handler).set_stack_index(1);
+            idt[NIC_IRQ_VECTOR]
+                .set_handler_fn(nic_irq_handler)
+                .set_stack_index(1);
         }
         idt[interrupt_index(0)].set_handler_fn(timer_interrupt_handler);
         idt[interrupt_index(1)].set_handler_fn(keyboard_interrupt_handler);
@@ -96,14 +97,13 @@ extern "x86-interrupt" fn invalid_opcode_handler(_sf: InterruptStackFrame) {
     loop {}
 }
 
-
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
     let index = (error_code >> 3) & 0x1fff;
-    let ti    = (error_code >> 2) & 1;
-    let rpl   = error_code & 0b11;
+    let ti = (error_code >> 2) & 1;
+    let rpl = error_code & 0b11;
     crate::serial_println!(
         "#GP err: selector=0x{:04x} index={} TI={}({}) RPL={}",
         error_code,
@@ -146,7 +146,9 @@ extern "x86-interrupt" fn page_fault_handler(
 
     println!("\nPage fault @ RIP=0x{:x}", rip);
     print!("Instruction bytes: ");
-    for b in &instr_bytes[..instruction.len()] { print!("{:02x} ", b); }
+    for b in &instr_bytes[..instruction.len()] {
+        print!("{:02x} ", b);
+    }
     print!("\n");
     println!("Decoded: {}", output);
     println!("CR2 (faulting linear/virtual): {:?}", fault_addr);
@@ -227,10 +229,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
-
-extern "x86-interrupt" fn nic_irq_handler(
-    _stack: InterruptStackFrame,
-) {
+extern "x86-interrupt" fn nic_irq_handler(_stack: InterruptStackFrame) {
     serial_println!("HEre");
 }
 

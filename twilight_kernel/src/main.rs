@@ -24,12 +24,12 @@ pub mod utils;
 use core::arch::asm;
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::Ordering::SeqCst;
+use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, StackSizeRequest,
 };
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
-use limine::BaseRevision;
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -111,16 +111,36 @@ unsafe extern "C" fn kmain() -> ! {
         cpio_response.unwrap(),
     );
 
-    println!("\x1b[96m                                                     ,,    ,,    ,,            ,,                                        ");
-    println!("                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd ");
-    println!("                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y ");
-    println!("                                MM `7M'    ,A    `MF'`7MM    MM  `7MM  .P\"Ybmmm  MMpMMMb.mmMMmm     dM'      `MM `MMb.     ");
-    println!("                                MM   VA   ,VAA   ,V    MM    MM    MM :MI  I8    MM    MM  MM       MM        MM   `YMMNq. ");
-    println!("                                MM    VA ,V  VA ,V     MM    MM    MM  WmmmP\"    MM    MM  MM       MM.      ,MP .     `MM ");
-    println!("                                MM     VVV    VVV      MM    MM    MM  8M         MM    MM  MM       `Mb.    ,dP' Mb     dM ");
-    println!("                              .JMML.    W      W     .JMML..JMML..JMML.YMMMMMb .JMML  JMML.`Mbmo      `\"bmmd\"'   P\"Ybmmd\"  ");
-    println!("                                                                       6'     dP                                             ");
-    println!("                                                                       Ybmmmd'                                               \x1b[0m");
+    println!(
+        "\x1b[96m                                                     ,,    ,,    ,,            ,,                                        "
+    );
+    println!(
+        "                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd "
+    );
+    println!(
+        "                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y "
+    );
+    println!(
+        "                                MM `7M'    ,A    `MF'`7MM    MM  `7MM  .P\"Ybmmm  MMpMMMb.mmMMmm     dM'      `MM `MMb.     "
+    );
+    println!(
+        "                                MM   VA   ,VAA   ,V    MM    MM    MM :MI  I8    MM    MM  MM       MM        MM   `YMMNq. "
+    );
+    println!(
+        "                                MM    VA ,V  VA ,V     MM    MM    MM  WmmmP\"    MM    MM  MM       MM.      ,MP .     `MM "
+    );
+    println!(
+        "                                MM     VVV    VVV      MM    MM    MM  8M         MM    MM  MM       `Mb.    ,dP' Mb     dM "
+    );
+    println!(
+        "                              .JMML.    W      W     .JMML..JMML..JMML.YMMMMMb .JMML  JMML.`Mbmo      `\"bmmd\"'   P\"Ybmmd\"  "
+    );
+    println!(
+        "                                                                       6'     dP                                             "
+    );
+    println!(
+        "                                                                       Ybmmmd'                                               \x1b[0m"
+    );
 
     // sys::proc::switch::switch_demo();
     // sys::console::framebuffer::init();

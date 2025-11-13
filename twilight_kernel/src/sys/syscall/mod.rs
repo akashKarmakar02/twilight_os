@@ -4,10 +4,11 @@ mod utils;
 
 use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
+use crate::driver::timer::wait;
 use crate::serial_println;
-use crate::sys::syscall::service::read;
-use crate::sys::syscall::utils::{copy_cstr_from_user, UserPtr};
 use crate::sys::syscall::SyscallError::ENOSYS;
+use crate::sys::syscall::service::read;
+use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user};
 use crate::task::executor::sleep;
 use alloc::string::String;
 use twilight_common::syscall::numbers::*;
@@ -26,6 +27,17 @@ pub extern "sysv64" fn syscall_handler(
     let arg4 = regs.r10;
     let arg5 = regs.r8;
     let arg6 = regs.r9;
+
+    serial_println!(
+        "LOG: {} syscall with args {} {} {} {} {} {}",
+        syscall_number,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+        arg6
+    );
 
     let res = match syscall_number {
         SYS_READ => {
@@ -98,7 +110,7 @@ pub extern "sysv64" fn syscall_handler(
             unsafe {
                 if !req_timespec_ptr.is_null() {
                     let req = &*req_timespec_ptr;
-                    sleep((req.tv_nsec as f64 / 10000000000.0) + req.tv_sec as f64);
+                    wait((req.tv_nsec + req.tv_sec * 10000000000) as u64);
                 }
             }
 

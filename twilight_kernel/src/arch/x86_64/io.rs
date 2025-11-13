@@ -1,7 +1,7 @@
-use core::arch::asm;
-use x86_64::VirtAddr;
 use crate::driver::cpu::has_fsgsbase;
 use crate::serial_println;
+use core::arch::asm;
+use x86_64::VirtAddr;
 
 pub const IA32_EFER: u32 = 0xc0000080;
 

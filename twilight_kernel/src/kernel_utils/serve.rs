@@ -1,22 +1,22 @@
 #![allow(dead_code)]
+use crate::driver::nic::NET;
+use crate::driver::timer::cmos::CMOS;
+use crate::println;
+use crate::task::executor::sleep;
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::{format, vec};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use core::fmt;
 use smoltcp::iface::SocketSet;
 use smoltcp::phy::Device;
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use smoltcp::wire::IpAddress;
-use crate::driver::nic::NET;
-use crate::driver::timer::cmos::CMOS;
-use crate::{println};
-use crate::task::executor::sleep;
 
-use time::{Duration, OffsetDateTime, UtcOffset};
 use crate::driver::disk::dummy_blockdev;
-use crate::sys::fs::vfs::{VfsNodeOps, VFS};
+use crate::sys::fs::vfs::{VFS, VfsNodeOps};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 const MAX_CONNECTIONS: usize = 32; // TODO: Add dynamic pooling
 const POLL_DELAY_DIV: usize = 128;
@@ -27,22 +27,17 @@ pub const DATE_TIME_ZONE: &str = "%Y-%m-%d %H:%M:%S %z";
 pub fn now_utc() -> OffsetDateTime {
     let mut cmos = CMOS::new();
     let s = cmos.unix_time(); // Since Unix Epoch
-    let ns = Duration::nanoseconds(
-        libm::floor(1e9 * (s as f64 - libm::floor(s as f64))) as i64
-    );
+    let ns = Duration::nanoseconds(libm::floor(1e9 * (s as f64 - libm::floor(s as f64))) as i64);
     OffsetDateTime::from_unix_timestamp(s as i64) + ns
 }
-
 
 pub fn now() -> OffsetDateTime {
     now_utc().to_offset(offset())
 }
 
-
 fn offset() -> UtcOffset {
     UtcOffset::UTC
 }
-
 
 #[derive(Clone)]
 struct Request {
@@ -52,7 +47,6 @@ struct Request {
     body: Vec<u8>,
     headers: BTreeMap<String, String>,
 }
-
 
 impl Request {
     pub fn new(addr: IpAddress) -> Self {
@@ -100,7 +94,6 @@ impl Request {
     }
 }
 
-
 #[derive(Clone)]
 struct Response {
     req: Request,
@@ -140,17 +133,15 @@ impl Response {
 
     pub fn end(&mut self) {
         self.size = self.body.len();
-        self.headers.insert(
-            "Content-Length".to_string(),
-            self.size.to_string()
-        );
+        self.headers
+            .insert("Content-Length".to_string(), self.size.to_string());
         self.headers.insert(
             "Connection".to_string(),
             if self.is_persistent() {
                 "keep-alive".to_string()
             } else {
                 "close".to_string()
-            }
+            },
         );
         self.headers.insert(
             "Content-Type".to_string(),
@@ -158,20 +149,18 @@ impl Response {
                 format!("{}; charset=utf-8", self.mime)
             } else {
                 format!("{}", self.mime)
-            }
+            },
         );
         self.write();
     }
 
     fn write(&mut self) {
         self.buf.clear();
-        self.buf.extend_from_slice(
-            format!("{}\r\n", self.status()).as_bytes()
-        );
+        self.buf
+            .extend_from_slice(format!("{}\r\n", self.status()).as_bytes());
         for (key, val) in &self.headers {
-            self.buf.extend_from_slice(
-                format!("{}: {}\r\n", key, val).as_bytes()
-            );
+            self.buf
+                .extend_from_slice(format!("{}: {}\r\n", key, val).as_bytes());
         }
         self.buf.extend_from_slice(b"\r\n");
         self.buf.extend_from_slice(&self.body);
@@ -202,9 +191,9 @@ impl Response {
 
 impl fmt::Display for Response {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let csi_blue = "\x1b[34m";   // Blue
-        let csi_cyan = "\x1b[36m";   // Cyan
-        let csi_pink = "\x1b[35m";   // Magenta
+        let csi_blue = "\x1b[34m"; // Blue
+        let csi_cyan = "\x1b[36m"; // Cyan
+        let csi_pink = "\x1b[35m"; // Magenta
         let csi_reset = "\x1b[0m";
 
         write!(
@@ -224,7 +213,6 @@ impl fmt::Display for Response {
     }
 }
 
-
 fn get(req: &Request, res: &mut Response) {
     res.mime = "text/html".to_string();
     let path = req.path.as_str();
@@ -241,7 +229,8 @@ fn get(req: &Request, res: &mut Response) {
     if let Ok(mut inode) = vfs.open(file_path.as_str()) {
         res.code = 200;
         let Ok(buf) = inode.read() else {
-            res.body.extend_from_slice(b"<h1>Hello World From Twilight OS!</h1>\n");
+            res.body
+                .extend_from_slice(b"<h1>Hello World From Twilight OS!</h1>\n");
             return;
         };
 
@@ -288,7 +277,9 @@ pub fn main(_args: &[&str]) {
 
             if tty.poll(&mut dummy_blockdev()).unwrap_or(false) {
                 let mut buf = [0u8; 1];
-                let c = tty.read(&mut dummy_blockdev(), 0, &mut buf).unwrap_or(Vec::new());
+                let c = tty
+                    .read(&mut dummy_blockdev(), 0, &mut buf)
+                    .unwrap_or(Vec::new());
 
                 if c.get(0).unwrap_or(&0) == &0x03 {
                     break;
@@ -328,9 +319,7 @@ pub fn main(_args: &[&str]) {
                                 let mut res = Response::new(req.clone());
 
                                 match req.verb.as_str() {
-                                    "GET" => {
-                                        get(&req, &mut res)
-                                    }
+                                    "GET" => get(&req, &mut res),
                                     _ => {
                                         let s = b"<h1>Bad Request</h1>\n";
                                         res.body.extend_from_slice(s);

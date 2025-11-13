@@ -153,7 +153,6 @@ pub fn mount_ata(bus: u8, dsk: u8) {
     };
 }
 
-
 pub fn dummy_blockdev() -> BlockDev {
     Arc::new(Mutex::new(Box::new(DummyBlockDev)))
 }

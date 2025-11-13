@@ -1,5 +1,5 @@
-mod rtl8139;
 mod pcnet;
+mod rtl8139;
 
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::pci::DeviceConfig;
@@ -76,15 +76,17 @@ impl EthernetDeviceIO for EthernetDevice {
     }
 }
 
-
 impl<'a> smoltcp::phy::Device for EthernetDevice {
-    type RxToken<'b> = RxToken where Self: 'b;
-    type TxToken<'b> = TxToken where Self: 'b;
+    type RxToken<'b>
+        = RxToken
+    where
+        Self: 'b;
+    type TxToken<'b>
+        = TxToken
+    where
+        Self: 'b;
 
-    fn receive(
-        &mut self,
-        _instant: Instant,
-    ) -> Option<(Self::RxToken<'a>, Self::TxToken<'a>)> {
+    fn receive(&mut self, _instant: Instant) -> Option<(Self::RxToken<'a>, Self::TxToken<'a>)> {
         if let Some(buffer) = self.receive_packet() {
             if self.config().is_debug_enabled() {
                 // usr::hex::print_hex(&buffer);
@@ -100,10 +102,7 @@ impl<'a> smoltcp::phy::Device for EthernetDevice {
         }
     }
 
-    fn transmit(
-        &mut self,
-        _instant: Instant
-    ) -> Option<Self::TxToken<'a>> {
+    fn transmit(&mut self, _instant: Instant) -> Option<Self::TxToken<'a>> {
         let tx = TxToken {
             device: self.clone(),
         };
@@ -117,7 +116,6 @@ impl<'a> smoltcp::phy::Device for EthernetDevice {
         caps
     }
 }
-
 
 fn time() -> Instant {
     let mut cmos = CMOS::new();
@@ -151,11 +149,13 @@ impl Config {
     }
 
     pub fn enable_debug(&self) {
-        self.debug.store(true, core::sync::atomic::Ordering::Relaxed);
+        self.debug
+            .store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn disable_debug(&self) {
-        self.debug.store(false, core::sync::atomic::Ordering::Relaxed);
+        self.debug
+            .store(false, core::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn mac(&self) -> Option<EthernetAddress> {
@@ -166,7 +166,6 @@ impl Config {
         *self.mac.lock() = Some(mac);
     }
 }
-
 
 /// Statistics counters for an Ethernet device.
 ///
@@ -197,19 +196,23 @@ impl Stats {
     }
 
     pub fn rx_bytes_count(&self) -> u64 {
-        self.rx_bytes_count.load(core::sync::atomic::Ordering::Relaxed)
+        self.rx_bytes_count
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn tx_bytes_count(&self) -> u64 {
-        self.tx_bytes_count.load(core::sync::atomic::Ordering::Relaxed)
+        self.tx_bytes_count
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn rx_packets_count(&self) -> u64 {
-        self.rx_packets_count.load(core::sync::atomic::Ordering::Relaxed)
+        self.rx_packets_count
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn tx_packets_count(&self) -> u64 {
-        self.tx_packets_count.load(core::sync::atomic::Ordering::Relaxed)
+        self.tx_packets_count
+            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     /// Increments the receive (RX) packet and byte counters.
@@ -221,8 +224,10 @@ impl Stats {
     /// This will increment the total packet count by 1 and add the given
     /// number of bytes to the total received bytes counter.
     pub fn rx_add(&self, bytes_count: u64) {
-        self.rx_packets_count.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        self.rx_bytes_count.fetch_add(bytes_count, core::sync::atomic::Ordering::Relaxed);
+        self.rx_packets_count
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        self.rx_bytes_count
+            .fetch_add(bytes_count, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Increments the transmit (TX) packet and byte counters.
@@ -234,8 +239,10 @@ impl Stats {
     /// This will increment the total packet count by 1 and add the given
     /// number of bytes to the total transmitted bytes counter.
     pub fn tx_add(&self, bytes_count: u64) {
-        self.tx_packets_count.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        self.tx_bytes_count.fetch_add(bytes_count, core::sync::atomic::Ordering::Relaxed);
+        self.tx_packets_count
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        self.tx_bytes_count
+            .fetch_add(bytes_count, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -248,7 +255,6 @@ fn find_device(device_id: u16, vendor_id: u16) -> Option<DeviceConfig> {
 
     None
 }
-
 
 #[doc(hidden)]
 pub struct RxToken {

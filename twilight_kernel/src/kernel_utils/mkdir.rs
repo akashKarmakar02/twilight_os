@@ -1,6 +1,6 @@
+use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs::vfs::VFS;
-use crate::println;
 
 pub fn main(args: &[&str]) {
     #[allow(static_mut_refs)]

@@ -1,6 +1,6 @@
-use alloc::string::String;
 use crate::sys::fs::twilight_fs::{read_tfs_block, write_tfs_block};
 use crate::sys::fs::vfs::{BlockDev, FsCtx, VfsNodeOps};
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -191,9 +191,11 @@ impl VfsNodeOps for TFSVfsNode {
                 if let Err(_) = read_tfs_block(device.lock().as_mut(), block, &mut buffer) {
                     return Err(());
                 }
-                buffer[(lba % 2048)..((lba % 2048) + copy_size)].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                buffer[(lba % 2048)..((lba % 2048) + copy_size)]
+                    .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
             } else {
-                buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                buffer[..copy_size]
+                    .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
             }
             if let Err(_) = write_tfs_block(device.lock().as_mut(), block, &buffer) {
                 return Err(());
@@ -248,9 +250,11 @@ impl VfsNodeOps for TFSVfsNode {
                     if let Err(_) = read_tfs_block(device.lock().as_mut(), zone, &mut buffer) {
                         return Err(());
                     }
-                    buffer[(lba % 2048)..((lba % 2048) + copy_size)].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                    buffer[(lba % 2048)..((lba % 2048) + copy_size)]
+                        .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
                 } else {
-                    buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+                    buffer[..copy_size]
+                        .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
                 }
                 if let Err(_) = write_tfs_block(device.lock().as_mut(), zone, &buffer) {
                     return Err(());
@@ -379,7 +383,7 @@ impl VfsNodeOps for TFSVfsNode {
             }
         }
 
-        self.inode.size = (bytes_written + lba) as u64 ;
+        self.inode.size = (bytes_written + lba) as u64;
         self.ctx
             .lock()
             .write_inode_twilight(self.inode_no, self.inode)
@@ -398,9 +402,14 @@ impl VfsNodeOps for TFSVfsNode {
 
     fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
         if self.inode.mode == 0o040777 {
-            return Ok(-EISDIR)
+            return Ok(-EISDIR);
         }
-        if self.ctx.lock().remove_file(self.full_path.as_str()).is_err() {
+        if self
+            .ctx
+            .lock()
+            .remove_file(self.full_path.as_str())
+            .is_err()
+        {
             Ok(-1)
         } else {
             Ok(0)

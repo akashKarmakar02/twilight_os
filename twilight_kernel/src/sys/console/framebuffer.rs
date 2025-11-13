@@ -1,6 +1,6 @@
 use crate::sys::{
     console::font::PSF_FONTS,
-    framebuffer::{convert_color, get_framebuffer, FRAMEBUFFER},
+    framebuffer::{FRAMEBUFFER, convert_color, get_framebuffer},
 };
 
 use crate::driver::disk::dummy_blockdev;

@@ -1,5 +1,5 @@
-use alloc::vec::Vec;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
+use alloc::vec::Vec;
 
 pub struct Null;
 

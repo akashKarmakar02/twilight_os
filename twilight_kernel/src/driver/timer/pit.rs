@@ -1,7 +1,7 @@
 use crate::driver::timer::cmos::CMOS;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
-use twilight_common::syscall::types::{Timespec, EFAULT, EINVAL};
+use twilight_common::syscall::types::{EFAULT, EINVAL, Timespec};
 
 const PIT_BASE_HZ: u64 = 1_193_182;
 const PIT_DIVISOR: u64 = 65_536;
@@ -37,7 +37,7 @@ pub fn init_realtime_offset_from_cmos() {
     OFFSET_INITED.store(1, Ordering::Relaxed);
 }
 
-pub const CLOCK_REALTIME:  i32 = 0;
+pub const CLOCK_REALTIME: i32 = 0;
 pub const CLOCK_MONOTONIC: i32 = 1;
 
 pub fn sys_clock_gettime(clockid: i32, tp: *mut Timespec) -> i64 {
@@ -51,9 +51,7 @@ pub fn sys_clock_gettime(clockid: i32, tp: *mut Timespec) -> i64 {
     }
 
     let ns: u128 = match clockid {
-        CLOCK_MONOTONIC => {
-            monotonic_ns()
-        }
+        CLOCK_MONOTONIC => monotonic_ns(),
         CLOCK_REALTIME => {
             let off = REALTIME_OFFSET_NS.load(Ordering::Relaxed);
             off.saturating_add(monotonic_ns() as usize) as u128
@@ -62,7 +60,7 @@ pub fn sys_clock_gettime(clockid: i32, tp: *mut Timespec) -> i64 {
     };
 
     unsafe {
-        (*tp).tv_sec  = (ns / (NSEC_PER_SEC as u128)) as i64;
+        (*tp).tv_sec = (ns / (NSEC_PER_SEC as u128)) as i64;
         (*tp).tv_nsec = (ns % (NSEC_PER_SEC as u128)) as i64;
     }
     0

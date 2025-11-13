@@ -3,11 +3,11 @@ pub mod switch;
 pub(crate) mod user;
 
 use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
-use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
+use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
 use crate::println;
 use crate::sys::console::init_console;
-use crate::sys::fs::vfs::{VfsNode, VFS};
+use crate::sys::fs::vfs::{VFS, VfsNode};
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
@@ -21,11 +21,12 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
-use spin::mutex::Mutex;
 use spin::Once;
+use spin::mutex::Mutex;
+use twilight_common::syscall::types::{O_RDONLY, O_WRONLY};
+use x86_64::VirtAddr;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, OffsetPageTable, PhysFrame};
-use x86_64::VirtAddr;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -117,11 +118,16 @@ impl ProcessTable {
         self.proc_list.back_mut().unwrap().exec();
     }
 }
-pub struct Handler {
-    pub handler: Arc<Mutex<VfsNode>>,
+pub struct OpenFile {
+    pub node: Arc<Mutex<VfsNode>>,
     pub seek: usize,
     pub path: String,
-    pub flags: i32,
+    pub status_flags: i32,
+}
+
+pub struct FdEntry {
+    pub file: Arc<Mutex<OpenFile>>,
+    pub fd_flags: i32,
 }
 
 #[repr(C)]
@@ -139,7 +145,9 @@ pub struct Process {
     pub pwd: String,
     pub gs_base: VirtAddr,
     pub fs_base: VirtAddr,
-    pub handler: Vec<&'static mut Handler>,
+    pub fd_table: Vec<Option<FdEntry>>,
+    pub stdio_flags: [i32; 3],
+    pub stdio_fd_flags: [i32; 3],
     pub proc_mm: Box<ProcMM>,
 }
 
@@ -271,9 +279,11 @@ impl Process {
             pwd: pwd.to_string(),
             fs_base: VirtAddr::zero(),
             gs_base: VirtAddr::zero(),
-            handler: Vec::new(),
+            fd_table: Vec::new(),
             proc_mm,
             parent_pid,
+            stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
+            stdio_fd_flags: [0; 3],
         };
         Ok(p)
     }
@@ -363,11 +373,13 @@ pub fn init() {
                 page_table_frame,
                 mapper,
                 pwd: "/".to_string(),
-                handler: Vec::new(),
+                fd_table: Vec::new(),
                 gs_base: VirtAddr::zero(),
                 fs_base: VirtAddr::zero(),
                 proc_mm,
                 parent_pid: 1,
+                stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
+                stdio_fd_flags: [0; 3],
             })
     }
 }

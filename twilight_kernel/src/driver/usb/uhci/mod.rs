@@ -1,6 +1,6 @@
-use x86_64::instructions::port::Port;
 use crate::driver::timer::wait;
-use crate::{log};
+use crate::log;
+use x86_64::instructions::port::Port;
 
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -46,14 +46,13 @@ impl UHci {
             ctrl2: Port::new(io_base + 0x12),
         }
     }
-    
+
     pub fn list(&mut self) {
         // reset controller
         unsafe {
             self.usb_cmd.write(0x02);
         }
-        wait(1000*5);
-
+        wait(1000 * 5);
 
         // clear status
         unsafe {
@@ -61,15 +60,19 @@ impl UHci {
         }
 
         // allocate frame list
-        let frame_list_phys_addr = 0x1000; 
-        unsafe { self.framelist_addr.write(frame_list_phys_addr); }
+        let frame_list_phys_addr = 0x1000;
+        unsafe {
+            self.framelist_addr.write(frame_list_phys_addr);
+        }
 
         // start controller
-        unsafe { self.usb_cmd.write(0x01); }
+        unsafe {
+            self.usb_cmd.write(0x01);
+        }
 
         let portctrl1 = unsafe { self.ctrl1.read() };
         let portctrl2 = unsafe { self.ctrl2.read() };
-        
+
         if portctrl1 & 0x01 != 0 {
             log!("USB Device found on controller1: {:x}", portctrl1);
             self.reset_port(1);
@@ -87,12 +90,12 @@ impl UHci {
         } else {
             self.ctrl2.clone()
         };
-        
+
         unsafe {
             let mut val = ctrl.read();
             val |= 0x04;
             ctrl.write(val);
-            wait(1000*5);
+            wait(1000 * 5);
             val &= !0x04;
             ctrl.write(val);
             val |= 0x01;

@@ -4,8 +4,8 @@ use acpi::{AcpiHandler, AcpiTables, PhysicalMapping};
 use alloc::boxed::Box;
 use aml::{AmlContext, AmlName, AmlValue, DebugVerbosity, Handler};
 use core::ptr::NonNull;
-use x86_64::instructions::port::Port;
 use x86_64::PhysAddr;
+use x86_64::instructions::port::Port;
 
 static mut PM1A_CNT_BLK: u32 = 0;
 static mut SLP_TYPA: u16 = 0;
@@ -19,7 +19,11 @@ unsafe impl Sync for KernelAcpiHandler {}
 
 impl AcpiHandler for KernelAcpiHandler {
     #[allow(unsafe_code)]
-    unsafe fn map_physical_region<T>(&self, physical_address: usize, size: usize) -> PhysicalMapping<Self, T> {
+    unsafe fn map_physical_region<T>(
+        &self,
+        physical_address: usize,
+        size: usize,
+    ) -> PhysicalMapping<Self, T> {
         let phys_addr = PhysAddr::new(physical_address as u64);
         let virt_addr = phys_to_virt(phys_addr);
         let ptr = NonNull::new(virt_addr.as_mut_ptr()).unwrap();
@@ -44,9 +48,7 @@ pub fn init() {
                 let phys_addr = PhysAddr::new(dsdt.address as u64);
                 let virt_addr = sys::memory::phys_to_virt(phys_addr);
                 let ptr = virt_addr.as_ptr();
-                let table = unsafe {
-                    core::slice::from_raw_parts(ptr , dsdt.length as usize)
-                };
+                let table = unsafe { core::slice::from_raw_parts(ptr, dsdt.length as usize) };
                 let handler = Box::new(KernelAmlHandler);
                 let mut aml = AmlContext::new(handler, DebugVerbosity::None);
                 if aml.parse_table(table).is_ok() {
@@ -84,7 +86,6 @@ pub fn shutdown() {
         port.write(SLP_TYPA | SLP_LEN);
     }
 }
-
 
 struct KernelAmlHandler;
 
@@ -152,7 +153,10 @@ impl Handler for KernelAmlHandler {
     }
 }
 
-fn read_addr<T>(addr: usize) -> T where T: Copy {
+fn read_addr<T>(addr: usize) -> T
+where
+    T: Copy,
+{
     let virtual_address = sys::memory::phys_to_virt(PhysAddr::new(addr as u64));
     unsafe { *virtual_address.as_ptr::<T>() }
 }
