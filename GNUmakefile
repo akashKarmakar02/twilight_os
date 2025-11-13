@@ -64,12 +64,19 @@ run-x86_64: $(IMAGE_NAME).iso
 
 .PHONY: run-hdd-x86_64
 run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).hdd
-	qemu-system-$(KARCH) \
-		-M q35 \
+	qemu-system-$(KARCH) \-m 1024 \
+		-netdev user,id=net0,hostfwd=tcp::8080-:80 -device rtl8139,netdev=net0 \
+		-smp 4 \
+		-usb \
+		-device usb-mouse \
+		-device piix3-usb-uhci \
+		-serial stdio \
+		-d int,guest_errors,unimp \
+	  	-D qemu.log \
+		-vga std \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
-		-hda $(IMAGE_NAME).hdd \
-		$(QEMUFLAGS)
+		-hda $(IMAGE_NAME).hdd
 
 .PHONY: run-aarch64
 run-aarch64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
@@ -167,13 +174,17 @@ run-bios: $(IMAGE_NAME).iso
 .PHONY: run-hdd-bios
 run-hdd-bios: $(IMAGE_NAME).hdd
 	qemu-system-$(KARCH) \
-		-m 50 \
-		-device rtl8139 \
-		-enable-kvm \
-		-cpu host \
+		-m 1024 \
+		-netdev user,id=net0,hostfwd=tcp::8080-:80 -device rtl8139,netdev=net0 \
 		-smp 4 \
+		-usb \
+		-device usb-mouse \
+		-device piix3-usb-uhci \
+		-hda $(IMAGE_NAME).hdd \
 		-serial stdio \
-		-hda $(IMAGE_NAME).hdd
+		-d int,guest_errors,unimp \
+	  	-D qemu.log \
+		-vga std
 
 ovmf/ovmf-code-$(KARCH).fd:
 	mkdir -p ovmf
@@ -257,16 +268,17 @@ endif
 
 $(IMAGE_NAME).hdd: limine/limine kernel
 	rm -f $(IMAGE_NAME).hdd
-	dd if=/dev/zero bs=1M count=0 seek=64 of=$(IMAGE_NAME).hdd
-	sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00
+	dd if=/dev/zero bs=1M count=0 seek=1024 of=$(IMAGE_NAME).hdd
+	PATH=$$PATH:/usr/sbin:/sbin sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00 -m 1
+	./limine/limine bios-install $(IMAGE_NAME).hdd
 ifeq ($(KARCH),x86_64)
 	./limine/limine bios-install $(IMAGE_NAME).hdd
 endif
 	mformat -i $(IMAGE_NAME).hdd@@1M
 	mmd -i $(IMAGE_NAME).hdd@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
 	mcopy -i $(IMAGE_NAME).hdd@@1M twilight_kernel/kernel ::/boot
-	mcopy -i $(IMAGE_NAME).hdd@@1M limine.conf ::/boot/limine
 	mcopy -i $(IMAGE_NAME).hdd@@1M rootfs.cpio ::/boot
+	mcopy -i $(IMAGE_NAME).hdd@@1M limine.conf ::/boot/limine
 ifeq ($(KARCH),x86_64)
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine/limine-bios.sys ::/boot/limine
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine/BOOTX64.EFI ::/EFI/BOOT
