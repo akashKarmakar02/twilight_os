@@ -1,7 +1,7 @@
 use crate::logger;
 use crate::sys::memory::{alloc_pages, dealloc_pages};
-use crate::sys::proc::mem::align_up;
 use crate::sys::proc::PROCESS_TABLE;
+use crate::sys::proc::mem::align_up;
 
 // minimal flag bits
 #[allow(dead_code)]
@@ -37,15 +37,15 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     if size == 0 {
         return EINVAL;
     }
-    if (flags & MAP_ANONYMOUS) == 0 {
-        return ENOSYS;
-    } // file-backed not implemented yet
-    if (flags & MAP_PRIVATE) == 0 {
-        return ENOSYS;
-    } // keep it simple for now
-    if (offset as usize) & (crate::sys::proc::mem::PAGE - 1) != 0 {
-        return EINVAL;
-    } // must be page-aligned
+    // if (flags & MAP_ANONYMOUS) == 0 {
+    //     return ENOSYS;
+    // } // file-backed not implemented yet
+    // if (flags & MAP_PRIVATE) == 0 {
+    //     return ENOSYS;
+    // } // keep it simple for now
+    // if (offset as usize) & (crate::sys::proc::mem::PAGE - 1) != 0 {
+    //     return EINVAL;
+    // } // must be page-aligned
 
     let len = align_up(size, crate::sys::proc::mem::PAGE);
     let writable = (prot & PROT_WRITE) != 0;
@@ -71,7 +71,16 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, true, writable) {
         return ENOMEM;
     }
-    logger!("mmap: addr=0x{:x}, size=0x{:x}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}", addr, size, prot, flags, fd, offset, va);
+    logger!(
+        "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
+        addr,
+        size,
+        prot,
+        flags,
+        fd,
+        offset,
+        va
+    );
     va as i64
 }
 

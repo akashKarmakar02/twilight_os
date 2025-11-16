@@ -3,6 +3,7 @@ use crate::driver::timer::pit::uptime;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::slice::SlicePattern;
 use limine::framebuffer::Framebuffer;
 use spin::Once;
 
@@ -60,7 +61,7 @@ impl TwilightFrameBuffer {
             width: width as u64,
             height: height as u64,
             pitch: fb.pitch(), // bytes per scanline in VRAM
-            pixel_buf: vec![0; (width * height) as usize], // compact RGBx buffer (u32 per pixel)
+            pixel_buf: vec![0; width * height], // compact RGBx buffer (u32 per pixel)
         }
     }
 
@@ -145,14 +146,15 @@ impl TwilightFrameBuffer {
 
         // SAFER copy: use a manual copy to avoid overlap issues with copy_within
         for i in 0..(h - scroll) * w {
-            let val = self.pixel_buf[src_start + i];
+            let val = self.video_buf[src_start + i];
             if val != 0 {}
-            self.pixel_buf[dst_start + i] = self.pixel_buf[src_start + i];
+            self.video_buf[dst_start + i] = self.video_buf[src_start + i];
         }
 
         // Fill the bottom cleared area
         let fill_start = (h - scroll) * w;
-        self.pixel_buf[fill_start..].fill(fill_color);
+        self.video_buf[fill_start..].fill(fill_color);
+        self.pixel_buf.copy_from_slice(self.video_buf.as_slice());
     }
 
     /// Scroll the framebuffer content down by `lines` pixels.

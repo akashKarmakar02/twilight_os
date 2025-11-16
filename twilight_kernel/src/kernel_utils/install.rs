@@ -1,6 +1,6 @@
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
-use crate::println;
+use crate::{println, serial_println};
 use crate::sys::fs::init;
 use crate::sys::fs::partition::{self, PartitionEntry};
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
@@ -106,6 +106,7 @@ pub fn main() {
             fs.create_dir(root_inode_num + 1, "dev").unwrap();
             fs.create_dir(root_inode_num + 1, "init").unwrap();
             fs.create_dir(root_inode_num + 1, "home").unwrap();
+            fs.create_dir(root_inode_num + 1, "usr").unwrap();
             true
         }
     };
@@ -115,6 +116,7 @@ pub fn main() {
         while let Some(cpio_res) = initramfs.next() {
             match cpio_res {
                 Ok(entry) => {
+                    serial_println!("{:?}", entry.filename());
                     if entry.header.is_regular_file() {
                         copy_file(
                             format!("/{}", entry.filename().unwrap()).as_str(),

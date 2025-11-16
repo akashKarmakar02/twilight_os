@@ -2,6 +2,7 @@
 /limine
 /ovmf
 /.idea
+/.zig-cache
 /rootfs/bin
 twilight_kernel/kernel
 twilight-os.iso

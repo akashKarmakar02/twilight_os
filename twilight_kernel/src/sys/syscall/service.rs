@@ -909,7 +909,87 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     0
 }
 
-pub fn fstat(_fd: usize, _fstat_ptr: usize) -> i64 {
+pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
+    if fstat_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    let user_stat = unsafe { &mut *(fstat_ptr as *mut Stat) };
+    *user_stat = Stat::default();
+
+    if fd <= 2 {
+        let now = uptime() as i64;
+        user_stat.st_mode = 0o020666;
+        user_stat.st_uid = 0;
+        user_stat.st_gid = 0;
+        user_stat.st_ino = fd as u64;
+        user_stat.st_nlink = 1;
+        user_stat.st_size = 0;
+        user_stat.st_blksize = 4096;
+        user_stat.st_blocks = 0;
+        let ts = Timespec {
+            tv_sec: now,
+            tv_nsec: 0,
+        };
+        user_stat.st_atim = ts;
+        user_stat.st_mtim = ts;
+        user_stat.st_ctim = ts;
+        return 0;
+    }
+
+    if fd > i32::MAX as usize {
+        return -(EBADF as i64);
+    }
+
+    let file_ref = match clone_open_file(process, fd as i32) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
+    };
+
+    let metadata = {
+        let file = file_ref.lock();
+        let node = file.node.lock();
+        node.metadata.clone()
+    };
+
+    user_stat.st_size = metadata.size as i64;
+    user_stat.st_mode = match metadata.file_type {
+        FileType::File => 0o100644,
+        FileType::Dir => 0o040755,
+        FileType::CharDevice => 0o020666,
+        FileType::BlockDevice => 0o060660,
+    };
+    user_stat.st_uid = 0;
+    user_stat.st_gid = 0;
+    user_stat.st_ino = metadata.ino as u64;
+    user_stat.st_nlink = 1;
+    user_stat.st_rdev = 0;
+    user_stat.st_blksize = 4096;
+    user_stat.st_blocks = ((metadata.size as u64 + 511) / 512) as i64;
+    user_stat.st_atim = Timespec {
+        tv_sec: metadata.access_time as i64,
+        tv_nsec: 0,
+    };
+    user_stat.st_mtim = Timespec {
+        tv_sec: metadata.modified_time as i64,
+        tv_nsec: 0,
+    };
+    user_stat.st_ctim = Timespec {
+        tv_sec: metadata.created_time as i64,
+        tv_nsec: 0,
+    };
+
     0
 }
 
