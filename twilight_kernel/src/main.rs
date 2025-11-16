@@ -206,6 +206,7 @@ pub fn init(
 
     // init_writer();
     init_tty();
+    driver::mouse::ps2::init();
     sys::pci::init();
 
     // depends on pci initialization

@@ -4,6 +4,7 @@ mod random;
 mod zero;
 
 use crate::driver::disk::dummy_blockdev;
+use crate::driver::mouse::MouseDev;
 use crate::fs::vfs::Metadata;
 use crate::sys::console::tty::TtyDev;
 use crate::sys::framebuffer::FramebufferDev;
@@ -11,61 +12,87 @@ use crate::sys::fs::devfs::full::Full;
 use crate::sys::fs::devfs::null::Null;
 use crate::sys::fs::devfs::random::{RandomDev, URandomDev};
 use crate::sys::fs::devfs::zero::Zero;
-use crate::sys::fs::vfs::{BlockDev, FileSystem, VfsNode, VfsNodeOps};
-use alloc::format;
-use alloc::string::ToString;
+use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, VfsNode, VfsNodeOps};
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::rwlock::RwLock;
 
 pub struct DevFs {
-    file_structure: Vec<VfsNode>,
+    file_structure: Vec<(String, VfsNode)>,
 }
 
 impl DevFs {
     pub fn new() -> Self {
         let mut devices = Vec::new();
         let null_meta = Metadata::chr(2, "null");
-        devices.push(VfsNode::new(
-            dummy_blockdev(),
-            null_meta,
-            Arc::new(RwLock::new(Null)),
+        devices.push((
+            "null".to_string(),
+            VfsNode::new(dummy_blockdev(), null_meta, Arc::new(RwLock::new(Null))),
         ));
         let fb_meta = Metadata::chr(3, "fb0");
-        devices.push(VfsNode::new(
-            dummy_blockdev(),
-            fb_meta,
-            Arc::new(RwLock::new(FramebufferDev)),
+        devices.push((
+            "fb0".to_string(),
+            VfsNode::new(
+                dummy_blockdev(),
+                fb_meta,
+                Arc::new(RwLock::new(FramebufferDev)),
+            ),
         ));
         let tty_meta = Metadata::chr(4, "tty");
-        devices.push(VfsNode::new(
-            dummy_blockdev(),
-            tty_meta,
-            Arc::new(RwLock::new(TtyDev)),
+        devices.push((
+            "tty".to_string(),
+            VfsNode::new(
+                dummy_blockdev(),
+                tty_meta,
+                Arc::new(RwLock::new(TtyDev)),
+            ),
         ));
         let zero_meta = Metadata::chr(5, "zero");
-        devices.push(VfsNode::new(
-            dummy_blockdev(),
-            zero_meta,
-            Arc::new(RwLock::new(Zero)),
+        devices.push((
+            "zero".to_string(),
+            VfsNode::new(dummy_blockdev(), zero_meta, Arc::new(RwLock::new(Zero))),
         ));
         let random_meta = Metadata::chr(6, "random");
-        devices.push(VfsNode::new(
-            dummy_blockdev(),
-            random_meta,
-            Arc::new(RwLock::new(RandomDev)),
+        devices.push((
+            "random".to_string(),
+            VfsNode::new(
+                dummy_blockdev(),
+                random_meta,
+                Arc::new(RwLock::new(RandomDev)),
+            ),
         ));
         let urandom_meta = Metadata::chr(7, "urandom");
-        devices.push(VfsNode::new(
-            dummy_blockdev(),
-            urandom_meta,
-            Arc::new(RwLock::new(URandomDev)),
+        devices.push((
+            "urandom".to_string(),
+            VfsNode::new(
+                dummy_blockdev(),
+                urandom_meta,
+                Arc::new(RwLock::new(URandomDev)),
+            ),
         ));
         let full_meta = Metadata::chr(8, "full");
-        devices.push(VfsNode::new(
-            dummy_blockdev(),
-            full_meta,
-            Arc::new(RwLock::new(Full)),
+        devices.push((
+            "full".to_string(),
+            VfsNode::new(dummy_blockdev(), full_meta, Arc::new(RwLock::new(Full))),
+        ));
+        let input_dir_meta = Metadata::dir(9, "input");
+        devices.push((
+            "input".to_string(),
+            VfsNode::new(
+                dummy_blockdev(),
+                input_dir_meta,
+                Arc::new(RwLock::new(DirNodeOps)),
+            ),
+        ));
+        let mice_meta = Metadata::chr(10, "mice");
+        devices.push((
+            "input/mice".to_string(),
+            VfsNode::new(
+                dummy_blockdev(),
+                mice_meta,
+                Arc::new(RwLock::new(MouseDev::new())),
+            ),
         ));
 
         DevFs {
@@ -118,14 +145,17 @@ impl FileSystem for DevFs {
             ));
         }
 
-        for dev in &self.file_structure {
-            if format!("/{}", dev.metadata.name).as_str() == path.to_string() {
-                return Ok(VfsNode {
-                    device: dev.device.clone(),
-                    metadata: dev.metadata.clone(),
-                    node: dev.node.clone(),
-                });
-            }
+        let rel = path.trim_matches('/');
+        if rel.is_empty() {
+            return Err(());
+        }
+
+        if let Some((_, node)) = self
+            .file_structure
+            .iter()
+            .find(|(p, _)| p.as_str() == rel)
+        {
+            return Ok(node.clone());
         }
 
         Err(())
@@ -138,15 +168,21 @@ impl FileSystem for DevFs {
         Err(())
     }
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
-        if Self::is_root(path) {
-            let mut devices = Vec::new();
-            for dev in &self.file_structure {
-                devices.push(dev.metadata.clone());
-            }
-            Ok(devices)
-        } else {
-            Err(())
+        let rel = path.trim_matches('/');
+
+        if !Self::is_root(path) && !self.is_directory(rel) {
+            return Err(());
         }
+
+        let parent = if rel.is_empty() { None } else { Some(rel) };
+        let mut entries = Vec::new();
+        for (entry_path, node) in &self.file_structure {
+            if Self::parent(entry_path) == parent {
+                entries.push(node.metadata.clone());
+            }
+        }
+
+        Ok(entries)
     }
     fn rm(&mut self, _path: &str) -> Result<(), ()> {
         Err(())
@@ -161,12 +197,41 @@ impl FileSystem for DevFs {
             return Ok(self.root_metadata());
         }
 
-        for dev in &self.file_structure {
-            if dev.metadata.name == path.to_string() {
-                return Ok(dev.metadata.clone());
-            }
+        let rel = path.trim_matches('/');
+        if rel.is_empty() {
+            return Err(());
+        }
+
+        if let Some((_, node)) = self
+            .file_structure
+            .iter()
+            .find(|(p, _)| p.as_str() == rel)
+        {
+            return Ok(node.metadata.clone());
         }
 
         Err(())
+    }
+}
+
+impl DevFs {
+    fn parent(path: &str) -> Option<&str> {
+        path.rsplit_once('/').and_then(|(parent, _)| {
+            if parent.is_empty() {
+                None
+            } else {
+                Some(parent)
+            }
+        })
+    }
+
+    fn is_directory(&self, path: &str) -> bool {
+        if path.is_empty() {
+            return true;
+        }
+
+        self.file_structure.iter().any(|(p, node)| {
+            p.as_str() == path && node.metadata.file_type == FileType::Dir
+        })
     }
 }

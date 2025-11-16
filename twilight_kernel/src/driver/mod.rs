@@ -1,6 +1,7 @@
 pub mod cpu;
 pub mod disk;
 pub mod keyboard;
+pub mod mouse;
 pub mod nic;
 pub mod timer;
 pub mod tty;

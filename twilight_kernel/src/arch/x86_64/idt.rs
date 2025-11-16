@@ -49,6 +49,7 @@ lazy_static! {
         }
         idt[interrupt_index(0)].set_handler_fn(timer_interrupt_handler);
         idt[interrupt_index(1)].set_handler_fn(keyboard_interrupt_handler);
+        idt[interrupt_index(12)].set_handler_fn(mouse_interrupt_handler);
         idt
     };
 }
@@ -204,6 +205,7 @@ extern "x86-interrupt" fn segment_not_present_handler(
 
 // device interrupt
 use crate::driver::keyboard::keyboard_interrupt;
+use crate::driver::mouse::ps2::handle_interrupt_byte;
 use spin::Mutex;
 use x86_64::registers::control::Cr2;
 
@@ -217,7 +219,7 @@ pub static PICS: Mutex<ChainedPics> =
 pub fn init_pics() {
     unsafe {
         PICS.lock().initialize();
-        PICS.lock().write_masks(0b11111100, 0b11111111);
+        PICS.lock().write_masks(0b11111000, 0b11101111);
     }
 }
 
@@ -244,5 +246,18 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(1));
+    }
+}
+
+extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    use x86_64::instructions::port::Port;
+
+    let mut port = Port::<u8>::new(0x60);
+    let data: u8 = unsafe { port.read() };
+
+    handle_interrupt_byte(data);
+
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(interrupt_index(12));
     }
 }

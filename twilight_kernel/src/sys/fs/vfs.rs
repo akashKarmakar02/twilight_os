@@ -133,6 +133,16 @@ impl VfsNode {
     }
 }
 
+impl Clone for VfsNode {
+    fn clone(&self) -> Self {
+        Self {
+            device: self.device.clone(),
+            metadata: self.metadata.clone(),
+            node: self.node.clone(),
+        }
+    }
+}
+
 pub trait VfsNodeOps: Send + Sync + 'static {
     fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()>;
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()>;
