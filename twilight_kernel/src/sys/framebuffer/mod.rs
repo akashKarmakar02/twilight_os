@@ -446,7 +446,7 @@ impl VfsNodeOps for TwilightFrameBuffer {
                 let info = FbVarScreenInfo {
                     xres: self.width as u32,
                     yres: self.height as u32,
-                    bits_per_pixel: 4,
+                    bits_per_pixel: 32,
                     red_offset: 16,
                     green_offset: 8,
                     blue_offset: 0,

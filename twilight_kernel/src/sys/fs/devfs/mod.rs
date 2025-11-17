@@ -4,6 +4,7 @@ mod random;
 mod zero;
 
 use crate::driver::disk::dummy_blockdev;
+use crate::driver::keyboard::KeyboardDev;
 use crate::driver::mouse::MouseDev;
 use crate::fs::vfs::Metadata;
 use crate::sys::console::tty::TtyDev;
@@ -92,6 +93,15 @@ impl DevFs {
                 dummy_blockdev(),
                 mice_meta,
                 Arc::new(RwLock::new(MouseDev::new())),
+            ),
+        ));
+        let keyboard_meta = Metadata::chr(11, "event0");
+        devices.push((
+            "input/event0".to_string(),
+            VfsNode::new(
+                dummy_blockdev(),
+                keyboard_meta,
+                Arc::new(RwLock::new(KeyboardDev)),
             ),
         ));
 
