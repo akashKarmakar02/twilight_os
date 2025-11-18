@@ -4,7 +4,6 @@ use crate::sys::fs::twilight_fs::inode::Inode;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec;
 use alloc::vec::Vec;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
@@ -105,15 +104,8 @@ impl VfsNode {
         }
     }
 
-    pub fn read(&mut self) -> Result<Vec<u8>, ()> {
-        self.node.read().read(&mut self.device, 0, &mut [])
-    }
-
-    pub fn read_with_hint(&mut self, hint: usize) -> Result<Vec<u8>, ()> {
-        let mut scratch = vec![0u8; hint.max(1)];
-        self.node
-            .read()
-            .read(&mut self.device, 0, scratch.as_mut_slice())
+    pub fn read(&mut self, lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
+        self.node.read().read(&mut self.device, lba, buf)
     }
 
     pub fn write(&mut self, lba: usize, data: &[u8]) -> Result<(), ()> {
@@ -144,7 +136,7 @@ impl Clone for VfsNode {
 }
 
 pub trait VfsNodeOps: Send + Sync + 'static {
-    fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()>;
+    fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<usize, ()>;
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()>;
     fn poll(&self, device: &mut BlockDev) -> Result<bool, ()>;
     fn ioctl(&mut self, device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()>;

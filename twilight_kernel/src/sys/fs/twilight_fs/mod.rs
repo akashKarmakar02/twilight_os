@@ -54,19 +54,9 @@ pub fn read_tfs_block(
 ) -> Result<(), FsError> {
     let block_no = block_no as usize;
     let start_block = (block_no * 4) + fs_block_offset_sectors();
-    let end_block = start_block + 4;
-    let mut temp_buf = [0u8; 512];
-    let mut offset = 0;
-
-    for i in start_block..end_block {
-        if device.read(i as u32, &mut temp_buf[0..512]).is_err() {
-            return Err(InvalidInode);
-        }
-        buf[offset..offset + 512].copy_from_slice(&temp_buf[0..512]);
-        offset += 512;
-    }
-
-    Ok(())
+    device
+        .read_blocks(start_block as u32, &mut buf[..])
+        .map_err(|_| InvalidInode)
 }
 
 pub fn write_tfs_block(
@@ -76,15 +66,9 @@ pub fn write_tfs_block(
 ) -> Result<(), FsError> {
     let block_no = block_no as usize;
     let start_block = (block_no * 4) + fs_block_offset_sectors();
-
-    for i in 0..4 {
-        let t_buf = &buf[i * 512..(i + 1) * 512];
-        if device.write(i as u32 + start_block as u32, t_buf).is_err() {
-            return Err(InvalidInode);
-        }
-    }
-
-    Ok(())
+    device
+        .write_blocks(start_block as u32, &buf[..])
+        .map_err(|_| InvalidInode)
 }
 
 #[repr(C, packed)]

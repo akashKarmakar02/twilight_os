@@ -9,6 +9,7 @@ pub mod fat16;
 
 use crate::println;
 use crate::sys::fs::devfs::DevFs;
+use crate::sys::fs::fat16::{detect_fat16_partition, Fat16Fs};
 use crate::sys::fs::twilight_fs::TwilightFs;
 use crate::sys::fs::vfs::VFS;
 use alloc::string::String;
@@ -35,6 +36,8 @@ pub fn init(show_log: bool) {
     let uptime = crate::driver::timer::pit::uptime();
     for bus in 0..2 {
         for dsk in 0..2 {
+            try_mount_boot(bus, dsk, show_log);
+
             if let Ok(mfs) = TwilightFs::check_ata(bus, dsk) {
                 if let Err(_) = MFS.try_init_once(|| Mutex::new(mfs)) {
                     println!("MFS already initialized");
@@ -52,6 +55,7 @@ pub fn init(show_log: bool) {
                     VFS.get_mut()
                         .mount("/dev", Arc::new(Mutex::new(DevFs::new())));
                 }
+                try_mount_boot(bus, dsk, show_log);
                 if show_log {
                     println!(
                         "\x1b[93m[{:.6}]\x1b[0m TwilightFS Superblock found in ATA {}:{}",
@@ -72,6 +76,44 @@ pub fn init(show_log: bool) {
         uptime
     );
     println!("\x1b[93mWarning\x1b[0m Trying running 'install' to install Twilight OS");
+}
+
+fn try_mount_boot(bus: u8, dsk: u8, show_log: bool) -> bool {
+    #[allow(static_mut_refs)]
+    let already = unsafe {
+        VFS.get_mut()
+            .mount_points
+            .iter()
+            .any(|(prefix, _)| *prefix == "/boot")
+    };
+    if already {
+        return true;
+    }
+
+    let Some(entry) = detect_fat16_partition(bus, dsk) else {
+        return false;
+    };
+    let entry_lba = entry.lba_start;
+
+    match Fat16Fs::from_partition(bus, dsk, entry) {
+        Ok(fs) => {
+            #[allow(static_mut_refs)]
+            unsafe {
+                VFS.get_mut().mount("/boot", Arc::new(Mutex::new(fs)));
+            }
+            if show_log {
+                println!(
+                    "\x1b[93m[{:.6}]\x1b[0m FAT16 partition mounted at /boot from ATA {}:{} (LBA {})",
+                    crate::driver::timer::pit::uptime(),
+                    bus,
+                    dsk,
+                    entry_lba
+                );
+            }
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 pub trait Vfs: Send {

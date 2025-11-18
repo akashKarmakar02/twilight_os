@@ -1,11 +1,10 @@
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
-use alloc::vec::Vec;
 
 pub struct Null;
 
 impl VfsNodeOps for Null {
-    fn read(&self, _device: &mut BlockDev, _lba: usize, _buf: &mut [u8]) -> Result<Vec<u8>, ()> {
-        Ok(Vec::new())
+    fn read(&self, _device: &mut BlockDev, _lba: usize, _buf: &mut [u8]) -> Result<usize, ()> {
+        Ok(0)
     }
 
     fn write(&mut self, _device: &mut BlockDev, _lba: usize, _data: &[u8]) -> Result<(), ()> {

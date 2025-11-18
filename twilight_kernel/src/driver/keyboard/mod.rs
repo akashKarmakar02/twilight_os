@@ -304,10 +304,10 @@ impl KeyboardDev {
 }
 
 impl VfsNodeOps for KeyboardDev {
-    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
+    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
         const EVENT_SIZE: usize = size_of::<InputEvent>();
         if buf.len() < EVENT_SIZE {
-            return Ok(Vec::new());
+            return Ok(0);
         }
 
         loop {
@@ -324,7 +324,7 @@ impl VfsNodeOps for KeyboardDev {
                 out.extend_from_slice(&evt.to_bytes());
             }
 
-            return Ok(out);
+            return Ok(out.len());
         }
     }
 

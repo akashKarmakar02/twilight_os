@@ -570,7 +570,7 @@ impl KeyboardListener for Tty {
 }
 
 impl VfsNodeOps for Tty {
-    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
+    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<usize,()> {
         let mut i = 0;
 
         loop {
@@ -631,10 +631,7 @@ impl VfsNodeOps for Tty {
             }
         }
 
-        // *self.read_to_count.lock() = 0;
-        let res = Vec::from(&buf[..i]);
-
-        Ok(res)
+        Ok(i+1)
     }
 
     fn write(&mut self, _device: &mut BlockDev, _lba: usize, data: &[u8]) -> Result<(), ()> {
@@ -724,7 +721,7 @@ pub fn get_tty() -> &'static mut Tty {
 pub struct TtyDev;
 
 impl VfsNodeOps for TtyDev {
-    fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
+    fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
         let tty = get_tty();
         tty.read(device, lba, buf)
     }

@@ -669,7 +669,10 @@ fn load_interpreter_image(
     let interp_buf = {
         let vfs = unsafe { VFS.read() };
         let mut node = vfs.open(path).map_err(|_| ())?;
-        node.read().map_err(|_| ())?
+        let mut buf = vec![0u8; node.metadata.size];
+        node.read(0, &mut buf).map_err(|_| ())?;
+
+        buf
     };
 
     load_elf_image(

@@ -12,6 +12,8 @@ pub enum FatEntry<'a> {
     File { path: &'a str, data: &'a [u8] },
 }
 
+pub mod runtime;
+pub use runtime::{detect_fat16_partition, Fat16Fs};
 #[derive(Debug)]
 pub enum FatError {
     InvalidPath,

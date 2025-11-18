@@ -228,7 +228,8 @@ fn get(req: &Request, res: &mut Response) {
     let file_path = format!("/var/www/{}", file);
     if let Ok(mut inode) = vfs.open(file_path.as_str()) {
         res.code = 200;
-        let Ok(buf) = inode.read() else {
+        let mut buf = [0u8; 4096];
+        let Ok(_) = inode.read(0, &mut buf) else {
             res.body
                 .extend_from_slice(b"<h1>Hello World From Twilight OS!</h1>\n");
             return;
@@ -277,11 +278,9 @@ pub fn main(_args: &[&str]) {
 
             if tty.poll(&mut dummy_blockdev()).unwrap_or(false) {
                 let mut buf = [0u8; 1];
-                let c = tty
-                    .read(&mut dummy_blockdev(), 0, &mut buf)
-                    .unwrap_or(Vec::new());
+                tty.read(&mut dummy_blockdev(), 0, &mut buf).unwrap_or(0);
 
-                if c.get(0).unwrap_or(&0) == &0x03 {
+                if buf.get(0).unwrap_or(&0) == &0x03 {
                     break;
                 }
             }

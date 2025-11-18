@@ -9,7 +9,6 @@ use crate::serial_println;
 use crate::sys::syscall::SyscallError::ENOSYS;
 use crate::sys::syscall::service::read;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user};
-use crate::task::executor::sleep;
 use alloc::string::String;
 use twilight_common::syscall::numbers::*;
 use twilight_common::syscall::types::{Rlimit64, Timespec};
@@ -27,17 +26,6 @@ pub extern "sysv64" fn syscall_handler(
     let arg4 = regs.r10;
     let arg5 = regs.r8;
     let arg6 = regs.r9;
-
-    serial_println!(
-        "LOG: {} syscall with args {} {} {} {} {} {}",
-        syscall_number,
-        arg1,
-        arg2,
-        arg3,
-        arg4,
-        arg5,
-        arg6
-    );
 
     let res = match syscall_number {
         SYS_READ => {

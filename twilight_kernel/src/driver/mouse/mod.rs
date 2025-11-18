@@ -57,10 +57,10 @@ impl MouseDev {
 }
 
 impl VfsNodeOps for MouseDev {
-    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
+    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
         let packet_quota = buf.len() / PS2_PACKET_SIZE;
         if packet_quota == 0 {
-            return Ok(Vec::new());
+            return Ok(0);
         }
 
         let bytes_target = packet_quota * PS2_PACKET_SIZE;
@@ -73,7 +73,7 @@ impl VfsNodeOps for MouseDev {
             halt();
         };
 
-        Ok(Vec::from(&buf[..bytes_read]))
+        Ok(bytes_read)
     }
 
     fn write(&mut self, _device: &mut BlockDev, _lba: usize, _data: &[u8]) -> Result<(), ()> {

@@ -22,8 +22,10 @@ pub struct RandomDev;
 pub struct URandomDev;
 
 impl VfsNodeOps for RandomDev {
-    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
-        Ok(random_bytes(buf.len()))
+    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
+        let random_bytes = random_bytes(buf.len());
+        buf.copy_from_slice(&random_bytes);
+        Ok(buf.len())
     }
 
     fn write(&mut self, _device: &mut BlockDev, _lba: usize, _data: &[u8]) -> Result<(), ()> {
@@ -44,8 +46,10 @@ impl VfsNodeOps for RandomDev {
 }
 
 impl VfsNodeOps for URandomDev {
-    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
-        Ok(random_bytes(buf.len()))
+    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
+        let random_bytes = random_bytes(buf.len());
+        buf.copy_from_slice(&random_bytes);
+        Ok(buf.len())
     }
 
     fn write(&mut self, _device: &mut BlockDev, _lba: usize, _data: &[u8]) -> Result<(), ()> {

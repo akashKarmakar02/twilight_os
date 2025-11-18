@@ -1,10 +1,10 @@
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
-use crate::{println, serial_println};
 use crate::sys::fs::init;
 use crate::sys::fs::partition::{self, PartitionEntry};
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::sys::fs::twilight_fs::inode::Inode;
+use crate::{println, serial_println};
 use alloc::format;
 use alloc::vec::Vec;
 use core::cmp;
@@ -139,54 +139,89 @@ fn ensure_partition_table(
         return Err("disk is too small to partition");
     }
 
-    let boot_start = PARTITION_ALIGNMENT_SECTORS as u64;
-    let reserved_boot = align_up_u64(
-        (RESERVED_BOOT_MB as u64 * 1024 * 1024) / partition::SECTOR_SIZE as u64,
-        PARTITION_ALIGNMENT_SECTORS as u64,
-    );
-    let mut boot_sectors = reserved_boot;
+    let mut mbr = [0u8; 512];
+    let mut entries = [PartitionEntry::empty(); 4];
+    let mut boot_slot = None;
+    let mut twilight_slot = None;
+
+    if device.read(0, &mut mbr).is_ok() && partition::has_signature(&mbr) {
+        entries = partition::decode_entries(&mbr);
+        boot_slot = entries.iter().position(is_boot_partition);
+        twilight_slot = entries.iter().position(|entry| {
+            entry.partition_type == partition::TWILIGHT_PARTITION_TYPE && entry.is_present()
+        });
+    } else {
+        mbr.fill(0);
+    }
+
+    let mut boot_entry = boot_slot.map(|idx| entries[idx]);
+    let mut twilight_entry = twilight_slot.map(|idx| entries[idx]);
+
     let min_twilight = MIN_TWILIGHT_SECTORS as u64;
 
-    let mut twilight_start = align_up_u64(
-        boot_start + boot_sectors,
-        PARTITION_ALIGNMENT_SECTORS as u64,
-    );
-    if total_sectors <= twilight_start + min_twilight {
-        boot_sectors = 0;
-        twilight_start = boot_start;
+    let mut boot_start = if let Some(entry) = boot_entry {
+        entry.lba_start as u64
+    } else {
+        PARTITION_ALIGNMENT_SECTORS as u64
+    };
+
+    let mut boot_sectors = if let Some(entry) = boot_entry {
+        entry.sectors as u64
+    } else {
+        align_up_u64(
+            (RESERVED_BOOT_MB as u64 * 1024 * 1024) / partition::SECTOR_SIZE as u64,
+            PARTITION_ALIGNMENT_SECTORS as u64,
+        )
+    };
+
+    if let Some(entry) = twilight_entry {
+        if (entry.sectors as u64) < min_twilight {
+            return Err("existing Twilight partition is too small");
+        }
+    } else {
+        let mut start = align_up_u64(
+            boot_start + boot_sectors,
+            PARTITION_ALIGNMENT_SECTORS as u64,
+        );
+        if boot_entry.is_none() && total_sectors <= start + min_twilight {
+            boot_sectors = 0;
+            start = boot_start;
+        }
+        if total_sectors <= start + min_twilight {
+            return Err("disk is too small to host TwilightFS");
+        }
+        let sectors = total_sectors - start;
+        if sectors < min_twilight {
+            return Err("disk is too small to host TwilightFS");
+        }
+        let entry = PartitionEntry::new(
+            0x00,
+            partition::TWILIGHT_PARTITION_TYPE,
+            start as u32,
+            sectors as u32,
+        );
+        let slot = insert_partition_entry(&mut entries, twilight_slot, entry)
+            .ok_or("no free partition table entry for TwilightFS")?;
+        twilight_slot = Some(slot);
+        twilight_entry = Some(entry);
     }
 
-    if total_sectors <= twilight_start + min_twilight {
-        return Err("disk is too small to host TwilightFS");
-    }
-
-    let twilight_sectors = total_sectors - twilight_start;
-
-    let mut entries = [PartitionEntry::empty(); 4];
-    let mut boot_entry = None;
-    if boot_sectors > 0 {
+    if boot_entry.is_none() && boot_sectors > 0 {
         let entry = PartitionEntry::new(
             0x00,
             partition::FAT32_LBA_PARTITION_TYPE,
             boot_start as u32,
             boot_sectors as u32,
         );
-        entries[0] = entry;
+        let slot = insert_partition_entry(&mut entries, boot_slot, entry)
+            .ok_or("no free partition table entry for boot partition")?;
+        boot_slot = Some(slot);
         boot_entry = Some(entry);
+    } else if let Some(entry) = boot_entry {
+        boot_start = entry.lba_start as u64;
+        boot_sectors = entry.sectors as u64;
     }
 
-    let twilight_entry = PartitionEntry::new(
-        0x00,
-        partition::TWILIGHT_PARTITION_TYPE,
-        twilight_start as u32,
-        twilight_sectors as u32,
-    );
-    entries[1] = twilight_entry;
-
-    let mut mbr = [0u8; 512];
-    if device.read(0, &mut mbr).is_err() {
-        mbr.fill(0);
-    }
     partition::encode_entries(&mut mbr, &entries);
     partition::write_signature(&mut mbr);
     device
@@ -194,10 +229,39 @@ fn ensure_partition_table(
         .map_err(|_| "failed to write partition table")?;
 
     Ok(TwilightPartitionLayout {
-        twilight_start_lba: twilight_entry.lba_start,
-        twilight_sectors: twilight_entry.sectors,
+        twilight_start_lba: twilight_entry.unwrap().lba_start,
+        twilight_sectors: twilight_entry.unwrap().sectors,
         boot_partition: boot_entry,
     })
+}
+
+fn insert_partition_entry(
+    entries: &mut [PartitionEntry; 4],
+    slot: Option<usize>,
+    entry: PartitionEntry,
+) -> Option<usize> {
+    if let Some(idx) = slot {
+        entries[idx] = entry;
+        return Some(idx);
+    }
+    for (idx, existing) in entries.iter_mut().enumerate() {
+        if !existing.is_present() {
+            *existing = entry;
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn is_boot_partition(entry: &PartitionEntry) -> bool {
+    entry.is_present()
+        && matches!(
+            entry.partition_type,
+            partition::FAT32_LBA_PARTITION_TYPE
+                | partition::FAT16_CHS_PARTITION_TYPE
+                | partition::FAT16_LBA_PARTITION_TYPE
+                | 0x0B
+        )
 }
 
 fn sectors_to_mebibytes(sectors: u32) -> u64 {

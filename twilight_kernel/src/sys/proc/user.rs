@@ -1,4 +1,4 @@
-use alloc::format;
+use alloc::{format, vec};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -30,7 +30,10 @@ pub fn set_user_env() {
 
     serial_println!("{}", get_uid());
 
-    let content = String::from_utf8(node.read().unwrap()).unwrap();
+    let mut buf = vec![0u8; node.metadata.size];
+    node.read(0, &mut buf).unwrap();
+
+    let content = String::from_utf8(buf).unwrap();
 
     for entry in content.lines() {
         if let Some(entry) = parse_passwd_line(entry) {

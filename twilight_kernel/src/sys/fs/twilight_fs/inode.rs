@@ -5,6 +5,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 use twilight_common::syscall::types::EISDIR;
+use crate::serial_println;
 
 #[allow(dead_code)]
 #[repr(u16)]
@@ -47,30 +48,50 @@ unsafe impl Sync for TFSVfsNode {}
 
 #[allow(dead_code)]
 impl VfsNodeOps for TFSVfsNode {
-    fn read(&self, device: &mut BlockDev, _lba: usize, _buf: &mut [u8]) -> Result<Vec<u8>, ()> {
-        let mut content = Vec::new();
-        let mut remaining = self.inode.size as usize;
+    fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
         let block_size = 2048;
+        let file_size = self.inode.size as usize;
         let mut buffer = [0u8; 2048];
 
+        if lba >= file_size {
+            return Ok(0); // nothing to read
+        }
+
+        let mut content = Vec::new();
+        let max_to_read = core::cmp::min(file_size - lba, buf.len());
+        let mut remaining = max_to_read;
+
         let zones = self.inode.zones;
-        for &zone in zones.iter() {
+
+        let start_block = lba / block_size;
+        let mut block_offset = lba % block_size;
+
+        for (idx, &zone) in zones.iter().enumerate() {
             if zone == 0 {
                 break;
             }
 
-            let to_read = core::cmp::min(remaining, block_size);
+            if idx < start_block {
+                continue;
+            }
 
             if let Err(_) = read_tfs_block(device.lock().as_mut(), zone, &mut buffer) {
                 return Err(());
             }
-            content.extend_from_slice(&buffer[..to_read]);
+            let start = block_offset;
+            let available_in_block = block_size - start;
+            let to_read = core::cmp::min(remaining, available_in_block);
+
+            content.extend_from_slice(&buffer[start..start + to_read]);
 
             remaining -= to_read;
+            block_offset = 0;
             if remaining == 0 {
                 break;
             }
         }
+
+        let mut block_index = zones.len(); // first indirect block index
 
         if self.inode.indirect_zones != 0 {
             if let Err(_) = read_tfs_block(
@@ -89,8 +110,10 @@ impl VfsNodeOps for TFSVfsNode {
                 if zone_id == 0 {
                     break;
                 }
-
-                let to_read = core::cmp::min(remaining, block_size);
+                if block_index < start_block {
+                    block_index += 1;
+                    continue;
+                }
 
                 let mut indirect_content_buf = [0u8; 2048];
 
@@ -99,14 +122,23 @@ impl VfsNodeOps for TFSVfsNode {
                 {
                     return Err(());
                 }
-                content.extend_from_slice(&indirect_content_buf[..to_read]);
+                let start = block_offset;
+                let available_in_block = block_size - start;
+                let to_read = core::cmp::min(remaining, available_in_block);
+
+                content.extend_from_slice(&indirect_content_buf[start..start + to_read]);
 
                 remaining -= to_read;
+                block_offset = 0;
+                block_index += 1;
+
                 if remaining == 0 {
                     break;
                 }
             }
         }
+
+        block_index = zones.len() + block_size / 4;
 
         if self.inode.double_indirect_zones != 0 {
             if let Err(_) = read_tfs_block(
@@ -141,8 +173,10 @@ impl VfsNodeOps for TFSVfsNode {
                     if zone_id == 0 {
                         break;
                     }
-
-                    let to_read = core::cmp::min(remaining, block_size);
+                    if block_index < start_block {
+                        block_index += 1;
+                        continue;
+                    }
 
                     let mut indirect_content_buf = [0u8; 2048];
                     if let Err(_) =
@@ -150,9 +184,15 @@ impl VfsNodeOps for TFSVfsNode {
                     {
                         return Err(());
                     }
-                    content.extend_from_slice(&indirect_content_buf);
+                    let start = block_offset;
+                    let available_in_block = block_size - start;
+                    let to_read = core::cmp::min(remaining, available_in_block);
+
+                    content.extend_from_slice(&indirect_content_buf[start..start + to_read]);
 
                     remaining -= to_read;
+                    block_offset = 0;
+                    block_index += 1;
                     if remaining == 0 {
                         break;
                     }
@@ -160,7 +200,10 @@ impl VfsNodeOps for TFSVfsNode {
             }
         }
 
-        Ok(content)
+        serial_println!("size of buf: {}, size of content: {}", buf.len(), content.len());
+        buf[0..content.len()].copy_from_slice(content.as_slice());
+
+        Ok(content.len())
     }
 
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()> {

@@ -418,7 +418,7 @@ impl VfsNodeOps for TwilightFrameBuffer {
         _device: &mut BlockDev,
         _offset: usize,
         _buffer: &mut [u8],
-    ) -> Result<Vec<u8>, ()> {
+    ) -> Result<usize, ()> {
         Err(())
     }
 
@@ -543,7 +543,7 @@ pub fn get_framebuffer_mut() -> &'static mut TwilightFrameBuffer {
 pub struct FramebufferDev;
 
 impl VfsNodeOps for FramebufferDev {
-    fn read(&self, device: &mut BlockDev, offset: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()> {
+    fn read(&self, device: &mut BlockDev, offset: usize, buf: &mut [u8]) -> Result<usize, ()> {
         get_framebuffer().read(device, offset, buf)
     }
 

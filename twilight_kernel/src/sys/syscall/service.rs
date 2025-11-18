@@ -1,13 +1,13 @@
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
 use crate::driver::disk::dummy_blockdev;
 use crate::driver::timer::pit::uptime;
-use crate::sys::console::{DIR, get_tty};
+use crate::sys::console::{self, DIR, get_tty};
 use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
 use crate::sys::proc::{FdEntry, OpenFile, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
 use crate::task::executor::halt;
 use crate::{logger, print, serial_println, sys};
-use alloc::format;
+use alloc::{format, vec};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -187,12 +187,17 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
 
     let res = match file_descriptor {
         1 => {
-            print!("{}", String::from_utf8_lossy(buf));
-
-            len as i64
+            if console::pipeline_write(buf) {
+                len as i64
+            } else {
+                print!("{}", String::from_utf8_lossy(buf));
+                serial_println!("{}", String::from_utf8_lossy(buf));
+                len as i64
+            }
         }
         2 => {
             print!("{}", String::from_utf8_lossy(buf));
+            serial_println!("{}", String::from_utf8_lossy(buf));
 
             len as i64
         }
@@ -279,6 +284,10 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
 
     if fd <= 2 {
         if fd == 0 {
+            if let Some(bytes) = console::pipeline_read(buf) {
+                return bytes as i64;
+            }
+
             let flags = process.stdio_flags[0];
             let tty = get_tty();
             let mut dev = dummy_blockdev();
@@ -290,7 +299,7 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
                 }
             }
             if let Ok(v) = tty.read(&mut dev, 0, buf) {
-                return v.len() as i64;
+                return v as i64;
             }
         }
         return 0;
@@ -309,11 +318,8 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
     match vfs_node.metadata.file_type {
         FileType::Dir => -(EISDIR as i64),
         FileType::CharDevice => {
-            if let Ok(content) = vfs_node.read_with_hint(buf.len()) {
-                let copy_len = content.len().min(buf.len());
-                if copy_len > 0 {
-                    buf[..copy_len].copy_from_slice(&content[..copy_len]);
-                }
+            if let Ok(content) = vfs_node.read(buf.len(), buf) {
+                let copy_len = content.min(buf.len());
                 copy_len as i64
             } else {
                 -1
@@ -321,17 +327,10 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
         }
         _ => {
             let seek = file.seek;
-            if let Ok(content) = vfs_node.read() {
-                let copy_len = if seek < content.len() {
-                    (content.len() - seek).min(buf.len())
-                } else {
-                    0
-                };
-                if copy_len > 0 {
-                    buf[..copy_len].copy_from_slice(&content[seek..(seek + copy_len)]);
-                }
+            if let Ok(copy_len) = vfs_node.read(seek, buf) {
                 drop(vfs_node); // Release the immutable borrow before modifying file
                 file.seek += copy_len;
+                serial_println!("read: {} bytes for buf len: {}", copy_len, buf.len());
                 copy_len as i64
             } else {
                 -1
@@ -465,7 +464,10 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         return -2;
     };
 
-    let Ok(elf_buf) = elf_node.read() else {
+    let elf_size = elf_node.metadata.size;
+    let mut elf_buf = vec![0u8; elf_size];
+
+    let Ok(_) = elf_node.read(0, &mut elf_buf) else {
         return -2;
     };
 
