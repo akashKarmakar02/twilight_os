@@ -1,4 +1,4 @@
-mod memory;
+pub(crate) mod memory;
 pub mod service;
 mod utils;
 

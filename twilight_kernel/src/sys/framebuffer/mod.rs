@@ -1,9 +1,12 @@
 use crate::arch::x86_64::io::delay;
 use crate::driver::timer::pit::uptime;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
-use alloc::vec;
-use alloc::vec::Vec;
-use core::slice::SlicePattern;
+use crate::sys::memory::map_kernel_buffer;
+use crate::sys::proc::mem::{PAGE, align_up};
+use crate::sys::syscall::memory::{MAP_SHARED, PROT_EXEC, PROT_WRITE};
+use alloc::alloc::{Layout, alloc_zeroed};
+use core::slice;
+use core::{cmp, mem};
 use limine::framebuffer::Framebuffer;
 use spin::Once;
 
@@ -40,7 +43,9 @@ pub struct TwilightFrameBuffer {
     pub height: u64,
     pub width: u64,
     pub pitch: u64,
-    pub pixel_buf: Vec<u32>,
+    pixel_ptr: *mut u32,
+    pixel_len: usize,
+    pixel_capacity_bytes: usize,
 }
 
 impl TwilightFrameBuffer {
@@ -56,12 +61,23 @@ impl TwilightFrameBuffer {
 
         assert_eq!(framebuffer.len(), (width * height));
 
+        let storage_bytes = align_up(cmp::max(byte_len, fb.pitch() as usize * height), PAGE);
+        let layout =
+            Layout::from_size_align(storage_bytes, PAGE).expect("invalid framebuffer layout");
+        let raw_ptr = unsafe { alloc_zeroed(layout) };
+        assert!(
+            !raw_ptr.is_null(),
+            "failed to allocate framebuffer shadow buffer"
+        );
+
         Self {
             video_buf: framebuffer,
             width: width as u64,
             height: height as u64,
             pitch: fb.pitch(), // bytes per scanline in VRAM
-            pixel_buf: vec![0; width * height], // compact RGBx buffer (u32 per pixel)
+            pixel_ptr: raw_ptr.cast::<u32>(),
+            pixel_len: width * height,
+            pixel_capacity_bytes: storage_bytes,
         }
     }
 
@@ -76,6 +92,28 @@ impl TwilightFrameBuffer {
     }
 
     #[inline]
+    fn pixels(&self) -> &[u32] {
+        unsafe { slice::from_raw_parts(self.pixel_ptr, self.pixel_len) }
+    }
+
+    #[inline]
+    fn pixels_mut(&mut self) -> &mut [u32] {
+        unsafe { slice::from_raw_parts_mut(self.pixel_ptr, self.pixel_len) }
+    }
+
+    pub fn shared_mem_ptr(&self) -> usize {
+        self.pixel_ptr as usize
+    }
+
+    pub fn shared_mem_len(&self) -> usize {
+        self.pixel_capacity_bytes
+    }
+
+    pub fn pixel_bytes(&self) -> usize {
+        self.pixel_len * mem::size_of::<u32>()
+    }
+
+    #[inline]
     fn idx(&self, x: u64, y: u64) -> usize {
         (y * self.width + x) as usize
     }
@@ -85,12 +123,12 @@ impl TwilightFrameBuffer {
             return;
         }
         let i = self.idx(x, y);
-        self.pixel_buf[i] = color;
+        self.pixels_mut()[i] = color;
     }
 
     pub fn clear_buf(&mut self, color: u32) {
         // fill CPU-side backbuffer only
-        self.pixel_buf.fill(color);
+        self.pixels_mut().fill(color);
     }
 
     pub fn fill_rect_buf(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
@@ -106,25 +144,37 @@ impl TwilightFrameBuffer {
         for yy in y0..y1 {
             let row_start = self.idx(x0, yy);
             let row_end = self.idx(x1 - 1, yy) + 1;
-            self.pixel_buf[row_start..row_end].fill(color);
+            self.pixels_mut()[row_start..row_end].fill(color);
         }
     }
 
     pub fn sync_full(&mut self) {
-        self.video_buf.copy_from_slice(self.pixel_buf.as_slice());
+        let pixel_data = unsafe {
+            slice::from_raw_parts(self.pixel_ptr, self.pixel_len)
+        };
+        self.video_buf.copy_from_slice(pixel_data);
     }
 
     // Optional: keep sync_partial but fix bounds (end is exclusive)
     pub fn sync_partial(&mut self, pixel_start: u64, pixel_count: u64) {
-        let total = self.pixel_buf.len() as u64;
+        let total = self.pixel_len as u64;
         let start = pixel_start.min(total);
         let end = (start + pixel_count).min(total);
         if start >= end {
             return;
         }
 
-        self.video_buf[(start as usize)..(end as usize)]
-            .copy_from_slice(&self.pixel_buf.as_slice()[(start as usize)..(end as usize)]);
+        let start_idx = start as usize;
+        let end_idx = end as usize;
+
+        // Create a temporary slice of the required data
+        let pixel_data = unsafe {
+            // We know this is safe because we're just reading from pixel_ptr
+            // which is a buffer we own, and not modifying it
+            slice::from_raw_parts(self.pixel_ptr.add(start_idx), end_idx - start_idx)
+        };
+
+        self.video_buf[start_idx..end_idx].copy_from_slice(pixel_data);
     }
 
     pub fn scroll_up(&mut self, lines: u64, fill_color: u32) {
@@ -154,7 +204,10 @@ impl TwilightFrameBuffer {
         // Fill the bottom cleared area
         let fill_start = (h - scroll) * w;
         self.video_buf[fill_start..].fill(fill_color);
-        self.pixel_buf.copy_from_slice(self.video_buf.as_slice());
+
+        // Create a temporary copy to avoid the borrow conflict
+        let video_buf_copy = unsafe { core::slice::from_raw_parts(self.video_buf.as_ptr(), self.video_buf.len()) };
+        self.pixels_mut().copy_from_slice(&video_buf_copy);
     }
 
     /// Scroll the framebuffer content down by `lines` pixels.
@@ -174,10 +227,11 @@ impl TwilightFrameBuffer {
 
         // Copy downwards safely to prevent overlap corruption
         for i in 0..(h - scroll) * w {
-            self.pixel_buf[dst_start + i] = self.pixel_buf[src_start + i];
+            let val = self.pixels()[src_start + i];
+            self.pixels_mut()[dst_start + i] = val;
         }
         // Fill top area
-        self.pixel_buf[0..(scroll * w)].fill(fill_color);
+        self.pixels_mut()[0..(scroll * w)].fill(fill_color);
     }
 
     pub fn animate_bouncing_rect(&mut self, duration_ms: u64) {
@@ -427,11 +481,19 @@ impl VfsNodeOps for TwilightFrameBuffer {
             return Err(());
         }
 
-        let buf_u32 =
-            unsafe { core::slice::from_raw_parts(buffer.as_ptr() as *const u32, buffer.len() / 4) };
+        let buf_u32 = unsafe {
+            core::slice::from_raw_parts(buffer.as_ptr() as *const u32, buffer.len() / 4)
+        };
 
-        self.video_buf[offset..(offset) + buf_u32.len()].copy_from_slice(buf_u32);
-        self.pixel_buf[offset..(offset) + buf_u32.len()].copy_from_slice(buf_u32);
+        // `offset` is provided in pixel units by console + /dev/fb0 writers.
+        let start = offset;
+        let end = start + buf_u32.len();
+        if end > self.video_buf.len() {
+            return Err(());
+        }
+
+        self.video_buf[start..end].copy_from_slice(buf_u32);
+        self.pixels_mut()[start..end].copy_from_slice(buf_u32);
 
         Ok(())
     }
@@ -481,7 +543,7 @@ impl VfsNodeOps for TwilightFrameBuffer {
             }
 
             FBIOPAN_DISPLAY => {
-                // Optional — just acknowledge panning request for now
+                self.sync_full();
                 Ok(0)
             }
 
@@ -561,5 +623,43 @@ impl VfsNodeOps for FramebufferDev {
 
     fn unlink(&mut self, device: &mut BlockDev) -> Result<i32, ()> {
         get_framebuffer_mut().unlink(device)
+    }
+
+    fn mmap(
+        &mut self,
+        _device: &mut BlockDev,
+        process: &mut crate::sys::proc::Process,
+        addr: usize,
+        len: usize,
+        prot: usize,
+        flags: usize,
+        offset: usize,
+    ) -> Result<usize, i32> {
+        if offset != 0 {
+            return Err(-22);
+        }
+        if (flags & MAP_SHARED) == 0 {
+            return Err(-38);
+        }
+
+        let fb = get_framebuffer();
+        if len == 0 || len > fb.shared_mem_len() {
+            return Err(-22);
+        }
+
+        let writable = (prot & PROT_WRITE) != 0;
+        let executable = (prot & PROT_EXEC) != 0;
+
+        map_kernel_buffer(
+            &mut process.mapper,
+            fb.shared_mem_ptr(),
+            len,
+            addr,
+            writable,
+            executable,
+        )
+        .map_err(|_| -12)?;
+
+        Ok(addr)
     }
 }

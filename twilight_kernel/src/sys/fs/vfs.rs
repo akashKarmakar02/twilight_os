@@ -1,6 +1,7 @@
 use crate::driver::disk::BlockDeviceIO;
-use crate::sys::fs::twilight_fs::TfsError;
 use crate::sys::fs::twilight_fs::inode::Inode;
+use crate::sys::fs::twilight_fs::TfsError;
+use crate::sys::proc::Process;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -123,6 +124,20 @@ impl VfsNode {
     pub fn ioctl(&mut self, cmd: u64, arg: usize) -> Result<i64, ()> {
         self.node.write().ioctl(&mut self.device, cmd, arg)
     }
+
+    pub fn mmap(
+        &mut self,
+        process: &mut Process,
+        addr: usize,
+        len: usize,
+        prot: usize,
+        flags: usize,
+        offset: usize,
+    ) -> Result<usize, i32> {
+        self.node
+            .write()
+            .mmap(&mut self.device, process, addr, len, prot, flags, offset)
+    }
 }
 
 impl Clone for VfsNode {
@@ -141,6 +156,18 @@ pub trait VfsNodeOps: Send + Sync + 'static {
     fn poll(&self, device: &mut BlockDev) -> Result<bool, ()>;
     fn ioctl(&mut self, device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()>;
     fn unlink(&mut self, device: &mut BlockDev) -> Result<i32, ()>;
+    fn mmap(
+        &mut self,
+        _device: &mut BlockDev,
+        _process: &mut Process,
+        _addr: usize,
+        _len: usize,
+        _prot: usize,
+        _flags: usize,
+        _offset: usize,
+    ) -> Result<usize, i32> {
+        Err(-38)
+    }
 }
 
 pub trait FileSystem: Send + Sync + 'static {

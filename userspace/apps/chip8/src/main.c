@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -14,6 +15,7 @@
 #define FB_PATH "/dev/fb0"
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOGET_FSCREENINFO 0x4602
+#define FBIOPAN_DISPLAY 0x4606
 
 struct fb_var_screeninfo {
     uint32_t xres;
@@ -164,7 +166,7 @@ static void chip8_set_key(Chip8 *c, int key, int pressed, uint64_t now) {
         return;
     }
     if (pressed) {
-        c->key_hold_until[key] = now + 10;
+        c->key_hold_until[key] = now + 3;
         c->keys[key] = 1;
         if (c->wait_for_key) {
             c->V[c->wait_reg] = (uint8_t)key;
@@ -626,27 +628,6 @@ static void render_framebuffer(uint32_t *fb, uint32_t width, uint32_t height, co
     }
 }
 
-static int write_all(int fd, const void *buf, size_t len);
-
-static int write_all(int fd, const void *buf, size_t len) {
-    const uint8_t *p = buf;
-    size_t done = 0;
-    while (done < len) {
-        ssize_t n = write(fd, p + done, len - done);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        if (n == 0) {
-            break;
-        }
-        done += (size_t)n;
-    }
-    return done == len ? 0 : -1;
-}
-
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s /path/to/rom\n", argv[0]);
@@ -674,19 +655,20 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    size_t pixel_count = (size_t)var.xres * (size_t)var.yres;
-    uint32_t *frame = calloc(pixel_count, sizeof(uint32_t));
-    if (!frame) {
-        perror("calloc frame");
+    size_t frame_bytes = (size_t)fix.smem_len;
+    uint32_t *frame = mmap(NULL, frame_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
+    if (frame == MAP_FAILED) {
+        perror("mmap framebuffer");
         close(fb);
         restore_terminal();
         return 1;
     }
+    memset(frame, 0, frame_bytes);
 
     Chip8 chip;
     chip8_reset(&chip);
     if (chip8_load_rom(&chip, argv[1]) != 0) {
-        free(frame);
+        munmap(frame, frame_bytes);
         close(fb);
         restore_terminal();
         return 1;
@@ -695,7 +677,7 @@ int main(int argc, char **argv) {
     uint64_t last_timer = ms_now();
     const uint64_t timer_interval = 1000 / 60;
     const int cycles_per_frame = 10;
-    struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 1 * 1000 /60 };
+    struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 1 * 1000 * 10 };
     int running = 1;
 
     while (running) {
@@ -726,8 +708,10 @@ int main(int argc, char **argv) {
 
         if (chip.draw_flag) {
             render_framebuffer(frame, var.xres, var.yres, &chip);
-            if (lseek(fb, 0, SEEK_SET) == 0) {
-                write_all(fb, frame, pixel_count * sizeof(uint32_t));
+            if (ioctl(fb, FBIOPAN_DISPLAY, NULL) < 0) {
+                perror("fb flush");
+                running = 0;
+                break;
             }
             chip.draw_flag = 0;
         }
@@ -735,10 +719,9 @@ int main(int argc, char **argv) {
         nanosleep(&sleep_ts, NULL);
     }
 
-    memset(frame, 0, pixel_count * sizeof(uint32_t));
-    lseek(fb, 0, SEEK_SET);
-    write_all(fb, frame, pixel_count * sizeof(uint32_t));
-    free(frame);
+    memset(frame, 0, frame_bytes);
+    ioctl(fb, FBIOPAN_DISPLAY, NULL);
+    munmap(frame, frame_bytes);
     close(fb);
     restore_terminal();
     return 0;

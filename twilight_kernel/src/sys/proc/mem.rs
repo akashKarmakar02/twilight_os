@@ -1,4 +1,5 @@
 use crate::sys::memory::{alloc_pages, dealloc_pages};
+use alloc::vec::Vec;
 use x86_64::structures::paging::OffsetPageTable;
 pub const PAGE: usize = 4096;
 #[inline]
@@ -22,6 +23,20 @@ pub struct ProcMM {
     pub mapped_heap_end: usize,
     /// Cursor for picking addresses for mmap(NULL,...).
     pub mmap_base_hint: usize,
+    pub mmap_regions: Vec<MmapRegion>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MmapKind {
+    Owned,
+    Shared,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MmapRegion {
+    pub base: usize,
+    pub len: usize,
+    pub kind: MmapKind,
 }
 
 impl ProcMM {
@@ -32,6 +47,7 @@ impl ProcMM {
             brk_cur: heap_start,
             mapped_heap_end: heap_start,
             mmap_base_hint: 0,
+            mmap_regions: Vec::new(),
         }
     }
 
@@ -89,6 +105,23 @@ impl ProcMM {
         }
         self.mmap_base_hint = end;
         Some(base)
+    }
+
+    pub fn track_mmap(&mut self, base: usize, len: usize, kind: MmapKind) {
+        let region = MmapRegion { base, len, kind };
+        self.mmap_regions.push(region);
+    }
+
+    pub fn remove_mmap(&mut self, base: usize, len: usize) -> Option<MmapKind> {
+        if let Some(pos) = self
+            .mmap_regions
+            .iter()
+            .position(|r| r.base == base && r.len == len)
+        {
+            Some(self.mmap_regions.remove(pos).kind)
+        } else {
+            None
+        }
     }
 
     #[inline]
