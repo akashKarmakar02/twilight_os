@@ -5,7 +5,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 use twilight_common::syscall::types::EISDIR;
-use crate::serial_println;
 
 #[allow(dead_code)]
 #[repr(u16)]
@@ -57,9 +56,9 @@ impl VfsNodeOps for TFSVfsNode {
             return Ok(0); // nothing to read
         }
 
-        let mut content = Vec::new();
         let max_to_read = core::cmp::min(file_size - lba, buf.len());
         let mut remaining = max_to_read;
+        let mut written = 0;
 
         let zones = self.inode.zones;
 
@@ -82,9 +81,10 @@ impl VfsNodeOps for TFSVfsNode {
             let available_in_block = block_size - start;
             let to_read = core::cmp::min(remaining, available_in_block);
 
-            content.extend_from_slice(&buffer[start..start + to_read]);
+            buf[written..written + to_read].copy_from_slice(&buffer[start..start + to_read]);
 
             remaining -= to_read;
+            written += to_read;
             block_offset = 0;
             if remaining == 0 {
                 break;
@@ -126,9 +126,11 @@ impl VfsNodeOps for TFSVfsNode {
                 let available_in_block = block_size - start;
                 let to_read = core::cmp::min(remaining, available_in_block);
 
-                content.extend_from_slice(&indirect_content_buf[start..start + to_read]);
+                buf[written..written + to_read]
+                    .copy_from_slice(&indirect_content_buf[start..start + to_read]);
 
                 remaining -= to_read;
+                written += to_read;
                 block_offset = 0;
                 block_index += 1;
 
@@ -188,9 +190,11 @@ impl VfsNodeOps for TFSVfsNode {
                     let available_in_block = block_size - start;
                     let to_read = core::cmp::min(remaining, available_in_block);
 
-                    content.extend_from_slice(&indirect_content_buf[start..start + to_read]);
+                    buf[written..written + to_read]
+                        .copy_from_slice(&indirect_content_buf[start..start + to_read]);
 
                     remaining -= to_read;
+                    written += to_read;
                     block_offset = 0;
                     block_index += 1;
                     if remaining == 0 {
@@ -200,10 +204,7 @@ impl VfsNodeOps for TFSVfsNode {
             }
         }
 
-        serial_println!("size of buf: {}, size of content: {}", buf.len(), content.len());
-        buf[0..content.len()].copy_from_slice(content.as_slice());
-
-        Ok(content.len())
+        Ok(written)
     }
 
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()> {
