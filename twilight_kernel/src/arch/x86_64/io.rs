@@ -1,5 +1,4 @@
 use crate::driver::cpu::has_fsgsbase;
-use crate::serial_println;
 use core::arch::asm;
 use x86_64::VirtAddr;
 
@@ -284,7 +283,6 @@ pub fn set_inactive_gsbase() -> fn(base: VirtAddr) {
     }
 
     fn with_wrmsr(base: VirtAddr) {
-        serial_println!("Here");
         wrmsr(IA32_KERNEL_GSBASE, base.as_u64());
     }
 

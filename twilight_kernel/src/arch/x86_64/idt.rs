@@ -1,5 +1,5 @@
 use crate::arch::x86_64::gdt;
-use crate::{print, println, serial_println};
+use crate::{print, println};
 use alloc::string::String;
 use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
 use lazy_static::lazy_static;
@@ -43,9 +43,6 @@ lazy_static! {
             idt.double_fault
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-            idt[NIC_IRQ_VECTOR]
-                .set_handler_fn(nic_irq_handler)
-                .set_stack_index(1);
         }
         idt[interrupt_index(0)].set_handler_fn(timer_interrupt_handler);
         idt[interrupt_index(1)].set_handler_fn(keyboard_interrupt_handler);
@@ -211,7 +208,6 @@ use x86_64::registers::control::Cr2;
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
-const NIC_IRQ_VECTOR: u8 = 0x2B; // example: IRQ 11 remapped to vector 0x2B
 
 pub static PICS: Mutex<ChainedPics> =
     Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
@@ -229,10 +225,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(0));
     }
-}
-
-extern "x86-interrupt" fn nic_irq_handler(_stack: InterruptStackFrame) {
-    serial_println!("HEre");
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

@@ -1,10 +1,10 @@
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
+use crate::println;
 use crate::sys::fs::init;
 use crate::sys::fs::partition::{self, PartitionEntry};
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::sys::fs::twilight_fs::inode::Inode;
-use crate::{println, serial_println};
 use alloc::format;
 use alloc::vec::Vec;
 use core::cmp;
@@ -116,7 +116,6 @@ pub fn main() {
         while let Some(cpio_res) = initramfs.next() {
             match cpio_res {
                 Ok(entry) => {
-                    serial_println!("{:?}", entry.filename());
                     if entry.header.is_regular_file() {
                         copy_file(
                             format!("/{}", entry.filename().unwrap()).as_str(),

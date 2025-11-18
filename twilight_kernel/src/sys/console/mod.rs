@@ -5,7 +5,7 @@ use crate::driver::disk::dummy_blockdev;
 pub(crate) use crate::sys::console::tty::{Tty, get_tty};
 use crate::sys::fs::vfs::{VFS, VfsNodeOps};
 use crate::sys::proc::{PROCESS_TABLE, Process};
-use crate::{print, println, serial_println};
+use crate::{print, println};
 use alloc::collections::VecDeque;
 use alloc::{format, vec};
 use alloc::string::String;
@@ -131,8 +131,6 @@ fn handle_console_input() {
                     #[allow(static_mut_refs)]
                     let cmd = unsafe { CONSOLE_HISTORY.get_unchecked(len - *idx - 1) };
 
-                    serial_println!("{}", *idx);
-
                     let mut stdio = STDIO.lock();
                     stdio.clear();
                     stdio.push_str(cmd);
@@ -248,8 +246,6 @@ fn execute_command_line(cmd_line: &str) {
         .filter(|seg| seg.trim() != "")
         .map(|seg| seg.trim())
         .collect();
-
-    serial_println!("{:?}", segments);
 
     if segments.len() == 1 {
         let args: Vec<&str> = segments[0].split_whitespace().collect();

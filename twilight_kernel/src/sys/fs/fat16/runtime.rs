@@ -1,8 +1,8 @@
+use crate::driver;
 use crate::driver::disk::AtaBlockDevice;
 use crate::sys::fs::partition;
 use crate::sys::fs::partition::PartitionEntry;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, Metadata, VfsNode, VfsNodeOps};
-use crate::{driver, serial_println};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -490,7 +490,6 @@ pub fn detect_fat16_partition(bus: u8, dsk: u8) -> Option<PartitionEntry> {
     }
     let entries = partition::decode_entries(&sector);
     entries.into_iter().find(|entry| {
-        serial_println!("0x{:X}", entry.partition_type);
         entry.is_present()
             && is_fat16_type(entry.partition_type)
             && validate_fat16_boot_sector(bus, dsk, entry)

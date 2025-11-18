@@ -6,11 +6,11 @@ use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
 use crate::sys::proc::{FdEntry, OpenFile, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
 use crate::task::executor::halt;
-use crate::{logger, print, serial_println, sys};
-use alloc::{format, vec};
+use crate::{logger, print, sys};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use core::arch::asm;
 use spin::mutex::Mutex;
 use twilight_common::syscall::types::*;
@@ -191,13 +191,11 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
                 len as i64
             } else {
                 print!("{}", String::from_utf8_lossy(buf));
-                serial_println!("{}", String::from_utf8_lossy(buf));
                 len as i64
             }
         }
         2 => {
             print!("{}", String::from_utf8_lossy(buf));
-            serial_println!("{}", String::from_utf8_lossy(buf));
 
             len as i64
         }
@@ -330,7 +328,6 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
             if let Ok(copy_len) = vfs_node.read(seek, buf) {
                 drop(vfs_node); // Release the immutable borrow before modifying file
                 file.seek += copy_len;
-                serial_println!("read: {} bytes for buf len: {}", copy_len, buf.len());
                 copy_len as i64
             } else {
                 -1
@@ -344,7 +341,6 @@ pub fn open(path: &str, flags: i32, mode: u32) -> i64 {
 }
 
 pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
-    serial_println!("{}", path);
     #[allow(static_mut_refs)]
     let proc_option = unsafe {
         PROCESS_TABLE
