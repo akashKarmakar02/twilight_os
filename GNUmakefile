@@ -266,7 +266,7 @@ ifeq ($(KARCH),loongarch64)
 endif
 	rm -rf iso_root
 
-$(IMAGE_NAME).hdd: limine/limine kernel
+$(IMAGE_NAME).hdd: limine/limine kernel userspace cpio
 	rm -f $(IMAGE_NAME).hdd
 	dd if=/dev/zero bs=1M count=0 seek=1024 of=$(IMAGE_NAME).hdd
 	PATH=$$PATH:/usr/sbin:/sbin sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00 -m 1
