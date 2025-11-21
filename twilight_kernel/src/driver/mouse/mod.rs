@@ -3,7 +3,6 @@ pub mod ps2;
 use crate::arch::x86_64::halt;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
 use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
 

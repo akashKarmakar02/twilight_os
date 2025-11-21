@@ -1,3 +1,4 @@
+#![allow(unused_assignments)]
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
 use crate::println;

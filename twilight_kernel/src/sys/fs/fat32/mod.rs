@@ -227,6 +227,7 @@ impl<'a> FatBuilder<'a> {
     }
 }
 
+#[allow(dead_code)]
 struct Directory {
     name: String,
     parent: Option<usize>,

@@ -34,6 +34,7 @@ pub struct Fat16Fs {
     inner: Arc<Mutex<Fat16Inner>>,
 }
 
+#[allow(dead_code)]
 struct Fat16Inner {
     device: BlockDev,
     start_lba: u32,

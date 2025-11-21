@@ -2,7 +2,6 @@ use crate::sys::fs::twilight_fs::{read_tfs_block, write_tfs_block};
 use crate::sys::fs::vfs::{BlockDev, FsCtx, VfsNodeOps};
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use spin::Mutex;
 use twilight_common::syscall::types::EISDIR;
 
