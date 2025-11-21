@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::logger;
 use crate::sys::memory::{alloc_pages, dealloc_pages, unmap_user_pages};
 use crate::sys::proc::PROCESS_TABLE;
@@ -86,7 +87,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
             return EBADF;
         };
         let file_ref = entry.file.clone();
-        let mut file = file_ref.lock();
+        let file = file_ref.lock();
         let mut vfs_node = file.node.lock();
         match vfs_node.mmap(&mut process, va, len, prot, flags, offset as usize) {
             Ok(mapped) => {

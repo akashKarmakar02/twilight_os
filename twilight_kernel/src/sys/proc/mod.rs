@@ -1,8 +1,9 @@
 pub mod mem;
 pub mod switch;
+mod task;
 pub(crate) mod user;
 
-use crate::arch::x86_64::gdt::{USER_CS, USER_SS};
+use crate::arch::x86_64::gdt::{SegmentSelector, USER_CS, USER_SS};
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
 use crate::println;
@@ -11,13 +12,19 @@ use crate::sys::fs::vfs::{VFS, VfsNode};
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
+use crate::sys::proc::switch::{read_cr3};
+use crate::sys::proc::task::{FpuState, Context, allocate_switch_stack, switch_tasks};
 use crate::sys::proc::user::USER_ENV;
+use crate::utils::StackHelper;
+use alloc::alloc::alloc_zeroed;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::alloc::Layout;
+use core::arch::naked_asm;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
@@ -37,6 +44,63 @@ const MAIN_DYN_LOAD_BASE: u64 = 0x4000_0000;
 const INTERP_DYN_LOAD_BASE: u64 = 0x6000_0000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
+
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct ScratchRegisters {
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rax: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct PreservedRegisters {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct IretRegisters {
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+impl IretRegisters {
+    pub fn is_user(&self) -> bool {
+        let selector = SegmentSelector::from_bits(self.cs as u16);
+        selector.privilege_level().is_user()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct InterruptStack {
+    pub preserved: PreservedRegisters,
+    pub scratch: ScratchRegisters,
+    pub iret: IretRegisters,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct InterruptErrorStack {
+    pub code: u64,
+    pub stack: InterruptStack,
+}
 
 #[repr(C, packed)]
 #[derive(Debug)]
@@ -132,7 +196,12 @@ pub struct FdEntry {
 
 #[repr(C)]
 pub struct Process {
-    // pub frame: TrapFrame,
+    pub context: *mut Context,
+    pub context_switch_rsp: VirtAddr,
+    pub fpu_storage: Option<FpuState>,
+    pub gs_base: VirtAddr,
+    pub fs_base: VirtAddr,
+
     pub stack: u64, // point to user_stack
     pub stack_size: usize,
     pub mapper: OffsetPageTable<'static>,
@@ -143,8 +212,6 @@ pub struct Process {
     pub state: ProcessState,
     pub addr_size_vec: Vec<(u64, usize)>,
     pub pwd: String,
-    pub gs_base: VirtAddr,
-    pub fs_base: VirtAddr,
     pub fd_table: Vec<Option<FdEntry>>,
     pub stdio_flags: [i32; 3],
     pub stdio_fd_flags: [i32; 3],
@@ -267,7 +334,15 @@ impl Process {
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let proc_mm = Box::new(ProcMM::new(max_end as usize));
 
+        let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
+
+        let stack_ptr = switch_stack as u64;
+
         let p = Process {
+            context: core::ptr::null_mut(),
+            context_switch_rsp: VirtAddr::new(stack_ptr),
+            fpu_storage: Some(FpuState::default()),
+
             stack: user_rsp,
             stack_size: USER_STACK_SIZE,
             entry_point: entry_point_addr,
@@ -341,6 +416,18 @@ pub fn exit() {
     }
 }
 
+#[unsafe(naked)]
+unsafe extern "C" fn iretq_init() {
+    naked_asm!(
+        "cli",
+        // pop the error code
+        "add rsp, 8",
+        crate::arch::x86_64::asm_utils::pop_preserved!(),
+        crate::arch::x86_64::asm_utils::pop_scratch!(),
+        "iretq",
+    )
+}
+
 pub fn init() {
     #[allow(static_mut_refs)]
     unsafe {
@@ -357,6 +444,32 @@ pub fn init() {
 
     let proc_mm = Box::new(ProcMM::new(0));
 
+    let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
+
+    let mut stack_ptr = switch_stack as u64;
+    let mut stack = StackHelper::new(&mut stack_ptr);
+
+    let task_stack = unsafe {
+        let layout = Layout::from_size_align_unchecked(4096 * 16, 0x1000);
+        alloc_zeroed(layout).add(layout.size())
+    };
+
+    // Skip the frame initialization - stack segment will be set elsewhere
+    let kframe = stack.offset::<InterruptErrorStack>();
+
+    // Alternatively, could store the segment selector for later use if needed
+    kframe.stack.iret.ss = 0x10;
+    kframe.stack.iret.cs = 0x08;
+    kframe.stack.iret.rip = init_console as u64;
+    kframe.stack.iret.rflags = 0x200;
+    kframe.stack.iret.rsp = task_stack as u64;
+
+    let context = stack.offset::<Context>();
+
+    *context = Context::default();
+    context.rip = iretq_init as u64;
+    context.cr3 = read_cr3();
+
     #[allow(static_mut_refs)]
     unsafe {
         PROCESS_TABLE
@@ -364,6 +477,10 @@ pub fn init() {
             .unwrap()
             .proc_list
             .push_back(Process {
+                context,
+                context_switch_rsp: VirtAddr::new(stack_ptr),
+                fpu_storage: Some(FpuState::default()),
+
                 pid,
                 addr_size_vec: Vec::new(),
                 stack: 0,
@@ -382,6 +499,37 @@ pub fn init() {
                 stdio_fd_flags: [0; 3],
             })
     }
+
+    let (f, _) = Cr3::read();
+    let page_table = crate::memory::create_page_table(f);
+    let mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+
+    let mut idle_task = Process {
+        context: core::ptr::null_mut(),
+        stack: 0,
+        fs_base: VirtAddr::zero(),
+        gs_base: VirtAddr::zero(),
+        proc_mm: Box::new(ProcMM::new(0)),
+        parent_pid: 1,
+        pid: 1,
+        pwd: String::from("/"),
+        context_switch_rsp: VirtAddr::zero(),
+        mapper,
+        fpu_storage: Some(FpuState::default()),
+        entry_point: 0,
+        addr_size_vec: Vec::new(),
+        page_table_frame: f,
+        fd_table: Vec::new(),
+        state: ProcessState::Running,
+        stack_size: 0,
+        stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
+        stdio_fd_flags: [0; 3],
+    };
+
+    #[allow(static_mut_refs)]
+    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(1).unwrap() };
+
+    switch_tasks(&mut idle_task, proc);
 }
 
 #[repr(C)]

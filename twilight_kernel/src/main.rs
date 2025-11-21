@@ -144,7 +144,9 @@ unsafe extern "C" fn kmain() -> ! {
 
     // sys::proc::switch::switch_demo();
     // sys::console::framebuffer::init();
-    sys::console::init_console();
+    // sys::console::init_console();
+
+    sys::proc::init();
 
     hcf()
 }
@@ -219,8 +221,6 @@ pub fn init(
     arch::x86_64::gdt::init_after_boot();
 
     arch::x86_64::syscall::init();
-
-    sys::proc::init();
 
     x86_64::instructions::interrupts::enable();
     driver::timer::init();

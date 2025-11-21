@@ -99,6 +99,48 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let rip_ptr = rip as *const u8;
+
+    // read bytes
+    let mut instr_bytes = [0u8; 16];
+    unsafe {
+        for i in 0..instr_bytes.len() {
+            instr_bytes[i] = *rip_ptr.add(i);
+        }
+    }
+
+    // decode
+    let mut decoder = Decoder::with_ip(64, &instr_bytes, rip, DecoderOptions::NONE);
+    let instruction = decoder.decode();
+    let mut formatter = IntelFormatter::new();
+    let mut output = String::new();
+    formatter.format(&instruction, &mut output);
+
+    // CR2 = faulting linear address
+    let fault_addr = Cr2::read();
+
+    println!("Decoded: {}", output);
+    println!("CR2 (faulting linear/virtual): {:?}", fault_addr);
+    println!("Error code: {:?}\n{:#?}", error_code, stack_frame);
+
+    // Check whether instruction has a memory operand
+    use iced_x86::OpKind;
+    for i in 0..instruction.op_count() {
+        match instruction.op_kind(i) {
+            OpKind::Memory => {
+                println!(
+                    "Instruction has memory operand: base={:?} index={:?} scale={} disp={:#x}",
+                    instruction.memory_base(),
+                    instruction.memory_index(),
+                    instruction.memory_index_scale(),
+                    instruction.memory_displacement64()
+                );
+            }
+            _ => {}
+        }
+    }
+
     let index = (error_code >> 3) & 0x1fff;
     let ti = (error_code >> 2) & 1;
     let rpl = error_code & 0b11;
