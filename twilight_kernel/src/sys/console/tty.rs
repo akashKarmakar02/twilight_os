@@ -631,7 +631,11 @@ impl VfsNodeOps for Tty {
             }
         }
 
-        Ok(i+1)
+        if buf.len() == i {
+            Ok(i)
+        } else {
+            Ok(i+1)
+        }
     }
 
     fn write(&mut self, _device: &mut BlockDev, _lba: usize, data: &[u8]) -> Result<(), ()> {
