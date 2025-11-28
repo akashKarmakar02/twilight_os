@@ -159,8 +159,8 @@ impl FramebufferTerminal {
             _ => {}
         }
 
-        // Clamp to printable 32..=126; render others as space so font index is valid
-        let ch = if (32..=126).contains(&c) { c } else { b' ' };
+        // Keep controls invisible; everything else can use the expanded font table
+        let ch = if c.is_ascii_control() { b'?' } else { c };
 
         let x = self.cursor_x * Self::CHAR_W;
         let y = self.cursor_y * Self::CHAR_H;
@@ -224,12 +224,10 @@ impl FramebufferTerminal {
             )
         };
 
-        // Guard index into PSF_FONTS
-        let glyph_opt = if (32..=126).contains(&ascii) {
-            PSF_FONTS.get((ascii - 32) as usize)
-        } else {
-            PSF_FONTS.get(0) // space
-        };
+        // Grab glyph from expanded font table; fall back to '?' if somehow missing
+        let glyph_opt = PSF_FONTS
+            .get(ascii as usize)
+            .or_else(|| PSF_FONTS.get(b'?' as usize));
 
         if let Some(font_bitmap) = glyph_opt {
             #[allow(static_mut_refs)]
@@ -250,8 +248,7 @@ impl FramebufferTerminal {
                     }
 
                     let pixel_offset = (y + row) * pitch_pixels + x; // pixel index
-                    fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf)
-                        .unwrap();
+                    fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf).unwrap();
                 }
 
                 // Optional: sync only the glyph area

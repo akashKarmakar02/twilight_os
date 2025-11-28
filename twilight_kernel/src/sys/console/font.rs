@@ -1,4 +1,7 @@
-pub static PSF_FONTS: [[u16; 16]; 95] = [
+const ASCII_PRINTABLE_START: usize = 32;
+
+#[rustfmt::skip]
+const BASE_PSF_FONTS: [[u16; 16]; 95] = [
     [
         0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
         0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
@@ -475,3 +478,26 @@ pub static PSF_FONTS: [[u16; 16]; 95] = [
         0b00000000, 0b00000000,
     ],
 ];
+
+const fn build_full_font_table() -> [[u16; 16]; 256] {
+    // Default every slot to the '?' glyph so unknown characters render visibly.
+    let mut table = [[0u16; 16]; 256];
+    let fallback = BASE_PSF_FONTS[(b'?' as usize) - ASCII_PRINTABLE_START];
+
+    let mut i = 0;
+    while i < table.len() {
+        table[i] = fallback;
+        i += 1;
+    }
+
+    // Overlay the printable ASCII range we have bitmaps for.
+    let mut printable_idx = 0;
+    while printable_idx < BASE_PSF_FONTS.len() {
+        table[ASCII_PRINTABLE_START + printable_idx] = BASE_PSF_FONTS[printable_idx];
+        printable_idx += 1;
+    }
+
+    table
+}
+
+pub static PSF_FONTS: [[u16; 16]; 256] = build_full_font_table();
