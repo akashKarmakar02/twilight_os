@@ -1,0 +1,77 @@
+#![no_std]
+
+use alloc::string::String;
+use alloc::sync::Arc;
+
+use limine::modules::module_manager::Module;
+use crate::sys::pci::pci_device::PciDevice;
+use x86_64::instructions::interrupts::*;
+
+/* =========================================================
+   PCI Device Driver Trait
+========================================================= */
+
+pub trait PciDeviceDriver: Module {
+    /* -----------------------------------------------------
+       Lifecycle hooks
+    ----------------------------------------------------- */
+
+    fn init_device(&mut self) -> bool;
+    fn start_device(&mut self) -> bool;
+    fn shutdown_device(&mut self) -> bool;
+
+    /* -----------------------------------------------------
+       Device attachment
+    ----------------------------------------------------- */
+
+    fn attach_device(
+        &mut self,
+        dev: Arc<PciDevice>,
+        enable_bus_mastering: bool,
+    );
+}
+
+/* =========================================================
+   Common PCI Driver State
+========================================================= */
+
+pub struct PciDeviceDriverState {
+    name: String,
+    pci_dev: Option<Arc<PciDevice>>,
+    irq_vector: Option<u8>,
+}
+
+impl PciDeviceDriverState {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: String::from(name),
+            pci_dev: None,
+            irq_vector: None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn pci_device(&self) -> Option<&Arc<PciDevice>> {
+        self.pci_dev.as_ref()
+    }
+
+    pub fn irq_vector(&self) -> Option<IrqVector> {
+        self.irq_vector
+    }
+
+    pub fn attach_device(
+        &mut self,
+        dev: Arc<PciDevice>,
+        enable_bus_mastering: bool,
+    ) {
+        if enable_bus_mastering {
+            dev.enable_bus_mastering();
+        }
+
+        self.irq_vector = dev.allocate_irq();
+        self.pci_dev = Some(dev);
+    }
+}

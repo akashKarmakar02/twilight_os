@@ -220,7 +220,7 @@ unsafe impl GlobalAlloc for LockedHeap {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: We we need to be careful to not cause a deadlock as the interrupt
+        // SAFETY: We need to be careful to not cause a deadlock as the interrupt
         // handlers utilize the heap and might interrupt an in-progress de-allocation. So, we
         // lock the interrupts during the de-allocation.
         #[cfg(feature = "kmemleak")]

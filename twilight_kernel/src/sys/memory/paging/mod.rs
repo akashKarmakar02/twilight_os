@@ -14,6 +14,8 @@ use x86_64::registers::control::{Cr3, Cr4, Cr4Flags};
 
 use crate::memory::PHYSICAL_MEMORY_OFFSET;
 
+pub const PAGE_SIZE: usize = 4096;
+
 pub static FRAME_ALLOCATOR: LockedFrameAllocator = LockedFrameAllocator::new_uninit();
 
 bitflags::bitflags! {

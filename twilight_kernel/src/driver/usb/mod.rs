@@ -6,6 +6,7 @@ use crate::{log};
 use crate::sys::pci::find_device;
 
 mod uhci;
+mod xhci;
 
 lazy_static! {
     static ref UCHI_DEVICES: Mutex<Vec<UHci>> = Mutex::new(Vec::new());

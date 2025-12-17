@@ -6,3 +6,4 @@ pub mod uart;
 pub mod nic;
 pub mod usb;
 pub mod tty;
+mod pci_device_driver;
