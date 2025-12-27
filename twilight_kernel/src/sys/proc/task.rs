@@ -1,4 +1,3 @@
-use alloc::boxed::Box;
 use crate::arch::x86_64::io;
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::phys_to_virt;
@@ -157,13 +156,6 @@ pub fn allocate_switch_stack() -> Result<VirtAddr, MapToError<Size4KiB>> {
     Ok(stack_virt_addr)
 }
 
-#[repr(C)]
-struct KernelGsData {
-    kernel_rsp: u64, // offset 0
-    user_rsp: u64,   // offset 8
-    // ... any other fields
-}
-
 
 pub fn switch_tasks(prev_task: &mut Process, next_task: &mut Process) {
     unsafe {
@@ -175,16 +167,11 @@ pub fn switch_tasks(prev_task: &mut Process, next_task: &mut Process) {
             xrstor(fpu);
         }
 
-        let kstack_top = next_task.context_switch_rsp.as_u64();
+        // Keep SYSENTER/TSS pointed at the top of the next task's kernel stack, not
+        // the saved context frame.
+        let kstack_top = next_task.kernel_gs.kernel_rsp;
         crate::arch::x86_64::gdt::TSS.rsp[0] = kstack_top;
         io::wrmsr(io::IA32_SYSENTER_ESP, kstack_top);
-
-        let mut kgs = Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 });
-
-        kgs.kernel_rsp = kstack_top;
-
-        let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
-        next_task.gs_base = kgs_va;
 
         prev_task.fs_base = io::get_fsbase()();
         prev_task.gs_base = io::get_inactive_gsbase()();

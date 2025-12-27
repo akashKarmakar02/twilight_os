@@ -631,11 +631,10 @@ impl VfsNodeOps for Tty {
             }
         }
 
-        if buf.len() == i {
-            Ok(i)
-        } else {
-            Ok(i+1)
-        }
+        // Return exactly the number of bytes we placed into `buf`. Returning a
+        // larger count confuses stdio's internal buffer and causes "phantom"
+        // bytes to be seen by userspace (e.g., tsh reading an extra char).
+        Ok(i)
     }
 
     fn write(&mut self, _device: &mut BlockDev, _lba: usize, data: &[u8]) -> Result<(), ()> {

@@ -6,7 +6,7 @@ pub(crate) mod user;
 use crate::arch::x86_64::gdt::{SegmentSelector, USER_CS, USER_SS};
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
-use crate::println;
+use crate::{println, serial_println};
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::{VFS, VfsNode};
 use crate::sys::memory::bitmap::with_frame_allocator;
@@ -173,13 +173,55 @@ impl ProcessTable {
         None
     }
 
-    pub fn run(&mut self, process: Process) {
+    pub fn run(&mut self, mut process: Process) {
         let pid = process.pid;
+
+        let parent_table_frame = self.proc_list.back().map(|p| p.page_table_frame);
+        let (_, cr3_flags) = Cr3::read();
+
+        if let Some(frame) = parent_table_frame {
+            // Make sure we save the current task's context with its own page table active.
+            unsafe { Cr3::write(frame, cr3_flags) };
+        }
+
+        let mut stack_ptr = process.context_switch_rsp.as_u64();
+        let context_ptr = {
+            let mut stack = StackHelper::new(&mut stack_ptr);
+
+            // Build an initial interrupt frame + context so switch_tasks can iret into userspace.
+            let kframe = stack.offset::<InterruptErrorStack>();
+            *kframe = InterruptErrorStack {
+                code: 0,
+                stack: InterruptStack::default(),
+            };
+            kframe.stack.iret.ss = USER_SS.bits() as u64;
+            kframe.stack.iret.cs = USER_CS.bits() as u64;
+            kframe.stack.iret.rip = process.entry_point;
+            kframe.stack.iret.rflags = 0x202;
+            kframe.stack.iret.rsp = process.stack;
+
+            let context = stack.offset::<Context>();
+            *context = Context::default();
+            context.rip = iretq_init as u64;
+            context.cr3 = process.page_table_frame.start_address().as_u64() | cr3_flags.bits();
+
+            context as *mut Context
+        };
+
+        process.context_switch_rsp = VirtAddr::new(stack_ptr);
+        process.context = context_ptr;
 
         PID.store(pid, Ordering::SeqCst);
 
         self.proc_list.push_back(process);
-        self.proc_list.back_mut().unwrap().exec();
+
+        let len = self.proc_list.len();
+        let (prev_slice, next_slice) = self.proc_list.make_contiguous().split_at_mut(len - 1);
+
+        let prev_task = prev_slice.last_mut().unwrap();
+        let next_task = &mut next_slice[0];
+
+        switch_tasks(prev_task, next_task);
     }
 }
 pub struct OpenFile {
@@ -199,6 +241,7 @@ pub struct Process {
     pub context: *mut Context,
     pub context_switch_rsp: VirtAddr,
     pub fpu_storage: Option<FpuState>,
+    pub kernel_gs: Box<KernelGsData>,
     pub gs_base: VirtAddr,
     pub fs_base: VirtAddr,
 
@@ -338,6 +381,14 @@ impl Process {
 
         let stack_ptr = switch_stack as u64;
 
+
+        let mut kgs = Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 });
+
+        kgs.kernel_rsp = stack_ptr;
+
+        let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
+
+
         let p = Process {
             context: core::ptr::null_mut(),
             context_switch_rsp: VirtAddr::new(stack_ptr),
@@ -352,8 +403,9 @@ impl Process {
             state: ProcessState::Running,
             addr_size_vec,
             pwd: pwd.to_string(),
+            kernel_gs: kgs,
             fs_base: VirtAddr::zero(),
-            gs_base: VirtAddr::zero(),
+            gs_base: kgs_va,
             fd_table: Vec::new(),
             proc_mm,
             parent_pid,
@@ -364,8 +416,9 @@ impl Process {
     }
 
     pub fn exec(&self) {
-        wrmsr(IA32_FS_BASE, VirtAddr::zero().as_u64());
-        wrmsr(IA32_GS_BASE, VirtAddr::zero().as_u64());
+        wrmsr(IA32_FS_BASE, self.fs_base.as_u64());
+        wrmsr(IA32_GS_BASE, self.gs_base.as_u64());
+
         jump_to_user(
             self.entry_point,
             self.stack,
@@ -400,19 +453,15 @@ pub fn exit() {
     let mut process = table.proc_list.pop_back().unwrap();
 
     if let Some(p_process) = table.get_process(process.parent_pid) {
-        let page_table_frame = p_process.page_table_frame;
         let (pre_table_frame, flags) = Cr3::read();
         unsafe {
-            Cr3::write(page_table_frame, flags);
+            // Use the parent's page table while tearing down the exiting process.
+            Cr3::write(p_process.page_table_frame, flags);
         }
         process.cleanup(pre_table_frame);
 
-        if p_process.pid == 1 {
-            init_console();
-        } else {
-            PID.store(p_process.pid, Ordering::SeqCst);
-            p_process.exec();
-        }
+        PID.store(p_process.pid, Ordering::SeqCst);
+        switch_tasks(&mut process, p_process);
     }
 }
 
@@ -426,6 +475,12 @@ unsafe extern "C" fn iretq_init() {
         crate::arch::x86_64::asm_utils::pop_scratch!(),
         "iretq",
     )
+}
+
+#[repr(C)]
+struct KernelGsData {
+    kernel_rsp: u64, // offset 0
+    user_rsp: u64,   // offset 8
 }
 
 pub fn init() {
@@ -447,6 +502,14 @@ pub fn init() {
     let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
 
     let mut stack_ptr = switch_stack as u64;
+
+
+    let mut kgs = Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 });
+
+    kgs.kernel_rsp = stack_ptr;
+
+    let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
+
     let mut stack = StackHelper::new(&mut stack_ptr);
 
     let task_stack = unsafe {
@@ -491,7 +554,8 @@ pub fn init() {
                 mapper,
                 pwd: "/".to_string(),
                 fd_table: Vec::new(),
-                gs_base: VirtAddr::zero(),
+                kernel_gs: kgs,
+                gs_base: kgs_va,
                 fs_base: VirtAddr::zero(),
                 proc_mm,
                 parent_pid: 1,
@@ -507,6 +571,7 @@ pub fn init() {
     let mut idle_task = Process {
         context: core::ptr::null_mut(),
         stack: 0,
+        kernel_gs: Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 }),
         fs_base: VirtAddr::zero(),
         gs_base: VirtAddr::zero(),
         proc_mm: Box::new(ProcMM::new(0)),
@@ -525,6 +590,8 @@ pub fn init() {
         stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
         stdio_fd_flags: [0; 3],
     };
+
+    idle_task.gs_base = VirtAddr::new(&*idle_task.kernel_gs as *const _ as u64);
 
     #[allow(static_mut_refs)]
     let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(1).unwrap() };
