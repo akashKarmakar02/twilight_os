@@ -6,15 +6,13 @@ use crate::log;
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::proc::mem::{PAGE, align_dn, align_up};
 use conquer_once::spin::OnceCell;
+use core::ptr;
 use core::sync::atomic::Ordering::SeqCst;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use limine::memory_map::Entry;
 use spin::Once;
 use x86_64::structures::paging::mapper::CleanUp;
-use x86_64::structures::paging::{
-    FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags,
-    PhysFrame, Size4KiB, Translate,
-};
+use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate};
 use x86_64::{PhysAddr, VirtAddr};
 
 #[allow(static_mut_refs)]
@@ -158,6 +156,11 @@ pub fn alloc_pages(
     with_frame_allocator(|frame_allocator| {
         for page in pages {
             if let Some(frame) = frame_allocator.allocate_frame() {
+                let frame_ptr = phys_to_virt(frame.start_address()).as_mut_ptr::<u8>();
+                unsafe {
+                    ptr::write_bytes(frame_ptr, 0, Size4KiB::SIZE as usize);
+                }
+
                 let res = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
                 if let Ok(mapping) = res {
                     mapping.flush();
