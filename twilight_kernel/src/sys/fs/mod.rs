@@ -17,6 +17,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
+use crate::sys::fs::ram_fs::InitramfsFs;
 
 pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
 
@@ -76,6 +77,15 @@ pub fn init(show_log: bool) {
         uptime
     );
     println!("\x1b[93mWarning\x1b[0m Trying running 'install' to install Twilight OS");
+    // because harddisk does not have a file system use rootfs
+    // TODO: this is messy fix it later
+    try_mount_rootfs();
+}
+
+fn try_mount_rootfs() {
+    #[allow(static_mut_refs)]
+    unsafe { VFS.get_mut().mount("/", Arc::new(Mutex::new(InitramfsFs::new()))) };
+    // InitramfsFs::new();
 }
 
 fn try_mount_boot(bus: u8, dsk: u8, show_log: bool) -> bool {

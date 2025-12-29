@@ -216,14 +216,6 @@ pub fn init(
     driver::usb::init();
     driver::cpu::init(mp_response);
     driver::disk::ata::init();
-    fs::init(true);
-
-    arch::x86_64::gdt::init_after_boot();
-
-    arch::x86_64::syscall::init();
-
-    x86_64::instructions::interrupts::enable();
-    driver::timer::init();
 
     let cpio_buf = unsafe {
         core::slice::from_raw_parts(cpio_file.addr() as *const u8, cpio_file.size() as usize)
@@ -233,6 +225,15 @@ pub fn init(
     {
         *INITRAMFS.lock() = cpio;
     }
+
+    fs::init(true);
+
+    arch::x86_64::gdt::init_after_boot();
+
+    arch::x86_64::syscall::init();
+
+    x86_64::instructions::interrupts::enable();
+    driver::timer::init();
 
     kernel_utils::dhcp::main();
 }
