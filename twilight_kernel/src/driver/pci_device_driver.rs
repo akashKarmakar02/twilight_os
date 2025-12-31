@@ -3,15 +3,14 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 
-use limine::modules::module_manager::Module;
-use crate::sys::pci::pci_device::PciDevice;
+use crate::sys::pci::DeviceConfig;
 use x86_64::instructions::interrupts::*;
 
 /* =========================================================
    PCI Device Driver Trait
 ========================================================= */
 
-pub trait PciDeviceDriver: Module {
+pub trait PciDeviceDriver {
     /* -----------------------------------------------------
        Lifecycle hooks
     ----------------------------------------------------- */
@@ -26,7 +25,7 @@ pub trait PciDeviceDriver: Module {
 
     fn attach_device(
         &mut self,
-        dev: Arc<PciDevice>,
+        dev: Arc<DeviceConfig>,
         enable_bus_mastering: bool,
     );
 }
@@ -37,7 +36,7 @@ pub trait PciDeviceDriver: Module {
 
 pub struct PciDeviceDriverState {
     name: String,
-    pci_dev: Option<Arc<PciDevice>>,
+    pci_dev: Option<Arc<DeviceConfig>>,
     irq_vector: Option<u8>,
 }
 
@@ -54,7 +53,7 @@ impl PciDeviceDriverState {
         &self.name
     }
 
-    pub fn pci_device(&self) -> Option<&Arc<PciDevice>> {
+    pub fn pci_device(&self) -> Option<&Arc<DeviceConfig>> {
         self.pci_dev.as_ref()
     }
 
@@ -64,7 +63,7 @@ impl PciDeviceDriverState {
 
     pub fn attach_device(
         &mut self,
-        dev: Arc<PciDevice>,
+        mut dev: Arc<DeviceConfig>,
         enable_bus_mastering: bool,
     ) {
         if enable_bus_mastering {

@@ -1,10 +1,7 @@
-#![no_std]
-
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use crate::driver::usb::xhci::xhci_common::*;
-use crate::memory::paging::PAGE_SIZE;
+use crate::memory::PAGE_SIZE;
 
 /* =========================================================
    Memory Size Limits

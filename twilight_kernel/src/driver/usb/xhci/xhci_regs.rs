@@ -1,8 +1,4 @@
-#![no_std]
-
 use core::mem::size_of;
-
-use crate::driver::usb::xhci::xhci_mem::*;
 
 /* =========================================================
    xHCI Capability Registers
