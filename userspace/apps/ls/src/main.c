@@ -6,7 +6,6 @@
 #include <sys/stat.h>
 #include <stdint.h>
 
-// ---- linux_dirent64 (musl/glibc compatible) ----
 struct linux_dirent64 {
     unsigned long long d_ino;
     long long          d_off;
@@ -15,7 +14,6 @@ struct linux_dirent64 {
     char               d_name[];
 };
 
-// ---- syscall numbers (match your kernel; only new one is stat) ----
 #ifndef SYS_getdents64
 #  if defined(__x86_64__)
 #    define SYS_getdents64 217
@@ -26,12 +24,10 @@ struct linux_dirent64 {
 #  endif
 #endif
 
-// You said you “have stat (syscall 4)”. We’ll trust that ABI:
 #ifndef SYS_stat
 #  define SYS_stat 4
 #endif
 
-// ---- tiny utils (no malloc) ----
 static ssize_t write_all(int fd, const void *buf, size_t n) {
     const unsigned char *p = (const unsigned char*)buf;
     while (n) {
@@ -58,7 +54,6 @@ static void mode_to_permstr(mode_t m, char out[11]) {
              S_ISBLK(m)  ? 'b' :
              S_ISSOCK(m) ? 's' :
              S_ISFIFO(m) ? 'p' : '-';
-    // rwx
     out[1] = (m & S_IRUSR)?'r':'-';
     out[2] = (m & S_IWUSR)?'w':'-';
     out[3] = (m & S_IXUSR)?'x':'-';
@@ -68,7 +63,6 @@ static void mode_to_permstr(mode_t m, char out[11]) {
     out[7] = (m & S_IROTH)?'r':'-';
     out[8] = (m & S_IWOTH)?'w':'-';
     out[9] = (m & S_IXOTH)?'x':'-';
-    // suid/sgid/sticky adjustments
     if (m & S_ISUID) out[3] = (out[3]=='x')?'s':'S';
     if (m & S_ISGID) out[6] = (out[6]=='x')?'s':'S';
     if (m & S_ISVTX) out[9] = (out[9]=='x')?'t':'T';
@@ -76,7 +70,6 @@ static void mode_to_permstr(mode_t m, char out[11]) {
 }
 
 static void print_name_colored(const char *name, int d_type, mode_t mode) {
-    // Prefer d_type when available; fallback to mode.
     int is_dir = (d_type==4) || (S_ISDIR(mode));
     int is_chr = (d_type==2) || (S_ISCHR(mode)); // DT_CHR == 2
     if (is_dir) {
@@ -88,7 +81,6 @@ static void print_name_colored(const char *name, int d_type, mode_t mode) {
     }
 }
 
-// ---- the dir listing ----
 static int list_dir(const char *path, int flag_long, int flag_all) {
     int dfd = openat(AT_FDCWD, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dfd < 0) {
@@ -119,11 +111,9 @@ static int list_dir(const char *path, int flag_long, int flag_all) {
             }
 
             if (!flag_long) {
-                // plain (colored) name
                 print_name_colored(name, d->d_type, 0);
                 putchar('\n');
             } else {
-                // --- build full path (no malloc) ---
                 char full[4096];
                 full[0] = '\0';
                 if (path[0]=='\0') { full[0] = '.'; full[1] = '\0'; }
@@ -132,11 +122,9 @@ static int list_dir(const char *path, int flag_long, int flag_all) {
                 if (plen==0 || full[plen-1] != '/') z_strcat(full, "/");
                 z_strcat(full, name);
 
-                // --- stat via syscall(SYS_stat) only ---
                 struct stat st;
                 int rc = (int)syscall(SYS_stat, full, &st);
                 if (rc < 0) {
-                    // If stat fails, still print a placeholder line.
                     char perms[11]; mode_to_permstr(0, perms);
                     printf("%s %3d %5d %5d %9d ",
                            perms, 0, 0, 0, 0);
@@ -144,8 +132,6 @@ static int list_dir(const char *path, int flag_long, int flag_all) {
                     putchar('\n');
                 } else {
                     char perms[11]; mode_to_permstr(st.st_mode, perms);
-                    // Keep it minimal: perms, links, uid, gid, size, name
-                    // (skipping time to avoid extra syscalls)
                     printf("%s %3lu %5u %5u %9lld ",
                            perms,
                            (unsigned long)st.st_nlink,
@@ -168,7 +154,6 @@ static int list_dir(const char *path, int flag_long, int flag_all) {
 int main(int argc, char **argv) {
     int flag_long = 0, flag_all = 0;
     const char *path = ".";
-    // very small arg parser: accepts [-l] [-a] [path]
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (a[0] == '-' && a[1] != '\0') {

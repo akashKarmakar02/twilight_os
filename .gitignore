@@ -2,6 +2,7 @@
 /limine
 /ovmf
 /.idea
+/.zig-cache
 /rootfs/bin
 twilight_kernel/kernel
 twilight-os.iso
@@ -12,4 +13,4 @@ qemu.log
 
 /userspace/target
 /userspace/twilight_c.a
-/userspace/apps/*/src/main.o
+/userspace/apps/*/src/*.o

@@ -1,21 +1,23 @@
 use crate::driver::disk::ata::FileIO;
+use crate::println;
+use crate::sys::net::socket::tcp::TcpSocket;
 use crate::sys::net::socket::udp::UdpSocket;
 use crate::sys::rng;
-use crate::println;
 use alloc::string::{String, ToString};
-use alloc::{format, vec};
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use bit_field::BitField;
 use core::str::FromStr;
 use smoltcp::wire::{IpAddress, Ipv4Address};
-use crate::sys::net::socket::tcp::TcpSocket;
 
 pub fn main(args: &[&str]) {
     if args.len() < 2 {
         println!("Usage: curl [url]");
         return;
     }
-    let host = args[1].trim_start_matches("http://").trim_start_matches("https://");
+    let host = args[1]
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     let url_path = format!("http://{}", host);
 
     let Some(url) = URL::parse(&url_path) else {
@@ -29,7 +31,7 @@ pub fn main(args: &[&str]) {
             Err(_) => {
                 println!("Invalid address format!");
                 return;
-            },
+            }
         }
     } else {
         match resolve(&url.host) {
@@ -40,7 +42,6 @@ pub fn main(args: &[&str]) {
             }
         }
     };
-
 
     let mut code = None;
     let mut tcp_socket = TcpSocket::new();
@@ -85,9 +86,7 @@ pub fn main(args: &[&str]) {
                         // TODO: check i == j
                         let line = String::from_utf8_lossy(&data[i..j]);
                         if i == 0 {
-                            code = line.split(" ").nth(1).map(|word|
-                                word.to_string()
-                            );
+                            code = line.split(" ").nth(1).map(|word| word.to_string());
                         }
                         if line.trim().is_empty() {
                             state = ResponseState::Body;
@@ -117,7 +116,6 @@ pub fn main(args: &[&str]) {
     }
 }
 
-
 #[repr(u16)]
 enum QueryType {
     A = 1,
@@ -139,7 +137,6 @@ struct Message {
     pub datagram: Vec<u8>,
 }
 
-
 #[derive(Debug)]
 #[repr(u16)]
 pub enum ResponseCode {
@@ -153,7 +150,6 @@ pub enum ResponseCode {
     UnknownError,
     NetworkError,
 }
-
 
 const FLAG_RD: u16 = 0x0100; // Recursion desired
 
@@ -275,7 +271,6 @@ pub fn resolve(name: &str) -> Result<IpAddress, ResponseCode> {
     Err(ResponseCode::NetworkError)
 }
 
-
 #[derive(Debug)]
 struct URL {
     pub host: String,
@@ -310,7 +305,9 @@ impl URL {
             None => (server, if scheme == "https" { "443" } else { "80" }),
         };
 
-        let port = port_str.parse().unwrap_or(if scheme == "https" { 443 } else { 80 });
+        let port = port_str
+            .parse()
+            .unwrap_or(if scheme == "https" { 443 } else { 80 });
 
         Some(Self {
             host: host.into(),

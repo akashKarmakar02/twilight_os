@@ -1,12 +1,12 @@
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use bit_field::BitField;
-use smoltcp::wire::EthernetAddress;
-use x86_64::instructions::port::Port;
 use crate::arch::x86_64::halt;
 use crate::driver::nic::{Config, EthernetDeviceIO, Stats};
 use crate::sys::memory::phys::PhysBuf;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use bit_field::BitField;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use smoltcp::wire::EthernetAddress;
+use x86_64::instructions::port::Port;
 
 const CSR0_INIT: usize = 0;
 const CSR0_STRT: usize = 1;
@@ -41,7 +41,6 @@ pub struct Ports {
     //pub rap_16: Port<u16>,
     pub rst_16: Port<u16>,
     //pub bdp_16: Port<u16>,
-
     pub rdp_32: Port<u32>,
     pub rap_32: Port<u32>,
     pub rst_32: Port<u32>,
@@ -64,7 +63,6 @@ impl Ports {
             //rap_16: Port::new(io_base + 0x12),
             rst_16: Port::new(io_base + 0x14),
             //bdp_16: Port::new(io_base + 0x16),
-
             rdp_32: Port::new(io_base + 0x10),
             rap_32: Port::new(io_base + 0x14),
             rst_32: Port::new(io_base + 0x18),
@@ -332,7 +330,8 @@ impl EthernetDeviceIO for Device {
         // Give back ownership to the card
         self.tx_des[tx_id * DE_LEN + 7].set_bit(DE_OWN, true);
 
-        self.tx_id.store((tx_id + 1) % TX_BUFFERS_COUNT, Ordering::SeqCst);
+        self.tx_id
+            .store((tx_id + 1) % TX_BUFFERS_COUNT, Ordering::SeqCst);
 
         if !is_buffer_owner(&self.tx_des, tx_id) {
             self.ports.write_csr_32(0, 1 << CSR0_TDMD); // Send all buffers

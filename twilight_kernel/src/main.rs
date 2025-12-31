@@ -4,6 +4,7 @@
 #![feature(alloc_error_handler)]
 #![feature(let_chains)]
 #![feature(decl_macro)]
+#![feature(slice_pattern)]
 #![feature(step_trait)]
 #![feature(allocator_api)]
 #![feature(stmt_expr_attributes)]
@@ -20,18 +21,15 @@ pub mod sys;
 pub mod task;
 pub mod utils;
 
-use alloc::vec::Vec;
-use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::Ordering::SeqCst;
+use limine::BaseRevision;
 use limine::framebuffer::Framebuffer;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, StackSizeRequest,
 };
 use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
-use limine::BaseRevision;
-use x86_64::instructions::hlt;
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -113,33 +111,49 @@ unsafe extern "C" fn kmain() -> ! {
         cpio_response.unwrap(),
     );
 
-    // println!("\x1b[96m                                                     ,,    ,,    ,,            ,,                                        ");
-    // println!("                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd ");
-    // println!("                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y ");
-    // println!("                                MM `7M'    ,A    `MF'`7MM    MM  `7MM  .P\"Ybmmm  MMpMMMb.mmMMmm     dM'      `MM `MMb.     ");
-    // println!("                                MM   VA   ,VAA   ,V    MM    MM    MM :MI  I8    MM    MM  MM       MM        MM   `YMMNq. ");
-    // println!("                                MM    VA ,V  VA ,V     MM    MM    MM  WmmmP\"    MM    MM  MM       MM.      ,MP .     `MM ");
-    // println!("                                MM     VVV    VVV      MM    MM    MM  8M         MM    MM  MM       `Mb.    ,dP' Mb     dM ");
-    // println!("                              .JMML.    W      W     .JMML..JMML..JMML.YMMMMMb .JMML  JMML.`Mbmo      `\"bmmd\"'   P\"Ybmmd\"  ");
-    // println!("                                                                       6'     dP                                             ");
-    // println!("                                                                       Ybmmmd'                                               \x1b[0m");
+    println!(
+        "\x1b[96m                                                     ,,    ,,    ,,            ,,                                        "
+    );
+    println!(
+        "                           MMP\"\"MM\"\"YMM                db  `7MM    db          `7MM        mm         .g8\"\"8q.    .M\"\"\"bgd "
+    );
+    println!(
+        "                           P'   MM   `7                      MM                  MM        MM       .dP'    `YM. ,MI    \"Y "
+    );
+    println!(
+        "                                MM `7M'    ,A    `MF'`7MM    MM  `7MM  .P\"Ybmmm  MMpMMMb.mmMMmm     dM'      `MM `MMb.     "
+    );
+    println!(
+        "                                MM   VA   ,VAA   ,V    MM    MM    MM :MI  I8    MM    MM  MM       MM        MM   `YMMNq. "
+    );
+    println!(
+        "                                MM    VA ,V  VA ,V     MM    MM    MM  WmmmP\"    MM    MM  MM       MM.      ,MP .     `MM "
+    );
+    println!(
+        "                                MM     VVV    VVV      MM    MM    MM  8M         MM    MM  MM       `Mb.    ,dP' Mb     dM "
+    );
+    println!(
+        "                              .JMML.    W      W     .JMML..JMML..JMML.YMMMMMb .JMML  JMML.`Mbmo      `\"bmmd\"'   P\"Ybmmd\"  "
+    );
+    println!(
+        "                                                                       6'     dP                                             "
+    );
+    println!(
+        "                                                                       Ybmmmd'                                               \x1b[0m"
+    );
 
-    println!(r"___________       .__.__  .__       .__     __    ________    _________ ");
-    println!(r"\__    ___/_  _  _|__|  | |__| ____ |  |___/  |_  \_____  \  /   _____/ ");
-    println!(r"  |    |  \ \/ \/ /  |  | |  |/ ___\|  |  \   __\  /   |   \ \_____  \  ");
-    println!(r"  |    |   \     /|  |  |_|  / /_/  |   Y  \  |   /    |    \/        \ ");
-    println!(r"  |____|    \/\_/ |__|____/__\___  /|___|  /__|   \_______  /_______  / ");
-    println!(r"                            /_____/      \/               \/        \/  ");
-    sys::proc::switch::switch_demo();
+    // sys::proc::switch::switch_demo();
     // sys::console::framebuffer::init();
-    sys::console::init_console();
+    // sys::console::init_console();
+
+    sys::proc::init();
 
     hcf()
 }
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
-    serial_prtinln!("[PANIC]: {}", info);
+    serial_println!("[PANIC]: {}", info);
     hcf();
 }
 
@@ -158,13 +172,11 @@ fn hcf() -> ! {
 use crate::kernel_utils::install::INITRAMFS;
 use crate::sys::console::init_tty;
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
+use crate::sys::rng;
 use crate::task::executor;
 use sys::framebuffer::init_framebuffer;
 use sys::{fs, memory};
-use crate::sys::memory::allocator::LockedHeap;
-
-#[global_allocator]
-static AERO_SYSTEM_ALLOCATOR: LockedHeap = LockedHeap::new_uninit();
+use x86_64::VirtAddr;
 
 pub fn init(
     fb: &Framebuffer,
@@ -175,68 +187,35 @@ pub fn init(
 ) {
     driver::uart::init();
 
-    let phys_mem_offset = memory::paging::VirtAddr::new(hhdm_response.offset());
+    let phys_mem_offset = VirtAddr::new(hhdm_response.offset());
 
     #[allow(static_mut_refs)]
     unsafe {
         memory::PHYSICAL_MEMORY_OFFSET.store(phys_mem_offset.as_u64(), SeqCst);
     }
-    memory::paging::init(memory_map_response).expect("paging init failed");
-    serial_prtinln!("paging init success");
-
-    memory::init(phys_mem_offset, memory_map_response.entries());
-    serial_prtinln!("memory init success");
-
 
     arch::x86_64::gdt::init();
-    memory::paging::init_vm_frames();
-
     arch::x86_64::idt::init();
     arch::x86_64::idt::init_pics();
-    // x86_64::instructions::interrupts::enable();
 
-
-    // unsafe {
-    //     let ptr = AERO_SYSTEM_ALLOCATOR.alloc(Layout::from_size_align_unchecked(4096000, 4));
-    //     serial_prtinln!("{:p}", ptr);
-    //     let num_ptr = ptr as *mut i32;
-    //     if num_ptr.is_null() {
-    //         panic!("alloc failed");
-    //     }
-    //     let num = &mut *num_ptr;
-    //
-    //     *num = 32;
-    //     serial_prtinln!("alloc success: {:p}, num: {}", ptr, *num);
-    // }
-
-    // let mut v = Vec::new();
-    // v.push(22);
-    // v.push(32);
-    // v.push(45);
-    // serial_prtinln!("{:?}", v);
+    memory::init(phys_mem_offset, memory_map_response.entries());
 
     init_framebuffer(fb);
 
     executor::init_executor();
-    fs::init_fs();
+
+    rng::init();
 
     // init_writer();
     init_tty();
+    driver::mouse::ps2::init();
     sys::pci::init();
 
     // depends on pci initialization
     driver::nic::init();
     driver::usb::init();
     driver::cpu::init(mp_response);
-    // hlt();
     driver::disk::ata::init();
-    fs::init(true);
-
-    arch::x86_64::gdt::init_after_boot();
-
-    arch::x86_64::syscall::init();
-
-    sys::proc::init();
 
     let cpio_buf = unsafe {
         core::slice::from_raw_parts(cpio_file.addr() as *const u8, cpio_file.size() as usize)
@@ -247,19 +226,23 @@ pub fn init(
         *INITRAMFS.lock() = cpio;
     }
 
-    // #[allow(static_mut_refs)]
-    // if let Some(fb) = unsafe { FRAMEBUFFER.get_mut() } {
-    //     fb.animate_bouncing_rect(3000);
-    //     fb.clear_buf(0x101010);
-    //     fb.sync_full();
-    // }
+    fs::init(true);
+
+    arch::x86_64::gdt::init_after_boot();
+
+    arch::x86_64::syscall::init();
+
+    x86_64::instructions::interrupts::enable();
+    driver::timer::init();
+
+    kernel_utils::dhcp::main();
 }
 
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => ({
         let time = $crate::driver::timer::pit::uptime();
-        $crate::println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
+        $crate::serial_println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
     });
 }
 
@@ -267,7 +250,7 @@ macro_rules! log {
 macro_rules! logger {
     ($($arg:tt)*) => ({
         let time = $crate::driver::timer::pit::uptime();
-        $crate::serial_prtinln!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
+        $crate::serial_println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
     });
 }
 

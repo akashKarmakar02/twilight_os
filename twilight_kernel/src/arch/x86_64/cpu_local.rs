@@ -15,11 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with Aero. If not, see <https://www.gnu.org/licenses/>.
 
+use crate::extern_sym;
 use core::alloc::Layout;
 use core::arch::asm;
 use core::ops::{Deref, DerefMut};
 use x86_64::VirtAddr;
-use crate::extern_sym;
 
 use super::io;
 

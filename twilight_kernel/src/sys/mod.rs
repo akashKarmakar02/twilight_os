@@ -1,13 +1,11 @@
-pub mod buffer;
+pub(crate) mod acpi;
+mod clk;
 pub mod console;
 pub mod framebuffer;
 pub mod fs;
 pub mod memory;
-pub mod pci;
-pub mod syscall;
-mod tty;
-pub mod proc;
-pub(crate) mod acpi;
 pub mod net;
+pub mod pci;
+pub mod proc;
 pub mod rng;
-mod clk;
+pub mod syscall;

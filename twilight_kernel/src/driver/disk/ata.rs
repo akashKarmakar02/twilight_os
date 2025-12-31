@@ -21,8 +21,8 @@ pub static LAST_SELECTED: Mutex<Option<(u8, u8)>> = Mutex::new(None);
 #[repr(u16)]
 #[derive(Debug, Clone, Copy)]
 enum Command {
-    Read     = 0x20,
-    Write    = 0x30,
+    Read = 0x20,
+    Write = 0x30,
     Identify = 0xEC,
     SetFeatures = 0xEF,
 }
@@ -38,14 +38,14 @@ enum IdentifyResponse {
 #[repr(usize)]
 #[derive(Debug, Clone, Copy)]
 enum Status {
-    ERR  = 0, // Error
-    IDX  = 1, // (obsolete)
+    ERR = 0,  // Error
+    IDX = 1,  // (obsolete)
     CORR = 2, // (obsolete)
-    DRQ  = 3, // Data Request
-    DSC  = 4, // (command dependant)
-    DF   = 5, // (command dependant)
+    DRQ = 3,  // Data Request
+    DSC = 4,  // (command dependant)
+    DF = 5,   // (command dependant)
     DRDY = 6, // Device Ready
-    BSY  = 7, // Busy
+    BSY = 7,  // Busy
 }
 
 #[allow(dead_code)]
@@ -134,10 +134,7 @@ impl Bus {
         let start = crate::driver::timer::pit::uptime();
         while self.status().get_bit(bit as usize) != val {
             if crate::driver::timer::pit::uptime() - start > 1.0 {
-                println!(
-                    "ATA hanged while polling {:?} bit in status register",
-                    bit
-                );
+                println!("ATA hanged while polling {:?} bit in status register", bit);
                 self.debug();
                 return Err(());
             }
@@ -149,7 +146,6 @@ impl Bus {
     fn select_drive(&mut self, drive: u8) -> Result<(), ()> {
         self.poll(Status::BSY, false)?;
         self.poll(Status::DRQ, false)?;
-
 
         // Skip the rest if this drive was already selected
         if *LAST_SELECTED.lock() == Some((self.id, drive)) {
@@ -170,11 +166,7 @@ impl Bus {
         Ok(())
     }
 
-    fn write_command_params(
-        &mut self,
-        drive: u8,
-        block: u32
-    ) -> Result<(), ()> {
+    fn write_command_params(&mut self, drive: u8, block: u32, sectors: u8) -> Result<(), ()> {
         let lba = true;
         let mut bytes = block.to_le_bytes();
         bytes[3].set_bit(4, drive > 0);
@@ -182,7 +174,7 @@ impl Bus {
         bytes[3].set_bit(6, lba);
         bytes[3].set_bit(7, true);
         unsafe {
-            self.sector_count_register.write(1);
+            self.sector_count_register.write(sectors.max(1));
             self.lba0_register.write(bytes[0]);
             self.lba1_register.write(bytes[1]);
             self.lba2_register.write(bytes[2]);
@@ -196,7 +188,8 @@ impl Bus {
         self.wait(120); // Wait at least 400 ns
         self.status(); // Ignore results of first read
         self.clear_interrupt();
-        if self.status() == 0 { // Drive does not exist
+        if self.status() == 0 {
+            // Drive does not exist
             return Err(());
         }
         if self.is_error() {
@@ -217,9 +210,9 @@ impl Bus {
         Ok(())
     }
 
-    fn setup_pio(&mut self, drive: u8, block: u32) -> Result<(), ()> {
+    fn setup_pio(&mut self, drive: u8, block: u32, sectors: u8) -> Result<(), ()> {
         self.select_drive(drive)?;
-        self.write_command_params(drive, block)?;
+        self.write_command_params(drive, block, sectors)?;
         Ok(())
     }
 
@@ -228,7 +221,6 @@ impl Bus {
         // Set Features (0xEF) with subcommand 0x03 and transfer mode 0x08 + mode_num
         self.select_drive(drive)?;
         self.poll(Status::BSY, false)?;
-
 
         unsafe {
             self.features_register.write(0x03); // subcommand: Set Transfer Mode
@@ -243,19 +235,37 @@ impl Bus {
         Ok(())
     }
 
-    fn read(
-        &mut self,
-        drive: u8,
-        block: u32,
-        buf: &mut [u8]
-    ) -> Result<(), ()> {
-        debug_assert!(buf.len() == BLOCK_SIZE);
-        self.setup_pio(drive, block)?;
-        self.write_command(Command::Read)?;
-        for chunk in buf.chunks_mut(2) {
-            let data = self.read_data().to_le_bytes();
-            chunk.clone_from_slice(&data);
+    fn read(&mut self, drive: u8, block: u32, buf: &mut [u8]) -> Result<(), ()> {
+        if buf.is_empty() || buf.len() % BLOCK_SIZE != 0 {
+            return Err(());
         }
+        let mut remaining_sectors = buf.len() / BLOCK_SIZE;
+        let mut current_block = block;
+        let mut offset = 0usize;
+
+        while remaining_sectors > 0 {
+            let sectors = remaining_sectors.min(255);
+            self.setup_pio(drive, current_block, sectors as u8)?;
+            self.write_command(Command::Read)?;
+
+            for sector_idx in 0..sectors {
+                if sector_idx > 0 {
+                    self.poll(Status::BSY, false)?;
+                    self.poll(Status::DRQ, true)?;
+                }
+                for chunk in buf[offset..offset + BLOCK_SIZE].chunks_mut(2) {
+                    let data = self.read_data().to_le_bytes();
+                    chunk.clone_from_slice(&data);
+                }
+                offset += BLOCK_SIZE;
+            }
+
+            self.poll(Status::BSY, false)?;
+            self.poll(Status::DRQ, false)?;
+            current_block += sectors as u32;
+            remaining_sectors -= sectors;
+        }
+
         if self.is_error() {
             println!("ATA read: data error");
             self.debug();
@@ -266,13 +276,36 @@ impl Bus {
     }
 
     fn write(&mut self, drive: u8, block: u32, buf: &[u8]) -> Result<(), ()> {
-        debug_assert!(buf.len() == BLOCK_SIZE);
-        self.setup_pio(drive, block)?;
-        self.write_command(Command::Write)?;
-        for chunk in buf.chunks(2) {
-            let data = u16::from_le_bytes(chunk.try_into().unwrap());
-            self.write_data(data);
+        if buf.is_empty() || buf.len() % BLOCK_SIZE != 0 {
+            return Err(());
         }
+        let mut remaining_sectors = buf.len() / BLOCK_SIZE;
+        let mut current_block = block;
+        let mut offset = 0usize;
+
+        while remaining_sectors > 0 {
+            let sectors = remaining_sectors.min(255);
+            self.setup_pio(drive, current_block, sectors as u8)?;
+            self.write_command(Command::Write)?;
+
+            for sector_idx in 0..sectors {
+                if sector_idx > 0 {
+                    self.poll(Status::BSY, false)?;
+                    self.poll(Status::DRQ, true)?;
+                }
+                for chunk in buf[offset..offset + BLOCK_SIZE].chunks(2) {
+                    let data = u16::from_le_bytes(chunk.try_into().unwrap());
+                    self.write_data(data);
+                }
+                offset += BLOCK_SIZE;
+            }
+
+            self.poll(Status::BSY, false)?;
+            self.poll(Status::DRQ, false)?;
+            current_block += sectors as u32;
+            remaining_sectors -= sectors;
+        }
+
         if self.is_error() {
             println!("ATA write: data error");
             self.debug();
@@ -287,7 +320,7 @@ impl Bus {
             return Ok(IdentifyResponse::None);
         }
         self.select_drive(drive)?;
-        self.write_command_params(drive, 0)?;
+        self.write_command_params(drive, 0, 1)?;
         if self.write_command(Command::Identify).is_err() {
             if self.status() == 0 {
                 return Ok(IdentifyResponse::None);
@@ -296,9 +329,7 @@ impl Bus {
             }
         }
         match (self.lba1(), self.lba2()) {
-            (0x00, 0x00) => {
-                Ok(IdentifyResponse::Ata([(); 256].map(|_| self.read_data())))
-            }
+            (0x00, 0x00) => Ok(IdentifyResponse::Ata([(); 256].map(|_| self.read_data()))),
             (0x14, 0xEB) => Ok(IdentifyResponse::Atapi),
             (0x3C, 0xC3) => Ok(IdentifyResponse::Sata),
             (_, _) => Err(()),
@@ -340,12 +371,15 @@ pub fn init() {
         buses.push(Bus::new(0, 0x1F0, 0x3F6, 14));
         buses.push(Bus::new(1, 0x170, 0x376, 15));
     }
-    
+
     let time = crate::driver::timer::pit::uptime();
     let drives = list();
 
     for drive in drives {
-        println!("\x1b[93m[{:.6}]\x1b[0m ATA {}:{} {}", time, drive.bus, drive.dsk, drive);
+        println!(
+            "\x1b[93m[{:.6}]\x1b[0m ATA {}:{} {}",
+            time, drive.bus, drive.dsk, drive
+        );
         mount_ata(drive.bus, drive.dsk);
     }
 }
@@ -373,13 +407,10 @@ impl Drive {
             let buf = res.map(u16::to_be_bytes).concat();
             let model: String = String::from_utf8_lossy(&buf[54..94]).trim().into();
             let serial: String = String::from_utf8_lossy(&buf[20..40]).trim().into();
-            let block_count = u32::from_be_bytes(
-                buf[120..124].try_into().unwrap()
-            ).rotate_left(16);
+            let block_count = u32::from_be_bytes(buf[120..124].try_into().unwrap()).rotate_left(16);
             let block_index = 0;
 
             let _ = buses[bus as usize].set_pio_mode(dsk, 4);
-
 
             Some(Self {
                 bus,
@@ -427,7 +458,6 @@ pub enum IO {
     Write,
 }
 
-
 impl FileIO for Drive {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
         if self.block_index == self.block_count {
@@ -445,8 +475,7 @@ impl FileIO for Drive {
         Err(())
     }
 
-    fn close(&mut self) {
-    }
+    fn close(&mut self) {}
 
     fn poll(&mut self, event: IO) -> bool {
         match event {

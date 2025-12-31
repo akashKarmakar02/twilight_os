@@ -1,3 +1,5 @@
+use crate::sys::proc::PROCESS_TABLE;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -60,7 +62,6 @@ unsafe fn is_user_accessible(_va: usize) -> bool {
     true
 }
 
-
 #[inline(always)]
 fn is_canonical(addr: usize) -> bool {
     let top = (addr >> 47) & 0x1ffff;
@@ -69,10 +70,32 @@ fn is_canonical(addr: usize) -> bool {
 
 #[inline(always)]
 fn in_user_range(addr: usize, len: usize) -> Result<(), UserCopyError> {
-    if addr == 0 || !is_canonical(addr) { return Err(UserCopyError::Fault); }
+    if addr == 0 || !is_canonical(addr) {
+        return Err(UserCopyError::Fault);
+    }
     let end = addr.checked_add(len).ok_or(UserCopyError::TooLong)?;
-    if end - 1 > USER_MAX { return Err(UserCopyError::Fault); }
+    if end - 1 > USER_MAX {
+        return Err(UserCopyError::Fault);
+    }
     Ok(())
+}
+
+pub fn format_path(path: String) -> String {
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap_unchecked()
+            .get_process(crate::sys::proc::id())
+            .unwrap_unchecked()
+    };
+
+    let can_path = if path.starts_with("/") {
+        path
+    } else {
+        format!("{}/{}", process.pwd, path)
+    };
+    can_path
 }
 
 pub fn copy_user_ptr_array(
@@ -82,11 +105,15 @@ pub fn copy_user_ptr_array(
 ) -> Result<Vec<String>, UserCopyError> {
     let mut out = Vec::new();
     for i in 0..max_ptrs {
-        let ptr_addr = (base.0 as usize).checked_add(i * size_of::<usize>()).ok_or(UserCopyError::TooLong)?;
+        let ptr_addr = (base.0 as usize)
+            .checked_add(i * size_of::<usize>())
+            .ok_or(UserCopyError::TooLong)?;
         in_user_range(ptr_addr, size_of::<usize>())?;
 
         let uptr = unsafe { core::ptr::read_unaligned(ptr_addr as *const usize) };
-        if uptr == 0 { break; } // NULL terminator
+        if uptr == 0 {
+            break;
+        } // NULL terminator
         let s = copy_cstr_from_user(UserPtr(uptr as *const u8), max_str)?;
         out.push(s);
     }

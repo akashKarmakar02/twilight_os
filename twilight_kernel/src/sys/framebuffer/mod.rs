@@ -1,38 +1,83 @@
 use crate::arch::x86_64::io::delay;
 use crate::driver::timer::pit::uptime;
-use crate::serial_prtinln;
-use crate::sys::fs::{VfsError, VfsNode};
-use alloc::vec;
-use alloc::vec::Vec;
+use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
+use crate::sys::memory::map_kernel_buffer;
+use crate::sys::proc::mem::{PAGE, align_up};
+use crate::sys::syscall::memory::{MAP_SHARED, PROT_EXEC, PROT_WRITE};
+use alloc::alloc::{Layout, alloc_zeroed};
+use core::slice;
+use core::{cmp, mem};
 use limine::framebuffer::Framebuffer;
 use spin::Once;
-use x86_64::instructions::hlt;
 
 #[allow(static_mut_refs)]
 pub static mut FRAMEBUFFER: Once<TwilightFrameBuffer> = Once::new();
+
+pub const FBIOGET_VSCREENINFO: u64 = 0x4600;
+pub const FBIOPUT_VSCREENINFO: u64 = 0x4601;
+pub const FBIOGET_FSCREENINFO: u64 = 0x4602;
+pub const FBIOGETCMAP: u64 = 0x4604;
+pub const FBIOPUTCMAP: u64 = 0x4605;
+pub const FBIOPAN_DISPLAY: u64 = 0x4606;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FbVarScreenInfo {
+    pub xres: u32,
+    pub yres: u32,
+    pub bits_per_pixel: u32,
+    pub red_offset: u32,
+    pub green_offset: u32,
+    pub blue_offset: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FbFixScreenInfo {
+    pub line_length: u32,
+    pub smem_len: u32,
+}
+
 pub struct TwilightFrameBuffer {
-    video_buf_addr: *mut u8,
+    pub video_buf: &'static mut [u32],
     pub height: u64,
     pub width: u64,
-    pitch: u64,
-    pixel_buf: Vec<u32>,
+    pub pitch: u64,
+    pixel_ptr: *mut u32,
+    pixel_len: usize,
+    pixel_capacity_bytes: usize,
 }
 
 impl TwilightFrameBuffer {
     pub fn new(fb: &Framebuffer) -> Self {
-        let mut pixel_buf = Vec::new();
-        for i in 0..(fb.width() * fb.height()) as usize {
-            // serial_prtinln!("{i}");
-            pixel_buf.push(0);
-        }
-        let w = fb.width();
-        let h = fb.height();
+        let width = fb.width() as usize;
+        let height = fb.height() as usize;
+        let bits_per_pixel = fb.bpp() as usize;
+        let byte_len = width * height * (bits_per_pixel / 8);
+
+        let framebuffer = unsafe {
+            core::slice::from_raw_parts_mut::<u32>(fb.addr().cast::<u32>(), byte_len / 4)
+        };
+
+        assert_eq!(framebuffer.len(), (width * height));
+
+        let storage_bytes = align_up(cmp::max(byte_len, fb.pitch() as usize * height), PAGE);
+        let layout =
+            Layout::from_size_align(storage_bytes, PAGE).expect("invalid framebuffer layout");
+        let raw_ptr = unsafe { alloc_zeroed(layout) };
+        assert!(
+            !raw_ptr.is_null(),
+            "failed to allocate framebuffer shadow buffer"
+        );
+
         Self {
-            video_buf_addr: fb.addr(),
-            width: w,
-            height: h,
-            pitch: fb.pitch(),                    // bytes per scanline in VRAM
-            pixel_buf, // compact RGBx buffer (u32 per pixel)
+            video_buf: framebuffer,
+            width: width as u64,
+            height: height as u64,
+            pitch: fb.pitch(), // bytes per scanline in VRAM
+            pixel_ptr: raw_ptr.cast::<u32>(),
+            pixel_len: width * height,
+            pixel_capacity_bytes: storage_bytes,
         }
     }
 
@@ -46,18 +91,26 @@ impl TwilightFrameBuffer {
         self.pitch
     }
 
-    pub fn addr(&self) -> *mut u8 {
-        self.video_buf_addr
+    #[inline]
+    fn pixels(&self) -> &[u32] {
+        unsafe { slice::from_raw_parts(self.pixel_ptr, self.pixel_len) }
     }
 
-    fn extract_color(&self, pixels: &[u8]) -> u32 {
-        if pixels.len() < 4 {
-            panic!("Input data is too short to extract a color!");
-        }
-        let r = pixels[0] as u32;
-        let g = pixels[1] as u32;
-        let b = pixels[2] as u32;
-        (r << 16) | (g << 8) | b // Keep the RGB format same as input
+    #[inline]
+    fn pixels_mut(&mut self) -> &mut [u32] {
+        unsafe { slice::from_raw_parts_mut(self.pixel_ptr, self.pixel_len) }
+    }
+
+    pub fn shared_mem_ptr(&self) -> usize {
+        self.pixel_ptr as usize
+    }
+
+    pub fn shared_mem_len(&self) -> usize {
+        self.pixel_capacity_bytes
+    }
+
+    pub fn pixel_bytes(&self) -> usize {
+        self.pixel_len * mem::size_of::<u32>()
     }
 
     #[inline]
@@ -70,12 +123,12 @@ impl TwilightFrameBuffer {
             return;
         }
         let i = self.idx(x, y);
-        self.pixel_buf[i] = color;
+        self.pixels_mut()[i] = color;
     }
 
     pub fn clear_buf(&mut self, color: u32) {
         // fill CPU-side backbuffer only
-        self.pixel_buf.fill(color);
+        self.pixels_mut().fill(color);
     }
 
     pub fn fill_rect_buf(&mut self, x: i64, y: i64, w: i64, h: i64, color: u32) {
@@ -91,59 +144,43 @@ impl TwilightFrameBuffer {
         for yy in y0..y1 {
             let row_start = self.idx(x0, yy);
             let row_end = self.idx(x1 - 1, yy) + 1;
-            self.pixel_buf[row_start..row_end].fill(color);
+            self.pixels_mut()[row_start..row_end].fill(color);
         }
     }
 
     pub fn sync_full(&mut self) {
-        // copy pixel_buf -> VRAM (respect pitch). Each pixel is u32.
-        let w = self.width as usize;
-        let h = self.height as usize;
-        let pitch_u32 = (self.pitch / 4) as usize;
-
-        unsafe {
-            let fb_ptr = self.video_buf_addr as *mut u32;
-            for y in 0..h {
-                let src = &self.pixel_buf[y * w..y * w + w];
-                let dst_row = fb_ptr.add(y * pitch_u32);
-                core::ptr::copy_nonoverlapping(src.as_ptr(), dst_row, w);
-            }
-        }
+        let pixel_data = unsafe {
+            slice::from_raw_parts(self.pixel_ptr, self.pixel_len)
+        };
+        self.video_buf.copy_from_slice(pixel_data);
     }
 
     // Optional: keep sync_partial but fix bounds (end is exclusive)
     pub fn sync_partial(&mut self, pixel_start: u64, pixel_count: u64) {
-        let total = self.pixel_buf.len() as u64;
+        let total = self.pixel_len as u64;
         let start = pixel_start.min(total);
         let end = (start + pixel_count).min(total);
         if start >= end {
             return;
         }
 
-        let w = self.width as usize;
-        let pitch_u32 = (self.pitch / 4) as usize;
+        let start_idx = start as usize;
+        let end_idx = end as usize;
 
-        unsafe {
-            let fb_ptr = self.video_buf_addr as *mut u32;
-            let mut i = start as usize;
-            while i < end as usize {
-                let y = i / w;
-                let x = i % w;
+        // Create a temporary slice of the required data
+        let pixel_data = unsafe {
+            // We know this is safe because we're just reading from pixel_ptr
+            // which is a buffer we own, and not modifying it
+            slice::from_raw_parts(self.pixel_ptr.add(start_idx), end_idx - start_idx)
+        };
 
-                let run = (w - x).min(end as usize - i); // contiguous run to the end of this row
-                let src = &self.pixel_buf[i..i + run];
-                let dst = fb_ptr.add(y * pitch_u32 + x);
-                core::ptr::copy_nonoverlapping(src.as_ptr(), dst, run);
-
-                i += run;
-            }
-        }
+        self.video_buf[start_idx..end_idx].copy_from_slice(pixel_data);
     }
 
     pub fn scroll_up(&mut self, lines: u64, fill_color: u32) {
         let h = self.height as usize;
         let w = self.width as usize;
-        let scroll = lines.min(self.height as u64) as usize;
+        let scroll = lines.min(self.height) as usize;
 
         if scroll == 0 {
             return;
@@ -159,14 +196,18 @@ impl TwilightFrameBuffer {
 
         // SAFER copy: use a manual copy to avoid overlap issues with copy_within
         for i in 0..(h - scroll) * w {
-            let val = self.pixel_buf[src_start + i];
+            let val = self.video_buf[src_start + i];
             if val != 0 {}
-            self.pixel_buf[dst_start + i] = self.pixel_buf[src_start + i];
+            self.video_buf[dst_start + i] = self.video_buf[src_start + i];
         }
 
         // Fill the bottom cleared area
         let fill_start = (h - scroll) * w;
-        self.pixel_buf[fill_start..].fill(fill_color);
+        self.video_buf[fill_start..].fill(fill_color);
+
+        // Create a temporary copy to avoid the borrow conflict
+        let video_buf_copy = unsafe { core::slice::from_raw_parts(self.video_buf.as_ptr(), self.video_buf.len()) };
+        self.pixels_mut().copy_from_slice(&video_buf_copy);
     }
 
     /// Scroll the framebuffer content down by `lines` pixels.
@@ -186,10 +227,11 @@ impl TwilightFrameBuffer {
 
         // Copy downwards safely to prevent overlap corruption
         for i in 0..(h - scroll) * w {
-            self.pixel_buf[dst_start + i] = self.pixel_buf[src_start + i];
+            let val = self.pixels()[src_start + i];
+            self.pixels_mut()[dst_start + i] = val;
         }
         // Fill top area
-        self.pixel_buf[0..(scroll * w)].fill(fill_color);
+        self.pixels_mut()[0..(scroll * w)].fill(fill_color);
     }
 
     pub fn animate_bouncing_rect(&mut self, duration_ms: u64) {
@@ -259,7 +301,6 @@ impl TwilightFrameBuffer {
                 next_tick += frame_ms;
                 did_frame = true;
             }
-            serial_prtinln!("frame: {}", frame_ms);
             // If we got massively behind (e.g., breakpoint), resync gently
             if !did_frame && now > next_tick + 8 * frame_ms {
                 next_tick = now + frame_ms;
@@ -425,48 +466,93 @@ fn uptime_ms() -> u64 {
     (uptime() * 1000.0) as u64
 }
 
-impl Clone for TwilightFrameBuffer {
-    fn clone(&self) -> Self {
-        Self {
-            video_buf_addr: self.video_buf_addr,
-            height: self.height,
-            width: self.width,
-            pitch: self.pitch,
-            pixel_buf: self.pixel_buf.clone(),
-        }
-    }
-}
-
-impl VfsNode for TwilightFrameBuffer {
-    fn read(&self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, VfsError> {
-        Err(VfsError::PermissionDenied)
+impl VfsNodeOps for TwilightFrameBuffer {
+    fn read(
+        &self,
+        _device: &mut BlockDev,
+        _offset: usize,
+        _buffer: &mut [u8],
+    ) -> Result<usize, ()> {
+        Err(())
     }
 
-    fn write(&mut self, offset: u64, buffer: &[u8]) -> Result<usize, VfsError> {
+    fn write(&mut self, _device: &mut BlockDev, offset: usize, buffer: &[u8]) -> Result<(), ()> {
         if buffer.len() % 4 != 0 {
-            return Err(VfsError::InvalidOperation);
+            return Err(());
         }
 
-        let fb_ptr = self.addr();
+        let buf_u32 = unsafe {
+            core::slice::from_raw_parts(buffer.as_ptr() as *const u32, buffer.len() / 4)
+        };
 
-        unsafe {
-            let fb_u32_ptr = fb_ptr.cast::<u32>();
-            for i in 0..(buffer.len() / 4) {
-                let color = self.extract_color(&buffer[i * 4..(i + 1) * 4]);
-                fb_u32_ptr.add(i + offset as usize).write_volatile(color);
-                self.pixel_buf[i + offset as usize] = color;
+        // `offset` is provided in pixel units by console + /dev/fb0 writers.
+        let start = offset;
+        let end = start + buf_u32.len();
+        if end > self.video_buf.len() {
+            return Err(());
+        }
+
+        self.video_buf[start..end].copy_from_slice(buf_u32);
+        self.pixels_mut()[start..end].copy_from_slice(buf_u32);
+
+        Ok(())
+    }
+
+    fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
+        Ok(true)
+    }
+
+    fn ioctl(&mut self, _device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()> {
+        match cmd {
+            FBIOGET_VSCREENINFO => {
+                let info = FbVarScreenInfo {
+                    xres: self.width as u32,
+                    yres: self.height as u32,
+                    bits_per_pixel: 32,
+                    red_offset: 16,
+                    green_offset: 8,
+                    blue_offset: 0,
+                };
+
+                unsafe {
+                    let ptr = arg as *mut FbVarScreenInfo;
+                    if ptr.is_null() {
+                        return Ok(-22);
+                    }
+                    core::ptr::write(ptr, info);
+                }
+
+                Ok(0)
             }
+
+            FBIOGET_FSCREENINFO => {
+                let info = FbFixScreenInfo {
+                    line_length: self.pitch as u32,
+                    smem_len: (self.pitch * self.height) as u32,
+                };
+
+                unsafe {
+                    let ptr = arg as *mut FbFixScreenInfo;
+                    if ptr.is_null() {
+                        return Ok(-22);
+                    }
+                    core::ptr::write(ptr, info);
+                }
+
+                Ok(0)
+            }
+
+            FBIOPAN_DISPLAY => {
+                self.sync_full();
+                Ok(0)
+            }
+
+            _ => Ok(-1),
         }
-
-        Ok(buffer.len())
     }
 
-    fn size(&self) -> u64 {
-        self.width * self.height
-    }
-
-    fn is_directory(&self) -> bool {
-        false
+    fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
+        Ok(-1)
     }
 }
 
@@ -490,9 +576,9 @@ pub fn get_pitch() -> u64 {
 
 pub fn convert_color(color: u32) -> [u8; 4] {
     let rgba: [u8; 4] = [
-        ((color >> 16) & 0xFF) as u8, // Red
-        ((color >> 8) & 0xFF) as u8,  // Green
-        (color & 0xFF) as u8,         // Blue
+        (color & 0xFF) as u8,         // Red (was Blue)
+        ((color >> 8) & 0xFF) as u8,  // Green (unchanged)
+        ((color >> 16) & 0xFF) as u8, // Blue (was Red)
         255,                          // Alpha (fully opaque)
     ];
 
@@ -510,5 +596,70 @@ pub fn get_framebuffer_mut() -> &'static mut TwilightFrameBuffer {
     #[allow(static_mut_refs)]
     unsafe {
         FRAMEBUFFER.get_mut().unwrap()
+    }
+}
+
+/// Exposes the single global framebuffer instance via /dev/fb0 without cloning
+/// the backbuffer. This keeps the kernel console's cached pixel buffer and
+/// userspace writes in sync, avoiding display flicker when both touch the fb.
+pub struct FramebufferDev;
+
+impl VfsNodeOps for FramebufferDev {
+    fn read(&self, device: &mut BlockDev, offset: usize, buf: &mut [u8]) -> Result<usize, ()> {
+        get_framebuffer().read(device, offset, buf)
+    }
+
+    fn write(&mut self, device: &mut BlockDev, offset: usize, data: &[u8]) -> Result<(), ()> {
+        get_framebuffer_mut().write(device, offset, data)
+    }
+
+    fn poll(&self, device: &mut BlockDev) -> Result<bool, ()> {
+        get_framebuffer().poll(device)
+    }
+
+    fn ioctl(&mut self, device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()> {
+        get_framebuffer_mut().ioctl(device, cmd, arg)
+    }
+
+    fn unlink(&mut self, device: &mut BlockDev) -> Result<i32, ()> {
+        get_framebuffer_mut().unlink(device)
+    }
+
+    fn mmap(
+        &mut self,
+        _device: &mut BlockDev,
+        process: &mut crate::sys::proc::Process,
+        addr: usize,
+        len: usize,
+        prot: usize,
+        flags: usize,
+        offset: usize,
+    ) -> Result<usize, i32> {
+        if offset != 0 {
+            return Err(-22);
+        }
+        if (flags & MAP_SHARED) == 0 {
+            return Err(-38);
+        }
+
+        let fb = get_framebuffer();
+        if len == 0 || len > fb.shared_mem_len() {
+            return Err(-22);
+        }
+
+        let writable = (prot & PROT_WRITE) != 0;
+        let executable = (prot & PROT_EXEC) != 0;
+
+        map_kernel_buffer(
+            &mut process.mapper,
+            fb.shared_mem_ptr(),
+            len,
+            addr,
+            writable,
+            executable,
+        )
+        .map_err(|_| -12)?;
+
+        Ok(addr)
     }
 }

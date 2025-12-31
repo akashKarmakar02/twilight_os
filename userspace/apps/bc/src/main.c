@@ -1,9 +1,7 @@
-// bc.c — tiny, minimal, unixy calculator (uses getchar/printf/puts only)
 #include <stdio.h>
 
 typedef long long i64;
 
-/* --- helpers (no ctype) --- */
 static int is_space(int c) {
   return c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v';
 }
@@ -12,7 +10,6 @@ static int to_lower(int c) {
   return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
 }
 
-/* --- read one line into buf, return length; 0 on EOF --- */
 static int read_line(char *buf, int cap) {
   int n = 0, c;
   while ((c = getchar()) != EOF) {
@@ -27,7 +24,6 @@ static int read_line(char *buf, int cap) {
   return (c == EOF && n == 0) ? 0 : n;
 }
 
-/* --- lexer over a string --- */
 typedef struct {
   const char *s;
   int i;
@@ -47,7 +43,6 @@ static int eat(Lex *L, int c) {
 
 static i64 parse_expr(Lex *L, int *ok);
 
-/* number: [-]? DIGITS */
 static i64 parse_number(Lex *L, int *ok) {
   skip_ws(L);
   int neg = 0;
@@ -67,7 +62,6 @@ static i64 parse_number(Lex *L, int *ok) {
   return neg ? -v : v;
 }
 
-/* atom: number | '(' expr ')' | +atom | -atom */
 static i64 parse_atom(Lex *L, int *ok) {
   skip_ws(L);
   if (eat(L, '(')) {
@@ -85,7 +79,6 @@ static i64 parse_atom(Lex *L, int *ok) {
   return parse_number(L, ok);
 }
 
-/* integer power (right-assoc) */
 static i64 ipow(i64 a, i64 b) {
   if (b < 0)
     return 0;
@@ -111,7 +104,6 @@ static i64 parse_pow(Lex *L, int *ok) {
   return v;
 }
 
-/* term: pow ((*|/|%) pow)* */
 static i64 parse_term(Lex *L, int *ok) {
   i64 v = parse_pow(L, ok);
   if (!*ok)
@@ -142,7 +134,6 @@ static i64 parse_term(Lex *L, int *ok) {
   return v;
 }
 
-/* expr: term ((+|-) term)* */
 static i64 parse_expr(Lex *L, int *ok) {
   i64 v = parse_term(L, ok);
   if (!*ok)
@@ -164,7 +155,6 @@ static i64 parse_expr(Lex *L, int *ok) {
   return v;
 }
 
-/* trim in-place */
 static void trim(char *s) {
   int a = 0;
   while (is_space((unsigned char)s[a]) || s[a] == ' ')
@@ -197,7 +187,6 @@ int main(void) {
     if (!line[0])
       continue;
 
-    // quit / exit
     int q = (to_lower(line[0]) == 'q' && to_lower(line[1]) == 'u' &&
              to_lower(line[2]) == 'i' && to_lower(line[3]) == 't' && !line[4]);
     int e = (to_lower(line[0]) == 'e' && to_lower(line[1]) == 'x' &&

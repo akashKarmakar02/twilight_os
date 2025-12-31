@@ -1,5 +1,6 @@
 CC ?= musl-gcc
-CFLAGS ?= -O2 -static -Wall -Wextra
+CFLAGS ?= -O2 -static -Wall -Wextra -D_GNU_SOURCE
+LDFLAGS ?= -lcrypt
 
 BIN := logind
 SRC_DIR := src
@@ -16,7 +17,8 @@ $(SRC_DIR)/%.o: $(SRC_DIR)/%.c
 
 # link
 $(BIN): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 clean:
 	rm -f $(BIN) $(OBJS)
+

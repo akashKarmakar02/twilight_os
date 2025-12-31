@@ -3,7 +3,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub mod cmos;
 pub mod pit;
 
-
 static TSC_FREQUENCY: AtomicU64 = AtomicU64::new(0);
 
 pub fn tsc_frequency() -> u64 {

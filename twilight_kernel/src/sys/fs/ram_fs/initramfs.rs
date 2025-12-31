@@ -151,12 +151,11 @@ pub enum CpioError {
     Trailer,
 }
 
-
 impl CpioIterator {
     pub fn new(buf: &'static [u8]) -> Self {
         Self { buf, pos: 0 }
     }
-    
+
     pub fn default() -> Self {
         Self { buf: &[], pos: 0 }
     }

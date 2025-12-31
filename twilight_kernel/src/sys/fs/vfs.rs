@@ -1,12 +1,13 @@
+use crate::driver::disk::BlockDeviceIO;
+use crate::sys::fs::twilight_fs::inode::Inode;
+use crate::sys::fs::twilight_fs::TfsError;
+use crate::sys::proc::Process;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
-use crate::driver::disk::BlockDeviceIO;
-use crate::sys::fs::twilight_fs::inode::Inode;
-use crate::sys::fs::twilight_fs::TfsError;
 
 pub static mut VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
 
@@ -75,7 +76,6 @@ impl Metadata {
 }
 pub type BlockDev = Arc<Mutex<Box<dyn BlockDeviceIO + Send>>>;
 
-
 pub trait FsCtx {
     fn block_size(&self) -> usize;
 
@@ -85,6 +85,8 @@ pub trait FsCtx {
     fn alloc_zone(&mut self) -> Result<u32, TfsError>;
     fn free_zone(&mut self, zone: u32) -> Result<(), TfsError>;
     fn write_inode_twilight(&mut self, ino: u32, inode: Inode) -> Result<(), &'static str>;
+
+    fn remove_file(&mut self, path: &str) -> Result<(), ()>;
 }
 
 #[allow(dead_code)]
@@ -96,23 +98,76 @@ pub struct VfsNode {
 
 impl VfsNode {
     pub fn new(device: BlockDev, metadata: Metadata, node: Arc<RwLock<dyn VfsNodeOps>>) -> Self {
-        Self { device, metadata, node }
+        Self {
+            device,
+            metadata,
+            node,
+        }
     }
 
-    pub fn read(&mut self) -> Result<Vec<u8>, ()> {
-        self.node.read().read(&mut self.device, 0, &mut [])
+    pub fn read(&mut self, lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
+        self.node.read().read(&mut self.device, lba, buf)
     }
 
-    pub fn write(&mut self, data: &[u8]) -> Result<(), ()> {
-        self.node.write().write(&mut self.device, 0, data)
+    pub fn write(&mut self, lba: usize, data: &[u8]) -> Result<(), ()> {
+        self.node.write().write(&mut self.device, lba, data)
+    }
+
+    pub fn poll(&mut self) -> Result<bool, ()> {
+        self.node.read().poll(&mut self.device)
+    }
+
+    pub fn unlink(&mut self) -> Result<i32, ()> {
+        self.node.write().unlink(&mut self.device)
+    }
+
+    pub fn ioctl(&mut self, cmd: u64, arg: usize) -> Result<i64, ()> {
+        self.node.write().ioctl(&mut self.device, cmd, arg)
+    }
+
+    pub fn mmap(
+        &mut self,
+        process: &mut Process,
+        addr: usize,
+        len: usize,
+        prot: usize,
+        flags: usize,
+        offset: usize,
+    ) -> Result<usize, i32> {
+        self.node
+            .write()
+            .mmap(&mut self.device, process, addr, len, prot, flags, offset)
+    }
+}
+
+impl Clone for VfsNode {
+    fn clone(&self) -> Self {
+        Self {
+            device: self.device.clone(),
+            metadata: self.metadata.clone(),
+            node: self.node.clone(),
+        }
     }
 }
 
 pub trait VfsNodeOps: Send + Sync + 'static {
-    fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<Vec<u8>, ()>;
+    fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<usize, ()>;
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()>;
     fn poll(&self, device: &mut BlockDev) -> Result<bool, ()>;
-
+    fn ioctl(&mut self, device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()>;
+    fn unlink(&mut self, device: &mut BlockDev) -> Result<i32, ()>;
+    fn mmap(
+        &mut self,
+        _device: &mut BlockDev,
+        _process: &mut Process,
+        _addr: usize,
+        _len: usize,
+        _prot: usize,
+        _flags: usize,
+        _offset: usize,
+    ) -> Result<usize, i32> {
+        Err(-38)
+    }
 }
 
 pub trait FileSystem: Send + Sync + 'static {
@@ -134,22 +189,31 @@ unsafe impl Sync for Vfs {}
 
 #[allow(dead_code)]
 impl Vfs {
-    pub const fn new() -> Self { Self { mount_points: Vec::new() } }
+    pub const fn new() -> Self {
+        Self {
+            mount_points: Vec::new(),
+        }
+    }
 
     pub fn mount(&mut self, prefix: &'static str, fs: Arc<Mutex<dyn FileSystem>>) {
         self.mount_points.push((prefix, fs));
-        self.mount_points.sort_by(|(a,_),(b,_)| b.len().cmp(&a.len()));
+        self.mount_points
+            .sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()));
     }
 
     pub fn unmount(&mut self, prefix: &str) -> bool {
-        if let Some(i) = self.mount_points.iter().position(|(p,_)| *p == prefix) {
-            self.mount_points.remove(i); true
-        } else { false }
+        if let Some(i) = self.mount_points.iter().position(|(p, _)| *p == prefix) {
+            self.mount_points.remove(i);
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]
     fn route<'a>(&self, path: &'a str) -> Option<(&'a str, &Arc<Mutex<dyn FileSystem>>)> {
-        self.mount_points.iter()
+        self.mount_points
+            .iter()
             .find(|(p, _)| path.starts_with(*p))
             .map(|(prefix, fs)| {
                 let rel = &path[prefix.len()..];

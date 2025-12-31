@@ -1,7 +1,3 @@
-// cat.c — for your OS; handles ">", ">>" inside cat
-// Syscalls used: open, read, write, close
-
-// ---- tiny libc shims (safe if your headers are not ready) ----
 #include "unistd.h"
 #include <fcntl.h>
 #include <stdio.h>
@@ -23,7 +19,6 @@
 #define O_APPEND 02000
 #endif
 
-// ---- helpers (no libc) ----
 static size_t z_strlen(const char *s) {
   const char *p = s;
   while (*p)
@@ -53,17 +48,14 @@ static void err2(const char *a, const char *b) {
   putstr_fd(2, "\n");
 }
 
-// ---- cat core ----
 static int out_fd = 1;
 
-// Remove argv[i] and argv[i+1]
 static void remove_two(char **argv, int *argc, int i) {
   for (int j = i; j + 2 <= *argc; ++j)
     argv[j] = argv[j + 2];
   *argc -= 2;
 }
 
-// change signature to accept argv cleanly
 char *join_strings(char *result, size_t size, char *const arr[], size_t count) {
   result[0] = '\0';
   int first = 1;
@@ -104,10 +96,10 @@ int main(int argc, char **argv) {
     int fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);  // add mode
     if (fd < 0) {
       err2(file_path, ": cannot open");
-      return 1; // don't close on failure
+      return 1;
     }
 
-    if (argc == 3) { // only create/truncate then exit
+    if (argc == 3) {
       close(fd);
       return 0;
     }
@@ -131,13 +123,12 @@ int main(int argc, char **argv) {
     unsigned char buf[512];
     for (;;) {
       ssize_t r = read(fd, buf, sizeof buf);
-      if (r == 0) { // EOF
+      if (r == 0) {
         close(fd);
         return 0;
       }
       if (r < 0) {
           printf("error: %d\n", r);
-        // no fstat: just report a generic read error
         err2("read error", 0);
         close(fd);
         return 1;

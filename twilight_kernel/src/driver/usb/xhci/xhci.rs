@@ -1,9 +1,7 @@
-#![no_std]
-
 use alloc::sync::Arc;
 use core::ptr::NonNull;
-
 use crate::driver::pci_device_driver::PciDeviceDriver;
+use crate::sys::pci::DeviceConfig;
 use crate::driver::usb::xhci::xhci_regs::{
     XhciCapabilityRegisters,
     XhciOperationalRegisters,
@@ -64,7 +62,7 @@ impl PciDeviceDriver for XhciDriver {
         true
     }
 
-    fn attach_device(&mut self, dev: Arc<PciDevice>, enable_bus_mastering: bool) {
+    fn attach_device(&mut self, dev: Arc<DeviceConfig>, enable_bus_mastering: bool) {
         todo!()
     }
 }

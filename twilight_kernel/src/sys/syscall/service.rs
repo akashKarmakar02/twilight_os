@@ -1,101 +1,19 @@
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
 use crate::driver::disk::dummy_blockdev;
-use crate::sys::console::DIR;
-use crate::sys::console::tty::get_tty;
+use crate::driver::timer::pit::uptime;
+use crate::sys::console::{self, DIR, get_tty};
 use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
-use crate::sys::proc::{Handler, PROCESS_TABLE, Process, USER_STACK_SIZE};
-use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array};
-use crate::{print, serial_prtinln};
-use alloc::boxed::Box;
-use alloc::format;
+use crate::sys::proc::{FdEntry, OpenFile, PROCESS_TABLE, Process, USER_STACK_SIZE};
+use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
+use crate::task::executor::halt;
+use crate::{logger, print, sys};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use core::arch::asm;
 use spin::mutex::Mutex;
 use twilight_common::syscall::types::*;
-
-pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
-    let file_descriptor = arg1;
-    let buf = arg2 as *const u8;
-    let len = arg3;
-    let buf = unsafe { core::slice::from_raw_parts(buf, len) };
-
-    let res = match file_descriptor {
-        1 => {
-            print!("{}", String::from_utf8_lossy(buf));
-
-            len as i64
-        }
-        2 => {
-            print!("{}", String::from_utf8_lossy(buf));
-
-            len as i64
-        }
-        n => {
-            #[allow(static_mut_refs)]
-            let process = unsafe {
-                PROCESS_TABLE
-                    .get_mut()
-                    .unwrap()
-                    .get_process(crate::sys::proc::id())
-                    .unwrap()
-            };
-
-            if let Some(node) = process.handler.get_mut(n as usize - 3) {
-                if let Ok(_) = node.handler.lock().write(buf) {
-                    return len as i64;
-                }
-            }
-
-            -1
-        }
-    };
-
-    res
-}
-
-pub fn read(handler: usize, buf: &mut [u8]) -> i64 {
-    if handler == 0 || handler <= 2 {
-        let tty = get_tty();
-
-        if let Ok(v) = tty.read(&mut dummy_blockdev(), 0, buf) {
-            return v.len() as i64;
-        }
-
-        return 0;
-    }
-
-    #[allow(static_mut_refs)]
-    let process = unsafe {
-        PROCESS_TABLE
-            .get_mut()
-            .unwrap()
-            .get_process(crate::sys::proc::id())
-            .unwrap()
-    };
-
-    if let Some(node) = process.handler.get_mut(handler - 3) {
-        if node.handler.lock().metadata.file_type == FileType::Dir {
-            return -EISDIR as i64;
-        }
-        let seek = node.seek;
-        if let Ok(content) = node.handler.lock().read() {
-            let copy_len = if seek < content.len() {
-                (content.len() - seek).min(buf.len())
-            } else {
-                0
-            };
-            if copy_len > 0 {
-                buf[..copy_len].copy_from_slice(&content[seek..(seek + copy_len)]);
-            }
-            node.seek += copy_len;
-            return copy_len as i64;
-        }
-    }
-
-    -1
-}
 
 fn join_paths(base: &str, rel: &str) -> String {
     if rel.is_empty() || rel == "." {
@@ -111,8 +29,25 @@ fn join_paths(base: &str, rel: &str) -> String {
     }
 }
 
+#[inline(always)]
+fn parent_path(path: &str) -> &str {
+    // Remove trailing slash (except root)
+    let path = if path != "/" && path.ends_with('/') {
+        &path[..path.len() - 1]
+    } else {
+        path
+    };
+
+    // Find the last '/'
+    match path.rfind('/') {
+        Some(0) => "/", // parent of "/foo" is "/"
+        Some(idx) => &path[..idx],
+        None => ".", // no slash → current directory
+    }
+}
+
 fn normalize_path(p: &str) -> String {
-    let mut out: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    let mut out: Vec<&str> = Vec::new();
     for seg in p.split('/') {
         if seg.is_empty() || seg == "." {
             continue;
@@ -130,6 +65,93 @@ fn normalize_path(p: &str) -> String {
     }
 }
 
+const FD_CLOEXEC: i32 = 0x1;
+const STATUS_FLAG_MUTABLE: i32 = O_APPEND | O_NONBLOCK;
+
+fn status_flags_from_open(flags: i32) -> i32 {
+    let mut status = flags & O_ACCMODE;
+    status |= flags & (O_APPEND | O_NONBLOCK | O_DIRECTORY | O_PATH);
+    status
+}
+
+fn fd_slot(process: &Process, fd: i32) -> Result<&FdEntry, i32> {
+    if fd < 3 {
+        return Err(-EBADF);
+    }
+    let idx = (fd - 3) as usize;
+    match process.fd_table.get(idx) {
+        Some(Some(entry)) => Ok(entry),
+        _ => Err(-EBADF),
+    }
+}
+
+fn fd_slot_mut(process: &mut Process, fd: i32) -> Result<&mut FdEntry, i32> {
+    if fd < 3 {
+        return Err(-EBADF);
+    }
+    let idx = (fd - 3) as usize;
+    match process.fd_table.get_mut(idx) {
+        Some(Some(entry)) => Ok(entry),
+        _ => Err(-EBADF),
+    }
+}
+
+fn clone_open_file(process: &Process, fd: i32) -> Result<Arc<Mutex<OpenFile>>, i32> {
+    Ok(fd_slot(process, fd)?.file.clone())
+}
+
+fn install_fd_entry(process: &mut Process, entry: FdEntry, min_fd: i32) -> Result<i32, i32> {
+    if min_fd < 0 {
+        return Err(EINVAL);
+    }
+    let start_idx = min_fd.saturating_sub(3).max(0) as usize;
+    for idx in start_idx..process.fd_table.len() {
+        if process.fd_table[idx].is_none() {
+            process.fd_table[idx] = Some(entry);
+            return Ok((idx + 3) as i32);
+        }
+    }
+    while process.fd_table.len() < start_idx {
+        process.fd_table.push(None);
+    }
+    process.fd_table.push(Some(entry));
+    Ok((process.fd_table.len() - 1 + 3) as i32)
+}
+
+fn set_stdio_status(process: &mut Process, fd: i32, value: i32) -> Result<(), i32> {
+    if (0..=2).contains(&fd) {
+        process.stdio_flags[fd as usize] = value;
+        Ok(())
+    } else {
+        Err(-EBADF)
+    }
+}
+
+fn get_stdio_status(process: &Process, fd: i32) -> Result<i32, i32> {
+    if (0..=2).contains(&fd) {
+        Ok(process.stdio_flags[fd as usize])
+    } else {
+        Err(-EBADF)
+    }
+}
+
+fn set_stdio_fd_flags(process: &mut Process, fd: i32, value: i32) -> Result<(), i32> {
+    if (0..=2).contains(&fd) {
+        process.stdio_fd_flags[fd as usize] = value;
+        Ok(())
+    } else {
+        Err(-EBADF)
+    }
+}
+
+fn get_stdio_fd_flags(process: &Process, fd: i32) -> Result<i32, i32> {
+    if (0..=2).contains(&fd) {
+        Ok(process.stdio_fd_flags[fd as usize])
+    } else {
+        Err(-EBADF)
+    }
+}
+
 fn base_for_dirfd(process: &mut Process, dirfd: i32) -> Result<String, i32> {
     if dirfd == AT_FDCWD {
         return Ok(process.pwd.clone());
@@ -137,20 +159,13 @@ fn base_for_dirfd(process: &mut Process, dirfd: i32) -> Result<String, i32> {
     if dirfd < 3 {
         return Err(-EBADF);
     }
-    let idx = (dirfd - 3) as usize;
-    if idx >= process.handler.len() {
-        return Err(-EBADF);
-    }
-
-    // You store '&'static mut Handler' in the table:
-    let h: &mut Handler = process.handler[idx];
-
-    // Ensure it’s a directory FD
-    if h.handler.lock().metadata.file_type != FileType::Dir {
+    let entry = fd_slot(process, dirfd)?;
+    let file = entry.file.lock();
+    if file.node.lock().metadata.file_type != FileType::Dir {
         return Err(-ENOTDIR);
     }
 
-    Ok(h.path.clone())
+    Ok(file.path.clone())
 }
 fn split_parent_name(path: &str) -> (&str, &str) {
     if let Some(p) = path.rfind('/') {
@@ -161,6 +176,163 @@ fn split_parent_name(path: &str) -> (&str, &str) {
         }
     } else {
         (".", path)
+    }
+}
+
+pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
+    let file_descriptor = arg1;
+    let buf = arg2 as *const u8;
+    let len = arg3;
+    let buf = unsafe { core::slice::from_raw_parts(buf, len) };
+
+    let res = match file_descriptor {
+        1 => {
+            if console::pipeline_write(buf) {
+                len as i64
+            } else {
+                print!("{}", String::from_utf8_lossy(buf));
+                len as i64
+            }
+        }
+        2 => {
+            print!("{}", String::from_utf8_lossy(buf));
+
+            len as i64
+        }
+        n => {
+            #[allow(static_mut_refs)]
+            let process = unsafe {
+                PROCESS_TABLE
+                    .get_mut()
+                    .unwrap()
+                    .get_process(crate::sys::proc::id())
+                    .unwrap()
+            };
+
+            match clone_open_file(process, n) {
+                Ok(file_ref) => {
+                    let mut file = file_ref.lock();
+                    let accmode = file.status_flags & O_ACCMODE;
+                    if accmode == O_RDONLY {
+                        return -(EBADF as i64);
+                    }
+                    if (file.status_flags & O_APPEND) != 0 {
+                        let size = file.node.lock().metadata.size;
+                        file.seek = size;
+                    }
+
+                    let result = {
+                        let mut node = file.node.lock();
+                        node.write(file.seek, buf)
+                    };
+
+                    if let Ok(_) = result {
+                        file.seek += len;
+                        len as i64
+                    } else {
+                        -1
+                    }
+                }
+                Err(code) => code as i64,
+            }
+        }
+    };
+
+    res
+}
+
+pub fn close(fd: i32) -> i64 {
+    if fd < 0 {
+        return -(EBADF as i64);
+    }
+    if fd <= 2 {
+        return 0;
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    let idx = (fd - 3) as usize;
+    if let Some(slot) = process.fd_table.get_mut(idx) {
+        if slot.take().is_some() {
+            return 0;
+        }
+    }
+
+    -(EBADF as i64)
+}
+
+pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
+
+    if fd <= 2 {
+        if fd == 0 {
+            if let Some(bytes) = console::pipeline_read(buf) {
+                return bytes as i64;
+            }
+
+            let flags = process.stdio_flags[0];
+            let tty = get_tty();
+            let mut dev = dummy_blockdev();
+            if (flags & O_NONBLOCK) != 0 {
+                match tty.poll(&mut dev) {
+                    Ok(true) => {}
+                    Ok(false) => return -(EAGAIN as i64),
+                    Err(_) => return -(EIO as i64),
+                }
+            }
+            if let Ok(v) = tty.read(&mut dev, 0, buf) {
+                return v as i64;
+            }
+        }
+        return 0;
+    }
+
+    let file_ref = match clone_open_file(process, fd as i32) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
+    };
+    let mut file = file_ref.lock();
+    let accmode = file.status_flags & O_ACCMODE;
+    if accmode == O_WRONLY {
+        return -(EBADF as i64);
+    }
+    let mut vfs_node = file.node.lock();
+    match vfs_node.metadata.file_type {
+        FileType::Dir => -(EISDIR as i64),
+        FileType::CharDevice => {
+            if let Ok(content) = vfs_node.read(buf.len(), buf) {
+                let copy_len = content.min(buf.len());
+                copy_len as i64
+            } else {
+                -1
+            }
+        }
+        _ => {
+            let seek = file.seek;
+            if let Ok(copy_len) = vfs_node.read(seek, buf) {
+                drop(vfs_node); // Release the immutable borrow before modifying file
+                file.seek += copy_len;
+                copy_len as i64
+            } else {
+                -1
+            }
+        }
     }
 }
 
@@ -249,28 +421,49 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
         // }
     }
 
+    let mut initial_seek: usize = 0;
+    if node.metadata.file_type == FileType::File {
+        let file_len = node.metadata.size;
+        if (flags & O_APPEND) != 0 {
+            initial_seek = file_len;
+        }
+    }
+
     // Install FD
-    let new_fd = process.handler.len() + 3;
-    let h = Box::leak(Box::new(Handler {
-        handler: Arc::new(Mutex::new(node)),
-        seek: 0,
+    let open_file = OpenFile {
+        node: Arc::new(Mutex::new(node)),
+        seek: initial_seek,
         path: full_path,
-        flags, // <-- store flags so read/write can enforce later
-    }));
-    process.handler.push(h);
-    new_fd as i64
+        status_flags: status_flags_from_open(flags),
+    };
+    let entry = FdEntry {
+        file: Arc::new(Mutex::new(open_file)),
+        fd_flags: if (flags & O_CLOEXEC) != 0 {
+            FD_CLOEXEC
+        } else {
+            0
+        },
+    };
+    match install_fd_entry(process, entry, 3) {
+        Ok(fd) => fd as i64,
+        Err(code) => -(code as i64),
+    }
 }
 
 pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
         return -1;
     };
+
     #[allow(static_mut_refs)]
-    let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str()) }) else {
+    let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str().trim()) }) else {
         return -2;
     };
 
-    let Ok(elf_buf) = elf_node.read() else {
+    let elf_size = elf_node.metadata.size;
+    let mut elf_buf = vec![0u8; elf_size];
+
+    let Ok(_) = elf_node.read(0, &mut elf_buf) else {
         return -2;
     };
 
@@ -306,7 +499,6 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
 }
 
 pub fn exit() -> i64 {
-    serial_prtinln!("exiting process with pid {}", crate::sys::proc::id());
     unsafe { asm!("swapgs") };
 
     crate::sys::proc::exit();
@@ -332,7 +524,7 @@ pub fn uname(ptr: usize) -> i64 {
             fill(&mut uname_s.sysname, "TwilightOS");
             fill(&mut uname_s.nodename, "twilight");
             fill(&mut uname_s.release, "0.1.0-testing-build.x86_64");
-            fill(&mut uname_s.version, "#1 NON-SMP 12-10-2025");
+            fill(&mut uname_s.version, "#1 NON-SMP 26-10-2025");
             fill(&mut uname_s.machine, "x86_64");
             fill(&mut uname_s.domainname, "-");
         }
@@ -342,6 +534,7 @@ pub fn uname(ptr: usize) -> i64 {
 }
 
 pub fn arch_prctl(code: u64, addr: u64) -> i64 {
+    logger!("arch_prctl: code=0x{:x}, arg=0x{:x}", code, addr);
     match code {
         ARCH_SET_FS => {
             wrmsr(IA32_FS_BASE, addr);
@@ -353,7 +546,7 @@ pub fn arch_prctl(code: u64, addr: u64) -> i64 {
             0
         }
         ARCH_GET_GS => rdmsr(IA32_GS_BASE) as i64,
-        _ => -1,
+        _ => EINVAL as i64,
     }
 }
 
@@ -383,6 +576,115 @@ pub fn writev(fd: i32, iov_ptr: u64, iovcnt: i32) -> i64 {
         }
     }
     total
+}
+
+pub fn fcntl(fd: i32, cmd: i32, arg: u64) -> i64 {
+    const F_DUPFD: i32 = 0;
+    const F_GETFD: i32 = 1;
+    const F_SETFD: i32 = 2;
+    const F_GETFL: i32 = 3;
+    const F_SETFL: i32 = 4;
+
+    if fd < 0 {
+        return -(EBADF as i64);
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    match cmd {
+        F_GETFD => {
+            if fd <= 2 {
+                return match get_stdio_fd_flags(process, fd) {
+                    Ok(flags) => flags as i64,
+                    Err(code) => code as i64,
+                };
+            }
+            match fd_slot(process, fd) {
+                Ok(entry) => entry.fd_flags as i64,
+                Err(code) => code as i64,
+            }
+        }
+        F_SETFD => {
+            let new_flags = (arg as i32) & FD_CLOEXEC;
+            if fd <= 2 {
+                return match set_stdio_fd_flags(process, fd, new_flags) {
+                    Ok(()) => 0,
+                    Err(code) => code as i64,
+                };
+            }
+            match fd_slot_mut(process, fd) {
+                Ok(entry) => {
+                    entry.fd_flags = (entry.fd_flags & !FD_CLOEXEC) | new_flags;
+                    0
+                }
+                Err(code) => code as i64,
+            }
+        }
+        F_GETFL => {
+            if fd <= 2 {
+                return match get_stdio_status(process, fd) {
+                    Ok(flags) => flags as i64,
+                    Err(code) => code as i64,
+                };
+            }
+            match clone_open_file(process, fd) {
+                Ok(file_ref) => file_ref.lock().status_flags as i64,
+                Err(code) => code as i64,
+            }
+        }
+        F_SETFL => {
+            let new_bits = (arg as i32) & STATUS_FLAG_MUTABLE;
+            if fd <= 2 {
+                let current = process.stdio_flags[fd as usize];
+                let preserved = current & !STATUS_FLAG_MUTABLE;
+                let new_value = preserved | new_bits;
+                return match set_stdio_status(process, fd, new_value) {
+                    Ok(()) => 0,
+                    Err(code) => code as i64,
+                };
+            }
+            match clone_open_file(process, fd) {
+                Ok(file_ref) => {
+                    let mut file = file_ref.lock();
+                    let preserved = file.status_flags & !STATUS_FLAG_MUTABLE;
+                    file.status_flags = preserved | new_bits;
+                    0
+                }
+                Err(code) => code as i64,
+            }
+        }
+        F_DUPFD => {
+            if fd <= 2 {
+                return -(EBADF as i64);
+            }
+            if arg > i32::MAX as u64 {
+                return -(EINVAL as i64);
+            }
+            let min_fd = (arg as i32).max(3);
+            let src_entry = match fd_slot(process, fd) {
+                Ok(entry) => entry,
+                Err(code) => return code as i64,
+            };
+            let new_entry = FdEntry {
+                file: src_entry.file.clone(),
+                fd_flags: src_entry.fd_flags & !FD_CLOEXEC,
+            };
+            match install_fd_entry(process, new_entry, min_fd) {
+                Ok(new_fd) => new_fd as i64,
+                Err(code) => -(code as i64),
+            }
+        }
+        _ => -(EINVAL as i64),
+    }
 }
 
 pub fn pr_limit64(
@@ -452,28 +754,24 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
     let Some(process) = proc_opt else {
         return -(ESRCH as i64);
     };
-    if fd < 3 {
-        return -(EBADF as i64);
-    }
-
-    let h = match process.handler.get_mut(fd as usize - 3) {
-        Some(h) => h,
-        None => return -(EBADF as i64),
+    let file_ref = match clone_open_file(process, fd) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
     };
-
-    if h.handler.lock().metadata.file_type != FileType::Dir {
+    let mut file = file_ref.lock();
+    if file.node.lock().metadata.file_type != FileType::Dir {
         return -(ENOTDIR as i64);
     }
 
     // Read directory entries from VFS (adjust API if yours differs)
     #[allow(static_mut_refs)]
-    let entries = match unsafe { VFS.get_mut().ls(&h.path) } {
+    let entries = match unsafe { VFS.get_mut().ls(&file.path) } {
         Ok(v) => v, // Vec<DirEntry { name:String, inode:u64, file_type:FileType }>
         Err(_) => return -(EIO as i64),
     };
 
     // Current position (use as entry index 'cookie')
-    let mut idx = h.seek;
+    let mut idx = file.seek;
     if idx >= entries.len() {
         return 0; // EOF
     }
@@ -552,7 +850,7 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
     }
 
     // 3) Advance directory position
-    h.seek = idx;
+    file.seek = idx;
 
     off as i64
 }
@@ -610,39 +908,85 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
 }
 
 pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
-    let fstat = fstat_ptr as *mut FStat;
-
-    if fstat.is_null() {
-        return -1;
+    if fstat_ptr == 0 {
+        return -(EFAULT as i64);
     }
 
     #[allow(static_mut_refs)]
-    let process = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(crate::sys::proc::id()).unwrap() };
-
-    let handler = process.handler.get(fd - 3).unwrap();
-
-    let metadata = handler.handler.lock().metadata.clone();
-
-    let fstat = unsafe { &mut *fstat };
-
-    fstat.st_size = metadata.size as i64;
-    fstat.st_dev = 1;
-    fstat.st_ino = metadata.ino as u64;
-    fstat.st_uid = 1;
-    fstat.st_gid = 1;
-    fstat.st_nlink = 1;
-    fstat.st_ctime = Timespec { tv_sec: metadata.created_time as i64, tv_nsec: 0 };
-    fstat.st_mtime = Timespec { tv_sec: metadata.modified_time as i64, tv_nsec: 0 };
-    fstat.st_atime = Timespec { tv_sec: metadata.access_time as i64, tv_nsec: 0 };
-    fstat.st_mode = match metadata.file_type {
-        FileType::File => 0o100644,        // regular file: rw-r--r--
-        FileType::Dir => 0o040755,         // directory: rwxr-xr-x
-        FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
-        FileType::BlockDevice => 0o060660, // block device: rw-rw----
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
     };
-    fstat.st_rdev = 0;
-    fstat.st_blksize = 2048;
-    fstat.st_blocks = metadata.size as i64 / 2048;
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    let user_stat = unsafe { &mut *(fstat_ptr as *mut Stat) };
+    *user_stat = Stat::default();
+
+    if fd <= 2 {
+        let now = uptime() as i64;
+        user_stat.st_mode = 0o020666;
+        user_stat.st_uid = 0;
+        user_stat.st_gid = 0;
+        user_stat.st_ino = fd as u64;
+        user_stat.st_nlink = 1;
+        user_stat.st_size = 0;
+        user_stat.st_blksize = 4096;
+        user_stat.st_blocks = 0;
+        let ts = Timespec {
+            tv_sec: now,
+            tv_nsec: 0,
+        };
+        user_stat.st_atim = ts;
+        user_stat.st_mtim = ts;
+        user_stat.st_ctim = ts;
+        return 0;
+    }
+
+    if fd > i32::MAX as usize {
+        return -(EBADF as i64);
+    }
+
+    let file_ref = match clone_open_file(process, fd as i32) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
+    };
+
+    let metadata = {
+        let file = file_ref.lock();
+        let node = file.node.lock();
+        node.metadata.clone()
+    };
+
+    user_stat.st_size = metadata.size as i64;
+    user_stat.st_mode = match metadata.file_type {
+        FileType::File => 0o100644,
+        FileType::Dir => 0o040755,
+        FileType::CharDevice => 0o020666,
+        FileType::BlockDevice => 0o060660,
+    };
+    user_stat.st_uid = 0;
+    user_stat.st_gid = 0;
+    user_stat.st_ino = metadata.ino as u64;
+    user_stat.st_nlink = 1;
+    user_stat.st_rdev = 0;
+    user_stat.st_blksize = 4096;
+    user_stat.st_blocks = ((metadata.size as u64 + 511) / 512) as i64;
+    user_stat.st_atim = Timespec {
+        tv_sec: metadata.access_time as i64,
+        tv_nsec: 0,
+    };
+    user_stat.st_mtim = Timespec {
+        tv_sec: metadata.modified_time as i64,
+        tv_nsec: 0,
+    };
+    user_stat.st_ctim = Timespec {
+        tv_sec: metadata.created_time as i64,
+        tv_nsec: 0,
+    };
 
     0
 }
@@ -661,9 +1005,6 @@ pub fn getcwd(buf_ptr: usize, buf_len: usize) -> i64 {
     let cwd = proc.pwd.as_str();
     let cwd_bytes = cwd.as_bytes();
     buf[..cwd_bytes.len()].copy_from_slice(cwd_bytes);
-    if buf.len() > cwd_bytes.len() {
-        buf[cwd_bytes.len()] = b'\0';
-    }
 
     buf.as_ptr() as i64
 }
@@ -707,7 +1048,6 @@ pub fn chdir(path_ptr: usize) -> i64 {
         } else {
             vec.join("/")
         }
-
     } else {
         dir_path
     };
@@ -724,5 +1064,336 @@ pub fn chdir(path_ptr: usize) -> i64 {
         0
     } else {
         -1
+    }
+}
+
+pub fn unlink(path_ptr: usize) -> i64 {
+    let Ok(path) = copy_cstr_from_user(UserPtr(path_ptr as *const u8), 4096) else {
+        return -1;
+    };
+
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    // Resolve full path
+    let full_path = if path.starts_with('/') {
+        normalize_path(path.as_str())
+    } else {
+        format!("{}/{}", process.pwd.as_str(), path)
+    };
+
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if let Ok(mut inode) = fs.open(full_path.as_str()) {
+        inode.unlink().unwrap() as i64
+    } else {
+        0
+    }
+}
+
+pub fn lseek(fd: usize, offset: u64, whence: u8) -> i64 {
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
+
+    if fd < 3 {
+        return -(EBADF as i64);
+    }
+
+    let file_ref = match clone_open_file(process, fd as i32) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
+    };
+    let mut file = file_ref.lock();
+    match whence {
+        0 => {
+            file.seek = offset as usize;
+            file.seek as i64
+        }
+        1 => file.seek as i64,
+        2 => {
+            let size = file.node.lock().metadata.size;
+            file.seek = size;
+            file.seek as i64
+        }
+        _ => -(EINVAL as i64),
+    }
+}
+
+pub fn readv(fd: usize, iov_ptr: u64, iov_count: u64) -> i64 {
+    let iov = unsafe { core::slice::from_raw_parts(iov_ptr as *const Iovec, iov_count as usize) };
+
+    let mut total: i64 = 0;
+
+    for iv in iov {
+        // Skip empty segments
+        if iv.iov_len == 0 {
+            continue;
+        }
+
+        let buf = unsafe { core::slice::from_raw_parts_mut(iv.iov_base as *mut u8, iv.iov_len) };
+
+        // Write this segment
+        let r = read(fd, buf);
+        total = total.saturating_add(r);
+
+        // Stop on partial write (short write semantics)
+        if (r as usize) < iv.iov_len {
+            break;
+        }
+    }
+
+    total
+}
+
+pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
+    if fd <= 2 {
+        let tty = get_tty();
+
+        return tty.ioctl(&mut dummy_blockdev(), cmd as u64, arg).unwrap();
+    }
+
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap_unchecked()
+            .get_process(crate::sys::proc::id())
+            .unwrap_unchecked()
+    };
+
+    let file_ref = match clone_open_file(process, fd as i32) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
+    };
+
+    file_ref.lock().node.lock().ioctl(cmd as u64, arg).unwrap()
+}
+
+pub fn utimenat(dirfd: i32, str_ptr: usize, _time_ptr: usize, _flags: usize) -> i64 {
+    if dirfd != -100 {
+        return -1;
+    }
+
+    let usr_ptr = UserPtr(str_ptr as *const u8);
+
+    let Ok(path) = copy_cstr_from_user(usr_ptr, 4096) else {
+        return -(EFAULT as i64);
+    };
+
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut_unchecked()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
+
+    let can_path = if path.starts_with("/") {
+        path
+    } else {
+        format!("{}/{}", process.pwd, path)
+    };
+
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    let Ok(_node) = fs.open(can_path.as_str()) else {
+        return -ENOENT as i64;
+    };
+
+    0
+}
+
+pub fn mkdir(path_str: usize, _mode: usize) -> i64 {
+    let Ok(path) = copy_cstr_from_user(UserPtr(path_str as *const u8), 4096) else {
+        return -1;
+    };
+
+    let can_path = format_path(path);
+
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if let Ok(_node) = fs.open(can_path.as_str()) {
+        return -EEXIST as i64;
+    };
+
+    let parent_path = parent_path(can_path.as_str());
+    let dir_name = can_path.split("/").last().unwrap();
+
+    if let Ok(_) = fs.mkdir(parent_path, dir_name) {
+        0
+    } else {
+        -1
+    }
+}
+
+pub fn rmdir(path_str: usize) -> i64 {
+    let Ok(path) = copy_cstr_from_user(UserPtr(path_str as *const u8), 4096) else {
+        return -1;
+    };
+    let can_path = format_path(path);
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if let Ok(_) = fs.rmdir(can_path.as_str()) {
+        0
+    } else {
+        -1
+    }
+}
+
+pub fn setuid(uid: u64) -> i64 {
+    sys::proc::user::set_uid(uid as usize);
+    sys::proc::user::set_user_env();
+
+    0
+}
+
+fn poll_fd_set(fds: &mut [PollFd], process: &mut Process) -> Result<usize, i64> {
+    let mut ready_count = 0;
+
+    for pfd in fds.iter_mut() {
+        pfd.revents = 0;
+        let fd = pfd.fd;
+        if fd < 0 {
+            continue;
+        }
+
+        let want_in = (pfd.events & POLLIN) != 0;
+        let want_out = (pfd.events & POLLOUT) != 0;
+        let mut revents: i16 = 0;
+
+        match fd {
+            0 => {
+                if want_in {
+                    let tty = get_tty();
+                    let mut dev = dummy_blockdev();
+                    match tty.poll(&mut dev) {
+                        Ok(true) => revents |= POLLIN,
+                        Ok(false) => {}
+                        Err(_) => revents |= POLLERR,
+                    }
+                }
+                if want_out {
+                    revents |= POLLOUT;
+                }
+            }
+            1 | 2 => {
+                if want_out {
+                    revents |= POLLOUT;
+                }
+            }
+            _ => {
+                if fd < 3 {
+                    pfd.revents = POLLNVAL;
+                    ready_count += 1;
+                    continue;
+                }
+                let file_ref = match clone_open_file(process, fd) {
+                    Ok(f) => f,
+                    Err(_) => {
+                        pfd.revents = POLLNVAL;
+                        ready_count += 1;
+                        continue;
+                    }
+                };
+                let guard_ref = file_ref.lock();
+                let mut node = guard_ref.node.lock();
+                if want_in {
+                    match node.poll() {
+                        Ok(true) => revents |= POLLIN,
+                        Ok(false) => {}
+                        Err(_) => revents |= POLLERR,
+                    }
+                }
+                if want_out {
+                    revents |= POLLOUT;
+                }
+            }
+        }
+
+        if revents != 0 {
+            pfd.revents = revents;
+            ready_count += 1;
+        }
+    }
+
+    Ok(ready_count)
+}
+
+pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
+    if nfds == 0 {
+        return 0;
+    }
+    if fds_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let fds = unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds) };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let mut ready = match poll_fd_set(fds, process) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    if ready > 0 {
+        return ready as i64;
+    }
+    if timeout_ms == 0 {
+        return 0;
+    }
+
+    let infinite = timeout_ms < 0;
+    let start = uptime();
+    let deadline = if infinite {
+        None
+    } else {
+        Some(start + (timeout_ms as f64) / 1000.0)
+    };
+
+    loop {
+        if let Some(limit) = deadline {
+            if uptime() >= limit {
+                return 0;
+            }
+        }
+
+        halt();
+
+        ready = match poll_fd_set(fds, process) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+
+        if ready > 0 {
+            return ready as i64;
+        }
     }
 }

@@ -1,5 +1,6 @@
 use crate::driver::disk::BlockDeviceIO;
 use crate::println;
+use crate::sys::fs::partition;
 use crate::sys::fs::twilight_fs::inode::Inode;
 use crate::sys::fs::twilight_fs::{read_tfs_block, write_tfs_block, FS_BLOCK_SIZE};
 
@@ -37,7 +38,7 @@ impl Superblock {
         Ok(())
     }
 
-    pub fn write(device: &mut dyn BlockDeviceIO) -> Result<Self, &'static str> {
+    pub fn write(device: &mut dyn BlockDeviceIO, partition_sector_count: u32) -> Result<Self, &'static str> {
         let block_size = FS_BLOCK_SIZE as u64;          // 2048
         let bits_per_block = block_size * 8;            // 16384
         let inode_size = size_of::<Inode>() as u64;     // typically 64
@@ -45,9 +46,10 @@ impl Superblock {
         let blocks_per_zone = 1u64 << log_zone_size;    // = 1
         let reserved_blocks = 1u64;                     // super at block 0
 
-        // ---- device geometry (sector-level) ----
+        // ---- device geometry (sector-level/IO Level) ----
         let dev_sector_size = device.block_size() as u64;       // 512
-        let dev_sectors     = device.block_count() as u64;      // in 512B units
+        debug_assert_eq!(dev_sector_size, partition::SECTOR_SIZE as u64);
+        let dev_sectors     = partition_sector_count as u64;    // limited to Twilight partition
         let sectors_per_fs_block = block_size / dev_sector_size; // 2048/512 = 4
 
         // total FS blocks & zones on the device
@@ -88,8 +90,8 @@ impl Superblock {
             first_data_zone: first_data_zone as u32,
             log_zone_size,
             pad2: 0,
-            max_size: 0x7FFF_FFFF,            // keep if that’s your limit
-            zones: total_zones as u32,        // <-- TOTAL zones, not data_zones
+            max_size: 0x7FFF_FFFF,            // mock limit don't know what i am going to do
+            zones: total_zones as u32,        // <-- TOTAL zones
             magic: u32::from_le_bytes(MAGIC), // 'T','F','S','0'
             pad3: 0,
             block_size: FS_BLOCK_SIZE as u16, // 2048

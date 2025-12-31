@@ -13,6 +13,7 @@ pub const ESRCH: i32 = 3;
 pub const EINTR: i32 = 4;
 pub const EIO: i32 = 5;
 pub const EBADF: i32 = 9;
+pub const EAGAIN: i32 = 11;
 pub const EEXIST: i32 = 17;
 pub const ENOTDIR: i32 = 20;
 pub const EISDIR: i32 = 21;
@@ -35,10 +36,26 @@ pub const O_CLOEXEC: i32 = 0o2000000; // 524288
 pub const O_PATH: i32 = 0o10000000; // 2097152
 
 #[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
 pub struct Iovec {
     pub iov_base: *const u8,
     pub iov_len: usize,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
+pub const POLLIN: i16 = 0x0001;
+pub const POLLPRI: i16 = 0x0002;
+pub const POLLOUT: i16 = 0x0004;
+pub const POLLERR: i16 = 0x0008;
+pub const POLLHUP: i16 = 0x0010;
+pub const POLLNVAL: i16 = 0x0020;
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -134,4 +151,12 @@ pub struct FStat {
     pub st_atime: Timespec, // Time of last access
     pub st_mtime: Timespec, // Time of last modification
     pub st_ctime: Timespec, // Time of last status change
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(u8)]
+pub enum Seek {
+    Set,
+    Cur,
+    End,
 }

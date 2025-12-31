@@ -17,19 +17,16 @@ typedef struct {
     char domainname[65];
 } utsname_t;
 
-// write exactly n bytes using syscall
 static void write_buf(const char *buf, uint64_t n) {
     syscall(SYS_WRITE, STDOUT, buf, n);
 }
 
-// write null-terminated string
 static void write_cstr(const char *s) {
     const char *p = s;
     while (*p) p++;
     write_buf(s, p - s);
 }
 
-// write a space if printed before
 static void maybe_space(int *printed) {
     if (*printed) write_buf(" ", 1);
 }
@@ -41,10 +38,8 @@ int main(int argc, char **argv) {
 
     int flags = 0, printed = 0;
 
-    // default -s
     if (argc == 1) flags |= 1<<0;
 
-    // parse options
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] != '-') continue;
         for (int j=1; argv[i][j]; j++) {

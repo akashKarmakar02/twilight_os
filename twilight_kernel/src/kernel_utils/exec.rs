@@ -6,7 +6,6 @@ use x86_64::structures::paging::PageTable;
 pub static PREVIOUS_TABLE: OnceCell<Mutex<PageTable>> = OnceCell::uninit();
 
 pub fn jump_to_user(entry_point: u64, stack_top: u64, user_cs: u64, user_ss: u64) {
-
     let rip = entry_point;
     unsafe {
         asm!(

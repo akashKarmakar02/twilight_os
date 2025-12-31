@@ -34,6 +34,28 @@ pub trait BlockDeviceIO: Send + Sync + 'static {
     fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), ()>;
     fn block_size(&self) -> usize;
     fn block_count(&self) -> usize;
+
+    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        let block_size = self.block_size();
+        if block_size == 0 || buf.is_empty() || buf.len() % block_size != 0 {
+            return Err(());
+        }
+        for (idx, chunk) in buf.chunks_mut(block_size).enumerate() {
+            self.read(start_addr + idx as u32, chunk)?;
+        }
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, start_addr: u32, buf: &[u8]) -> Result<(), ()> {
+        let block_size = self.block_size();
+        if block_size == 0 || buf.is_empty() || buf.len() % block_size != 0 {
+            return Err(());
+        }
+        for (idx, chunk) in buf.chunks(block_size).enumerate() {
+            self.write(start_addr + idx as u32, chunk)?;
+        }
+        Ok(())
+    }
 }
 
 const ATA_CACHE_SIZE: usize = 512;
@@ -108,6 +130,36 @@ impl BlockDeviceIO for AtaBlockDevice {
     fn block_count(&self) -> usize {
         self.dev.block_count() as usize
     }
+
+    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        let block_size = self.block_size();
+        if buf.len() == block_size {
+            return self.read(start_addr, buf);
+        }
+        if buf.len() % block_size != 0 {
+            return Err(());
+        }
+        ata::read(self.dev.bus, self.dev.dsk, start_addr, buf)?;
+        for (idx, chunk) in buf.chunks(block_size).enumerate() {
+            self.set_cached_block(start_addr + idx as u32, chunk);
+        }
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, start_addr: u32, buf: &[u8]) -> Result<(), ()> {
+        let block_size = self.block_size();
+        if buf.len() == block_size {
+            return self.write(start_addr, buf);
+        }
+        if buf.len() % block_size != 0 {
+            return Err(());
+        }
+        ata::write(self.dev.bus, self.dev.dsk, start_addr, buf)?;
+        for idx in 0..(buf.len() / block_size) {
+            self.unset_cached_block(start_addr + idx as u32);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -152,7 +204,6 @@ pub fn mount_ata(bus: u8, dsk: u8) {
         BLOCK_DEVICE = Some(block_dev)
     };
 }
-
 
 pub fn dummy_blockdev() -> BlockDev {
     Arc::new(Mutex::new(Box::new(DummyBlockDev)))

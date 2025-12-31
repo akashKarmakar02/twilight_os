@@ -53,8 +53,7 @@ impl CMOS {
         let second = rtc.second as u64;
 
         // Days in months, not accounting for leap years yet
-        let days_in_month = [31, 28, 31, 30, 31, 30, 31,
-            31, 30, 31, 30, 31];
+        let days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
         // Calculate number of days since Unix epoch
         let mut days = 0;

@@ -1,48 +1,6 @@
 use crate::println;
 use core::arch::{asm};
-
-#[derive(Default)]
-#[repr(C)]
-struct Context {
-    cr3: u64,
-
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-
-    rbx: u64,
-    rbp: u64,
-
-    rip: u64,
-}
-
-#[unsafe(naked)]
-unsafe extern "C" fn task_spinup(prev: &mut *mut Context, next: *mut Context) {
-    core::arch::naked_asm!(
-        "push rbp",
-        "push rbx",
-        "push r12",
-        "push r13",
-        "push r14",
-        "push r15",
-        "mov rax, cr3",
-        "push rax",
-        // save old RSP (type now matches: &mut *mut Context)
-        "mov [rdi], rsp",
-        // switch to new stack
-        "mov rsp, rsi",
-        "pop rax",
-        "mov cr3, rax",
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop rbx",
-        "pop rbp",
-        "ret",
-    );
-}
+use crate::sys::proc::task::{task_spinup, Context};
 
 static mut TASK_A_STACK: [u8; 4096] = [0; 4096];
 static mut TASK_B_STACK: [u8; 4096] = [0; 4096];
@@ -126,7 +84,7 @@ unsafe fn task_exit(my_done_flag: &mut bool, my_sp_slot: &mut *mut Context) -> !
 }
 
 // Helper: read current CR3 (requires ring0)
-fn read_cr3() -> u64 {
+pub fn read_cr3() -> u64 {
     let v: u64;
     unsafe { asm!("mov {}, cr3", out(reg) v) };
     v
