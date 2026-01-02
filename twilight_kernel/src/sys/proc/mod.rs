@@ -6,16 +6,16 @@ pub(crate) mod user;
 use crate::arch::x86_64::gdt::{SegmentSelector, USER_CS, USER_SS};
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
-use crate::{println, serial_println};
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::{VFS, VfsNode};
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
-use crate::sys::proc::switch::{read_cr3};
-use crate::sys::proc::task::{FpuState, Context, allocate_switch_stack, switch_tasks};
+use crate::sys::proc::switch::read_cr3;
+use crate::sys::proc::task::{Context, FpuState, allocate_switch_stack, switch_tasks};
 use crate::sys::proc::user::USER_ENV;
 use crate::utils::StackHelper;
+use crate::println;
 use alloc::alloc::alloc_zeroed;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -381,13 +381,14 @@ impl Process {
 
         let stack_ptr = switch_stack as u64;
 
-
-        let mut kgs = Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 });
+        let mut kgs = Box::new(KernelGsData {
+            kernel_rsp: 0,
+            user_rsp: 0,
+        });
 
         kgs.kernel_rsp = stack_ptr;
 
         let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
-
 
         let p = Process {
             context: core::ptr::null_mut(),
@@ -478,7 +479,7 @@ unsafe extern "C" fn iretq_init() {
 }
 
 #[repr(C)]
-struct KernelGsData {
+pub struct KernelGsData {
     kernel_rsp: u64, // offset 0
     user_rsp: u64,   // offset 8
 }
@@ -503,8 +504,10 @@ pub fn init() {
 
     let mut stack_ptr = switch_stack as u64;
 
-
-    let mut kgs = Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 });
+    let mut kgs = Box::new(KernelGsData {
+        kernel_rsp: 0,
+        user_rsp: 0,
+    });
 
     kgs.kernel_rsp = stack_ptr;
 
@@ -571,7 +574,10 @@ pub fn init() {
     let mut idle_task = Process {
         context: core::ptr::null_mut(),
         stack: 0,
-        kernel_gs: Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 }),
+        kernel_gs: Box::new(KernelGsData {
+            kernel_rsp: 0,
+            user_rsp: 0,
+        }),
         fs_base: VirtAddr::zero(),
         gs_base: VirtAddr::zero(),
         proc_mm: Box::new(ProcMM::new(0)),
@@ -667,7 +673,6 @@ fn build_initial_stack(
         .or_else(|| argv_ptrs.get(0).copied())
         .unwrap_or(0);
 
-    // ---- write auxv (topmost among these tables) ----
     let aux_vec: Vec<AuxvEntry> = vec![
         AuxvEntry {
             key: 3,
@@ -712,31 +717,41 @@ fn build_initial_stack(
         AuxvEntry { key: 0, value: 0 },  // AT_NULL
     ];
 
-    rsp -= (size_of::<AuxvEntry>() * aux_vec.len()) as u64;
+    // ---- compute padding so final %rsp follows SysV (mod 16 == 8 on entry) ----
+    let aux_bytes = (size_of::<AuxvEntry>() * aux_vec.len()) as u64;
+    let env_bytes = ((envp_ptrs.len() + 1) * size_of::<u64>()) as u64; // +NULL
+    let argv_bytes = ((argv_ptrs.len() + 1) * size_of::<u64>()) as u64; // +NULL
+    let total_bytes = aux_bytes + env_bytes + argv_bytes + size_of::<u64>() as u64; // +argc
+    let pad = rsp.wrapping_sub(total_bytes).wrapping_sub(8) & 0xF; // ensure (final_rsp % 16) == 8
+    if pad != 0 {
+        rsp -= pad;
+        unsafe { core::ptr::write_bytes(rsp as *mut u8, 0, pad as usize) };
+    }
+
+    // ---- write auxv (topmost among these tables) ----
+
+    rsp -= aux_bytes;
     unsafe {
         core::ptr::copy_nonoverlapping(aux_vec.as_ptr(), rsp as *mut AuxvEntry, aux_vec.len());
     }
 
+    // ---- envp NULL then envp pointers (envp[0] ends closest to argv) ----
     rsp -= 8;
     unsafe {
         *(rsp as *mut u64) = 0;
     }
-
-    // ---- envp pointers then NULL ----
-    for &p in &envp_ptrs {
+    for &p in envp_ptrs.iter() {
         rsp -= 8;
         unsafe {
             *(rsp as *mut u64) = p;
         }
     }
 
-    // envp termintor
+    // ---- argv NULL then argv pointers (argv[0] ends closest to argc) ----
     rsp -= 8;
     unsafe {
         *(rsp as *mut u64) = 0;
     }
-
-    // ---- argv pointers then NULL ----
     for &p in &argv_ptrs {
         rsp -= 8;
         unsafe {
@@ -744,12 +759,7 @@ fn build_initial_stack(
         }
     }
 
-    // ---- padding BEFORE argc to ensure final %rsp == 8 ----
-    // We want (rsp_after_argc % 16 == 8). After we push argc (8 bytes),
-    // rsp will be (current_rsp - 8). So we need (current_rsp % 16 == 0).
-    // If it's 8, push a padding 0 to flip it to 0.
-
-    // ---- argc ----
+    // ---- argc (alignment handled above) ----
     rsp -= 8;
     unsafe {
         *(rsp as *mut u64) = argv_ptrs.len() as u64;
