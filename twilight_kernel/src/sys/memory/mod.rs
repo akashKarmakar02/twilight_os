@@ -2,7 +2,7 @@ pub mod bitmap;
 pub mod heap;
 pub mod phys;
 
-use crate::log;
+use crate::{log, serial_println};
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::proc::mem::{PAGE, align_dn, align_up};
 use conquer_once::spin::OnceCell;
@@ -165,9 +165,12 @@ pub fn alloc_pages(
                 if let Ok(mapping) = res {
                     mapping.flush();
                 } else {
-                    // log!("Could not map {:?} to {:?}", page, frame);
                     if let Ok(_old_frame) = mapper.translate_page(page) {
-                        // log!("Already mapped to {:?}", old_frame);
+                        if let Ok(mapping) = unsafe { mapper.update_flags(page, flags) } {
+                            mapping.flush();
+                        } else {
+                            serial_println!("Failed to update page flag");
+                        }
                     }
                 }
             } else {
