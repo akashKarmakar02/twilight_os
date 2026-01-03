@@ -12,6 +12,10 @@ It currently supports x86_64 architecture. future plans include support for ARM/
     <td><img src="docs/screenshots/img1.png" alt="screenshot1" width="400"></td>
     <td><img src="docs/screenshots/img2.png" alt="screenshot2" width="400"></td>
   </tr>
+  <tr>
+    <td><img src="docs/screenshots/img3.png" alt="screenshot1" width="400"></td>
+    <td><img src="docs/screenshots/img4.png" alt="screenshot2" width="400"></td>
+  </tr>
 </table>
 
 ## Features
