@@ -6,7 +6,6 @@ use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
 use crate::driver::timer::wait;
 use crate::serial_println;
-use crate::sys::syscall::SyscallError::ENOSYS;
 use crate::sys::syscall::service::read;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user};
 use alloc::string::String;
@@ -152,7 +151,8 @@ pub extern "sysv64" fn syscall_handler(
         }
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
-            -(ENOSYS as i64)
+            // -(ENOSYS as i64)
+            0
         }
     };
 

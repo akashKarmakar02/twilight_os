@@ -198,11 +198,10 @@ fn build_zig(path: &Path) -> io::Result<()> {
 
 fn build_make(path: &Path) -> io::Result<()> {
     println!("Detected Makefile. Running make with CC=musl-gcc (if present)");
-    let status = Command::new("make")
-        .arg("-C")
-        .arg(path)
-        .env("CC", "musl-gcc")
-        .status()?;
+    let mut cmd = Command::new("make");
+    cmd.arg("-C").arg(path).env("CC", "musl-gcc");
+    apply_ccache_env(&mut cmd);
+    let status = cmd.status()?;
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "make failed"));
     }
@@ -227,13 +226,14 @@ fn build_c_simple(path: &Path) -> io::Result<()> {
     // if there is exactly one C file, produce binary named after directory
     if c_files.len() == 1 {
         let out = path.join(path.file_name().unwrap());
-        let status = Command::new("musl-gcc")
-            .arg("-static")
+        let mut cmd = Command::new("musl-gcc");
+        cmd.arg("-static")
             .arg(c_files[0].to_str().unwrap())
             .arg("-o")
             .arg(&out)
-            .current_dir(path)
-            .status()?;
+            .current_dir(path);
+        apply_ccache_env(&mut cmd);
+        let status = cmd.status()?;
         if !status.success() {
             return Err(io::Error::new(io::ErrorKind::Other, "musl-gcc failed"));
         }
@@ -247,13 +247,30 @@ fn build_c_simple(path: &Path) -> io::Result<()> {
         args.push("-o".to_string());
         args.push(out.to_string_lossy().to_string());
 
-        let status = Command::new("musl-gcc")
-            .args(&args)
-            .current_dir(path)
-            .status()?;
+        let mut cmd = Command::new("musl-gcc");
+        cmd.args(&args).current_dir(path);
+        apply_ccache_env(&mut cmd);
+        let status = cmd.status()?;
         if !status.success() {
             return Err(io::Error::new(io::ErrorKind::Other, "musl-gcc failed"));
         }
     }
     Ok(())
+}
+
+fn apply_ccache_env(cmd: &mut Command) {
+    // Some setups place `ccache` in front of compilers; the default temp dir can be unwritable
+    // under sandboxing. Point it at a workspace-writable directory.
+    let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") else {
+        return;
+    };
+
+    let base = PathBuf::from(manifest_dir).join("target");
+    let ccache_dir = base.join("ccache");
+    let ccache_tmpdir = base.join("ccache-tmp");
+    let _ = fs::create_dir_all(&ccache_dir);
+    let _ = fs::create_dir_all(&ccache_tmpdir);
+
+    cmd.env("CCACHE_DIR", ccache_dir);
+    cmd.env("CCACHE_TEMPDIR", ccache_tmpdir);
 }
