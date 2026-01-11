@@ -27,7 +27,6 @@ pub enum SocketStatus {
     MayRecv = 6,
 }
 
-#[derive(Clone)]
 pub enum EthernetDevice {
     RTL8139(rtl8139::Device),
     PCNET(pcnet::Device),
@@ -76,36 +75,32 @@ impl EthernetDeviceIO for EthernetDevice {
     }
 }
 
-impl<'a> smoltcp::phy::Device for EthernetDevice {
+impl smoltcp::phy::Device for EthernetDevice {
     type RxToken<'b>
         = RxToken
     where
         Self: 'b;
     type TxToken<'b>
-        = TxToken
+        = TxToken<'b>
     where
         Self: 'b;
 
-    fn receive(&mut self, _instant: Instant) -> Option<(Self::RxToken<'a>, Self::TxToken<'a>)> {
+    fn receive(&mut self, _instant: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         if let Some(buffer) = self.receive_packet() {
             if self.config().is_debug_enabled() {
                 // usr::hex::print_hex(&buffer);
             }
             self.stats().rx_add(buffer.len() as u64);
             let rx = RxToken { buffer };
-            let tx = TxToken {
-                device: self.clone(),
-            };
+            let tx = TxToken { device: self };
             Some((rx, tx))
         } else {
             None
         }
     }
 
-    fn transmit(&mut self, _instant: Instant) -> Option<Self::TxToken<'a>> {
-        let tx = TxToken {
-            device: self.clone(),
-        };
+    fn transmit(&mut self, _instant: Instant) -> Option<Self::TxToken<'_>> {
+        let tx = TxToken { device: self };
         Some(tx)
     }
 
@@ -271,11 +266,11 @@ impl smoltcp::phy::RxToken for RxToken {
 }
 
 #[doc(hidden)]
-pub struct TxToken {
-    device: EthernetDevice,
+pub struct TxToken<'a> {
+    device: &'a mut EthernetDevice,
 }
-impl smoltcp::phy::TxToken for TxToken {
-    fn consume<R, F>(mut self, len: usize, f: F) -> R
+impl<'a> smoltcp::phy::TxToken for TxToken<'a> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {

@@ -215,7 +215,7 @@ pub fn init(
     driver::nic::init();
     driver::usb::init();
     driver::cpu::init(mp_response);
-    driver::disk::ata::init();
+    driver::disk::init();
 
     let cpio_buf = unsafe {
         core::slice::from_raw_parts(cpio_file.addr() as *const u8, cpio_file.size() as usize)
