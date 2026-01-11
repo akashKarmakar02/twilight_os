@@ -415,7 +415,6 @@ impl TwilightFs {
     // TODO: move this to inode impl
     pub fn read_inode(&mut self, inode_num: u32) -> Result<Inode, &'static str> {
         if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
-            let num = self.superblock.ninodes as usize;
             return Err("Invalid inode number");
         }
 

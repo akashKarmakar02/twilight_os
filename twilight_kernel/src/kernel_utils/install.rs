@@ -5,7 +5,7 @@ use crate::sys::fs::init;
 use crate::sys::fs::partition::{self, PartitionEntry};
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::sys::fs::twilight_fs::inode::Inode;
-use crate::{println, serial_println};
+use crate::println;
 use alloc::format;
 use alloc::vec::Vec;
 use core::cmp;

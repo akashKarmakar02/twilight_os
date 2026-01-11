@@ -38,9 +38,6 @@ const VIRTIO_PCI_CONFIG_OFF: u16 = 0x14; // legacy: device-specific config base
 
 const MAX_RETRIES: usize = 3;
 
-static mut NEXT_HEAD: u16 = 0; // next free descriptor head (we use 3 desc per request)
-static mut LAST_USED: u16 = 0;
-
 #[repr(C)]
 pub struct VirtqDesc {
     pub addr: u64,
@@ -107,14 +104,6 @@ impl BlockDeviceIO for VirtioBlkHandle {
         Self::with_dev(|dev| dev.write(lba, buf))?
     }
 
-    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
-        Self::with_dev(|dev| dev.read_blocks(start_addr, buf))?
-    }
-
-    fn write_blocks(&mut self, start_addr: u32, buf: &[u8]) -> Result<(), ()> {
-        Self::with_dev(|dev| dev.write_blocks(start_addr, buf))?
-    }
-
     fn block_size(&self) -> usize {
         let Ok(sz) = Self::with_dev(|dev| dev.block_size()) else {
             return 0;
@@ -128,6 +117,14 @@ impl BlockDeviceIO for VirtioBlkHandle {
         };
         cnt
     }
+
+    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.read_blocks(start_addr, buf))?
+    }
+
+    fn write_blocks(&mut self, start_addr: u32, buf: &[u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.write_blocks(start_addr, buf))?
+    }
 }
 
 pub fn init() {
@@ -137,293 +134,6 @@ pub fn init() {
         #[allow(static_mut_refs)]
         unsafe {
             BLOCK_DEVICE = Some(handle);
-        }
-    }
-}
-
-pub fn read(io_base: u16, queue_virt: u64, _queue_phys: u64, lba: u64, out: &mut [u8; 512]) {
-    let qsz = 256;
-
-    let desc_off = 0usize;
-    let avail_off = desc_off + size_of::<VirtqDesc>() * qsz;
-    let used_off = align_up((avail_off + size_of::<VirtqAvail>()) as u64, 4096);
-
-    let desc = (queue_virt as usize + desc_off) as *mut VirtqDesc;
-    let avail = (queue_virt as usize + avail_off) as *mut VirtqAvail;
-    let used = (queue_virt + used_off) as *mut VirtqUsed;
-
-    let req_dma_buf = PhysBuf::new(size_of::<VirtioBlkReq>());
-    let status_dma_buf = PhysBuf::new(1);
-    let data_dma_buf = PhysBuf::new(512);
-
-    let data_dma = DmaBuf {
-        virt: data_dma_buf.virt_addr().as_mut_ptr(),
-        len: 512,
-        phys: data_dma_buf.addr(),
-    };
-    let req_dma = DmaBuf {
-        virt: req_dma_buf.virt_addr().as_mut_ptr(),
-        len: size_of::<VirtioBlkReq>(),
-        phys: req_dma_buf.addr(),
-    };
-    let status_dma = DmaBuf {
-        virt: status_dma_buf.virt_addr().as_mut_ptr(),
-        len: 1,
-        phys: status_dma_buf.addr(),
-    };
-
-    unsafe {
-        // allocate a unique head (3 descriptors per request)
-        let head = NEXT_HEAD;
-        NEXT_HEAD = (NEXT_HEAD + 3) % (qsz as u16);
-
-        write_bytes(data_dma.virt, 0xCC, 512);
-        *req_dma.virt.cast::<VirtioBlkReq>() = VirtioBlkReq {
-            type_: VIRTIO_BLK_T_IN,
-            reserved: 0,
-            sector: lba,
-        };
-        *status_dma.virt = 0xFF;
-
-        // desc[head+0] = req
-        write_volatile(
-            desc.add(head as usize + 0),
-            VirtqDesc {
-                addr: req_dma.phys,
-                len: size_of::<VirtioBlkReq>() as u32,
-                flags: VIRTQ_DESC_F_NEXT,
-                next: head + 1,
-            },
-        );
-
-        // desc[head+1] = data (device writes)
-        write_volatile(
-            desc.add(head as usize + 1),
-            VirtqDesc {
-                addr: data_dma.phys,
-                len: 512,
-                flags: VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
-                next: head + 2,
-            },
-        );
-
-        // desc[head+2] = status (device writes)
-        write_volatile(
-            desc.add(head as usize + 2),
-            VirtqDesc {
-                addr: status_dma.phys,
-                len: 1,
-                flags: VIRTQ_DESC_F_WRITE,
-                next: 0,
-            },
-        );
-
-        let used_id = submit_and_wait(io_base, avail, used, head);
-        if used_id != head {
-            // Not fatal with single outstanding, but helps catch bugs
-            println!("virtio: completed id {} != head {}", used_id, head);
-        }
-
-        let st = read_volatile(status_dma.virt);
-        if st != 0 {
-            panic!("virtio-blk read failed, status={:#x}", st);
-        }
-
-        // copy DMA data to caller buffer (now lifetime is correct)
-        core::ptr::copy_nonoverlapping(data_dma.virt as *const u8, out.as_mut_ptr(), 512);
-    }
-}
-
-pub fn write(io_base: u16, queue_virt: u64, _queue_phys: u64, lba: u64, data_in: &[u8; 512]) {
-    let qsz = 256;
-
-    let desc_off = 0usize;
-    let avail_off = desc_off + size_of::<VirtqDesc>() * qsz;
-    let used_off = align_up((avail_off + size_of::<VirtqAvail>()) as u64, 4096);
-
-    let desc = (queue_virt as usize + desc_off) as *mut VirtqDesc;
-    let avail = (queue_virt as usize + avail_off) as *mut VirtqAvail;
-    let used = (queue_virt + used_off) as *mut VirtqUsed;
-
-    let req_dma_buf = PhysBuf::new(size_of::<VirtioBlkReq>());
-    let status_dma_buf = PhysBuf::new(1);
-    let data_dma_buf = PhysBuf::new(512);
-
-    let data_dma = DmaBuf {
-        virt: data_dma_buf.virt_addr().as_mut_ptr(),
-        len: 512,
-        phys: data_dma_buf.addr(),
-    };
-    let req_dma = DmaBuf {
-        virt: req_dma_buf.virt_addr().as_mut_ptr(),
-        len: size_of::<VirtioBlkReq>(),
-        phys: req_dma_buf.addr(),
-    };
-    let status_dma = DmaBuf {
-        virt: status_dma_buf.virt_addr().as_mut_ptr(),
-        len: 1,
-        phys: status_dma_buf.addr(),
-    };
-
-    unsafe {
-        let head = NEXT_HEAD;
-        NEXT_HEAD = (NEXT_HEAD + 3) % (qsz as u16);
-
-        core::ptr::copy_nonoverlapping(data_in.as_ptr(), data_dma.virt, 512);
-        *req_dma.virt.cast::<VirtioBlkReq>() = VirtioBlkReq {
-            type_: VIRTIO_BLK_T_OUT,
-            reserved: 0,
-            sector: lba,
-        };
-        *status_dma.virt = 0xFF;
-
-        // req
-        write_volatile(
-            desc.add(head as usize + 0),
-            VirtqDesc {
-                addr: req_dma.phys,
-                len: size_of::<VirtioBlkReq>() as u32,
-                flags: VIRTQ_DESC_F_NEXT,
-                next: head + 1,
-            },
-        );
-
-        // data (device reads)  <-- NO WRITE flag
-        write_volatile(
-            desc.add(head as usize + 1),
-            VirtqDesc {
-                addr: data_dma.phys,
-                len: 512,
-                flags: VIRTQ_DESC_F_NEXT,
-                next: head + 2,
-            },
-        );
-
-        // status (device writes)
-        write_volatile(
-            desc.add(head as usize + 2),
-            VirtqDesc {
-                addr: status_dma.phys,
-                len: 1,
-                flags: VIRTQ_DESC_F_WRITE,
-                next: 0,
-            },
-        );
-
-        let used_id = submit_and_wait(io_base, avail, used, head);
-        if used_id != head {
-            println!("virtio: completed id {} != head {}", used_id, head);
-        }
-
-        let st = read_volatile(status_dma.virt);
-        if st != 0 {
-            panic!("virtio-blk write failed, status={:#x}", st);
-        }
-    }
-}
-
-fn submit_and_wait(io_base: u16, avail: *mut VirtqAvail, used: *mut VirtqUsed, head: u16) -> u16 {
-    let qsz = 256;
-
-    // publish head into avail
-    let a_idx = unsafe { read_volatile(&(*avail).idx) };
-    unsafe {
-        (*avail).ring[(a_idx as usize) % qsz] = head;
-    }
-    fence(Ordering::SeqCst);
-    unsafe {
-        write_volatile(&mut (*avail).idx, a_idx.wrapping_add(1));
-    }
-    fence(Ordering::SeqCst);
-
-    // notify queue 0
-    let mut notify = Port::<u16>::new(io_base + VIRTIO_PCI_QUEUE_NOTIFY);
-    unsafe {
-        notify.write(0);
-    }
-
-    // wait until used.idx advances beyond LAST_USED
-    loop {
-        let u_idx = unsafe { read_volatile(&(*used).idx) };
-        if u_idx != unsafe { LAST_USED } {
-            break;
-        }
-    }
-
-    // consume exactly one used element
-    let used_slot = (unsafe { LAST_USED } as usize) % qsz;
-    let used_id = unsafe { read_volatile(&(*used).ring[used_slot].id) as u16 };
-
-    unsafe {
-        LAST_USED = LAST_USED.wrapping_add(1);
-    }
-    fence(Ordering::SeqCst);
-
-    used_id
-}
-
-pub fn flush(io_base: u16, queue_virt: u64) {
-    let qsz = 256;
-
-    let desc_off = 0usize;
-    let avail_off = desc_off + size_of::<VirtqDesc>() * qsz;
-    let used_off = align_up((avail_off + size_of::<VirtqAvail>()) as u64, 4096);
-
-    let desc = (queue_virt as usize + desc_off) as *mut VirtqDesc;
-    let avail = (queue_virt as usize + avail_off) as *mut VirtqAvail;
-    let used = (queue_virt + used_off) as *mut VirtqUsed;
-
-    let req_dma_buf = PhysBuf::new(size_of::<VirtioBlkReq>());
-    let status_dma_buf = PhysBuf::new(1);
-
-    let req_dma = DmaBuf {
-        virt: req_dma_buf.virt_addr().as_mut_ptr(),
-        len: size_of::<VirtioBlkReq>(),
-        phys: req_dma_buf.addr(),
-    };
-    let status_dma = DmaBuf {
-        virt: status_dma_buf.virt_addr().as_mut_ptr(),
-        len: 1,
-        phys: status_dma_buf.addr(),
-    };
-
-    unsafe {
-        let head = NEXT_HEAD;
-        NEXT_HEAD = (NEXT_HEAD + 2) % (qsz as u16); // only 2 desc here
-
-        *req_dma.virt.cast::<VirtioBlkReq>() = VirtioBlkReq {
-            type_: VIRTIO_BLK_T_FLUSH,
-            reserved: 0,
-            sector: 0,
-        };
-        *status_dma.virt = 0xFF;
-
-        // req
-        write_volatile(
-            desc.add(head as usize + 0),
-            VirtqDesc {
-                addr: req_dma.phys,
-                len: size_of::<VirtioBlkReq>() as u32,
-                flags: VIRTQ_DESC_F_NEXT,
-                next: head + 1,
-            },
-        );
-
-        // status
-        write_volatile(
-            desc.add(head as usize + 1),
-            VirtqDesc {
-                addr: status_dma.phys,
-                len: 1,
-                flags: VIRTQ_DESC_F_WRITE,
-                next: 0,
-            },
-        );
-
-        let _ = submit_and_wait(io_base, avail, used, head);
-        let st = read_volatile(status_dma.virt);
-        if st != 0 {
-            panic!("virtio-blk flush failed, status={:#x}", st);
         }
     }
 }
