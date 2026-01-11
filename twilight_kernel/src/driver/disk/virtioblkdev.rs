@@ -1,10 +1,11 @@
 #![allow(dead_code)]
 
-use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO};
+use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO, ATA_CACHE_SIZE};
 use crate::println;
 use crate::sys::memory::phys::PhysBuf;
 use alloc::boxed::Box;
 use alloc::vec;
+use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use core::mem::size_of;
 use core::ptr::{read_volatile, write_bytes, write_volatile};
@@ -298,6 +299,7 @@ pub struct VirtioBlkDev {
     st_dma: PhysBuf,
     data_dma: PhysBuf,
     cache: Box<[CacheLine]>,
+    cache_data: [Option<(u32, Vec<u8>)>; ATA_CACHE_SIZE],
 }
 
 impl VirtioBlkDev {
@@ -370,6 +372,7 @@ impl VirtioBlkDev {
         let st_dma = PhysBuf::new(1);
         let data_dma = PhysBuf::new(DMA_DATA_BYTES);
         let cache = vec![CacheLine::default(); CACHE_LINES].into_boxed_slice();
+        let cache_data: [Option<(u32, Vec<u8>)>; 512] = [(); ATA_CACHE_SIZE].map(|_| None);
 
         Some(Self {
             io_base: io,
@@ -378,6 +381,7 @@ impl VirtioBlkDev {
             st_dma,
             data_dma,
             cache,
+            cache_data,
         })
     }
 
@@ -654,6 +658,31 @@ impl VirtioBlkDev {
 
         Ok(())
     }
+
+
+    fn hash(&self, block_addr: u32) -> usize {
+        (block_addr as usize) % self.cache_data.len()
+    }
+
+    fn cached_block(&self, block_addr: u32) -> Option<&[u8]> {
+        let h = self.hash(block_addr);
+        if let Some((cached_addr, cached_buf)) = &self.cache_data[h] {
+            if block_addr == *cached_addr {
+                return Some(cached_buf);
+            }
+        }
+        None
+    }
+
+    fn set_cached_block(&mut self, block_addr: u32, buf: &[u8]) {
+        let h = self.hash(block_addr);
+        self.cache_data[h] = Some((block_addr, buf.to_vec()));
+    }
+
+    fn unset_cached_block(&mut self, block_addr: u32) {
+        let h = self.hash(block_addr);
+        self.cache_data[h] = None;
+    }
 }
 
 unsafe impl Send for VirtioBlkDev {}
@@ -664,12 +693,20 @@ impl BlockDeviceIO for VirtioBlkDev {
         if buf.is_empty() || (buf.len() % 512) != 0 {
             return Err(());
         }
+        if let Some(cached) = self.cached_block(lba) {
+            if cached.len() == buf.len() {
+                buf.copy_from_slice(cached);
+                return Ok(());
+            }
+        }
 
         for (i, chunk) in buf.chunks_mut(512).enumerate() {
             let cur_lba = lba.wrapping_add(i as u32);
             let sector: &mut [u8; 512] = chunk.try_into().map_err(|_| ())?;
             self.cache_read_sector(cur_lba, sector)?;
         }
+
+        self.set_cached_block(lba, buf);
         Ok(())
     }
 
@@ -683,15 +720,8 @@ impl BlockDeviceIO for VirtioBlkDev {
             let sector: &[u8; 512] = chunk.try_into().map_err(|_| ())?;
             self.cache_write_sector(cur_lba, sector)?;
         }
+        self.unset_cached_block(lba);
         Ok(())
-    }
-
-    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
-        self.read(start_addr, buf)
-    }
-
-    fn write_blocks(&mut self, start_addr: u32, buf: &[u8]) -> Result<(), ()> {
-        self.write(start_addr, buf)
     }
 
     fn block_size(&self) -> usize {
@@ -700,6 +730,14 @@ impl BlockDeviceIO for VirtioBlkDev {
 
     fn block_count(&self) -> usize {
         read_u64_port(self.io_base + VIRTIO_PCI_CONFIG_OFF) as usize
+    }
+
+    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        self.read(start_addr, buf)
+    }
+
+    fn write_blocks(&mut self, start_addr: u32, buf: &[u8]) -> Result<(), ()> {
+        self.write(start_addr, buf)
     }
 }
 
