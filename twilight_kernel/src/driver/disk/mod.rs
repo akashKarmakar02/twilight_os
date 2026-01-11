@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use spin::mutex::Mutex;
 
 pub mod ata;
+pub mod vitrioblkdev;
 
 pub const BLOCK_SIZE: usize = 2048;
 
@@ -196,6 +197,15 @@ impl BlockDeviceIO for MemBlockDevice {
     }
 }
 
+pub fn mount_mem() {
+    let block_dev = Box::leak(Box::new(MemBlockDevice::new(30)));
+
+    #[allow(static_mut_refs)]
+    unsafe {
+        BLOCK_DEVICE = Some(block_dev)
+    };
+}
+
 pub fn mount_ata(bus: u8, dsk: u8) {
     let block_dev = Box::leak(Box::new(AtaBlockDevice::new(bus, dsk).unwrap()));
 
@@ -207,4 +217,9 @@ pub fn mount_ata(bus: u8, dsk: u8) {
 
 pub fn dummy_blockdev() -> BlockDev {
     Arc::new(Mutex::new(Box::new(DummyBlockDev)))
+}
+
+pub fn init() {
+    ata::init();
+    vitrioblkdev::init();
 }

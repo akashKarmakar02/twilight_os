@@ -4,6 +4,5 @@ pub mod keyboard;
 pub mod mouse;
 pub mod nic;
 pub mod timer;
-pub mod tty;
 pub mod uart;
 pub mod usb;

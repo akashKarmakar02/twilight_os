@@ -10,7 +10,7 @@ pub mod fat16;
 use crate::println;
 use crate::sys::fs::devfs::DevFs;
 use crate::sys::fs::fat16::{detect_fat16_partition, Fat16Fs};
-use crate::sys::fs::twilight_fs::TwilightFs;
+use crate::sys::fs::twilight_fs::{TfsProxy, TwilightFs};
 use crate::sys::fs::vfs::VFS;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -67,6 +67,37 @@ pub fn init(show_log: bool) {
             }
         }
     }
+
+    if let Ok(tfs) = TwilightFs::check_virtio_blk() {
+        if let Err(_) = MFS.try_init_once(|| Mutex::new(tfs)) {
+            println!("MFS already initialized");
+            return;
+        }
+        #[allow(static_mut_refs)]
+        unsafe {
+            VFS.get_mut().unmount("/");
+        }
+        #[allow(static_mut_refs)]
+        unsafe {
+            VFS.get_mut().mount(
+                "/",
+                Arc::new(Mutex::new(TfsProxy)),
+            )
+        }
+        #[allow(static_mut_refs)]
+        unsafe {
+            VFS.get_mut()
+                .mount("/dev", Arc::new(Mutex::new(DevFs::new())));
+        }
+        if show_log {
+            println!(
+                "\x1b[93m[{:.6}]\x1b[0m TwilightFS Superblock found in Virtio Block Device",
+                uptime
+            );
+        }
+        return;
+    }
+
     #[allow(static_mut_refs)]
     unsafe {
         VFS.get_mut()

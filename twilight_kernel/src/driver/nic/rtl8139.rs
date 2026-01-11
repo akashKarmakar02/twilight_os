@@ -134,7 +134,6 @@ impl Ports {
     }
 }
 
-#[derive(Clone)]
 pub struct Device {
     config: Arc<Config>,
     stats: Arc<Stats>,

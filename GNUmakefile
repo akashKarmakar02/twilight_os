@@ -78,6 +78,23 @@ run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NA
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-hda $(IMAGE_NAME).hdd
 
+.PHONY: run-blk-bios
+run-blk-bios: $(IMAGE_NAME).iso
+	@if [ ! -f hdd.img ]; then \
+		echo "Creating hdd.img..."; \
+		qemu-img create -f raw hdd.img 1G; \
+	fi
+	qemu-system-$(KARCH) \
+		-m 1024 \
+		-smp 4 \
+		-boot d \
+  		-netdev user,id=net0,hostfwd=tcp::8080-:80 \
+  		-device rtl8139,netdev=net0 \
+		-cdrom $(IMAGE_NAME).iso \
+  		-drive file=hdd.img,if=none,format=raw,id=vd0 \
+  		-device virtio-blk-pci,drive=vd0 \
+		-serial stdio
+
 .PHONY: run-aarch64
 run-aarch64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
 	qemu-system-$(KARCH) \

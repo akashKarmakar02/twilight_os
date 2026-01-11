@@ -5,7 +5,7 @@ pub mod metadata;
 pub mod superblock;
 
 use crate::driver;
-use crate::driver::disk::BlockDeviceIO;
+use crate::driver::disk::{BlockDeviceIO, BLOCK_DEVICE};
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
 use crate::sys::fs::twilight_fs::FsError::{
@@ -23,6 +23,8 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use spin::rwlock::RwLock;
+use crate::driver::disk::vitrioblkdev::VirtioBlkHandle;
+use crate::sys::fs::MFS;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
 static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);
@@ -92,6 +94,22 @@ pub enum FsError {
 fn detect_twilight_partition(bus: u8, dsk: u8) -> Option<PartitionEntry> {
     let mut sector = [0u8; 512];
     if driver::disk::ata::read(bus, dsk, 0, &mut sector).is_err() {
+        return None;
+    }
+
+    if !partition::has_signature(&sector) {
+        return None;
+    }
+
+    let entries = partition::decode_entries(&sector);
+    partition::find_entry(&entries, TWILIGHT_PARTITION_TYPE)
+}
+
+fn detect_twilight_partition_blk_dev() -> Option<PartitionEntry> {
+    let mut sector = [0u8; 512];
+    #[allow(static_mut_refs)]
+    let dev = unsafe { BLOCK_DEVICE.as_mut().unwrap() };
+    if dev.read(0, &mut sector).is_err() {
         return None;
     }
 
@@ -192,6 +210,33 @@ impl TwilightFs {
         }
 
         let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(device);
+        let device_arc = Arc::new(Mutex::new(device_box));
+
+        Ok(TwilightFs {
+            superblock: sb,
+            device: device_arc,
+        })
+    }
+    pub fn check_virtio_blk() -> Result<Self, &'static str> {
+        if let Some(entry) = detect_twilight_partition_blk_dev() {
+            set_fs_block_offset_lba(entry.lba_start);
+        } else {
+            set_fs_block_offset_bytes(0);
+        }
+
+        let mut device = VirtioBlkHandle;
+        let mut buf = [0u8; FS_BLOCK_SIZE];
+        if read_tfs_block(&mut device, 0, &mut buf).is_err() {
+            return Err("Failed to read Twilight FS superblock");
+        }
+
+
+        let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
+        if !sb.is_valid() {
+            return Err("Invalid Twilight FS superblock magic");
+        }
+
+        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(VirtioBlkHandle);
         let device_arc = Arc::new(Mutex::new(device_box));
 
         Ok(TwilightFs {
@@ -370,6 +415,7 @@ impl TwilightFs {
     // TODO: move this to inode impl
     pub fn read_inode(&mut self, inode_num: u32) -> Result<Inode, &'static str> {
         if inode_num == 0 || inode_num as usize > self.superblock.ninodes as usize {
+            let num = self.superblock.ninodes as usize;
             return Err("Invalid inode number");
         }
 
@@ -605,7 +651,7 @@ impl TwilightFs {
             }
 
             let mut indirect_block = [0u8; FS_BLOCK_SIZE];
-            write_tfs_block(
+            read_tfs_block(
                 self.device.lock().as_mut(),
                 inode.indirect_zones,
                 &mut indirect_block,
@@ -1309,5 +1355,44 @@ impl FileSystem for TwilightFs {
         } else {
             Err(())
         }
+    }
+}
+
+pub struct TfsProxy;
+
+impl FileSystem for TfsProxy {
+    fn open(&mut self, path: &str) -> Result<VfsNode, ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.open(path)
+    }
+
+    fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.mkdir(parent_dir, path)
+    }
+
+    fn rmdir(&mut self, path: &str) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.rmdir(path)
+    }
+
+    fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.ls(path)
+    }
+
+    fn rm(&mut self, path: &str) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.rm(path)
+    }
+
+    fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.touch(parent_path, filename)
+    }
+
+    fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.metadata(path)
     }
 }
