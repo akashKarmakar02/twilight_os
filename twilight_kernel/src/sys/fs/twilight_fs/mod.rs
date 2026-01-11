@@ -23,7 +23,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use spin::rwlock::RwLock;
-use crate::driver::disk::vitrioblkdev::VirtioBlkHandle;
+use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
 use crate::sys::fs::MFS;
 
 pub const FS_BLOCK_SIZE: usize = 2048;

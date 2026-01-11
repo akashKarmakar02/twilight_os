@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use spin::mutex::Mutex;
 
 pub mod ata;
-pub mod vitrioblkdev;
+pub mod virtioblkdev;
 
 pub const BLOCK_SIZE: usize = 2048;
 
@@ -221,5 +221,5 @@ pub fn dummy_blockdev() -> BlockDev {
 
 pub fn init() {
     ata::init();
-    vitrioblkdev::init();
+    virtioblkdev::init();
 }
