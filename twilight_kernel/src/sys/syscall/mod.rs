@@ -2,6 +2,7 @@ pub(crate) mod memory;
 pub mod service;
 mod utils;
 
+use crate::sys::syscall::SyscallError::ENOSYS;
 use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
 use crate::driver::timer::wait;
@@ -151,8 +152,8 @@ pub extern "sysv64" fn syscall_handler(
         }
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
-            // -(ENOSYS as i64)
-            0
+            -(ENOSYS as i64)
+            // 0
         }
     };
 
