@@ -428,9 +428,9 @@ static int do_login(void) {
                 char *home = field_idx >= 6 ? fields[5] : HOME_DIR_PREFIX;
                 char *shell = field_idx >= 7 ? fields[6] : "/bin/tsh";
                 // Set UID/GID (requires root or appropriate privileges)
-                if (setgid(gid) != 0) {
-                    fprintf(stderr, "logind: warning: failed to setgid: %s\n", strerror(errno));
-                }
+//                if (setgid(gid) != 0) {
+//                    fprintf(stderr, "logind: warning: failed to setgid: %s\n", strerror(errno));
+//                }
                 if (setuid(uid) != 0) {
                     fprintf(stderr, "logind: warning: failed to setuid: %s\n", strerror(errno));
                 }

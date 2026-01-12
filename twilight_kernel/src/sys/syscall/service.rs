@@ -216,18 +216,25 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
                     if accmode == O_RDONLY {
                         return -(EBADF as i64);
                     }
-                    if (file.status_flags & O_APPEND) != 0 {
-                        let size = file.node.lock().metadata.size;
-                        file.seek = size;
-                    }
+                    let append = (file.status_flags & O_APPEND) != 0;
+                    let start = if append {
+                        file.node.lock().metadata.size
+                    } else {
+                        file.seek
+                    };
+                    let end = start.saturating_add(len);
 
                     let result = {
                         let mut node = file.node.lock();
-                        node.write(file.seek, buf)
+                        let r = node.write(start, buf);
+                        if r.is_ok() && end > node.metadata.size {
+                            node.metadata.size = end;
+                        }
+                        r
                     };
 
-                    if let Ok(_) = result {
-                        file.seek += len;
+                    if result.is_ok() {
+                        file.seek = end;
                         len as i64
                     } else {
                         -1
@@ -568,6 +575,9 @@ pub fn writev(fd: i32, iov_ptr: u64, iovcnt: i32) -> i64 {
 
         // Write this segment
         let r = write(fd, iv.iov_base as usize, iv.iov_len);
+        if r < 0 {
+            return r;
+        }
         total = total.saturating_add(r);
 
         // Stop on partial write (short write semantics)
