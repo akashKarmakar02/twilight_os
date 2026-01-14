@@ -43,9 +43,20 @@ typedef struct {
   time_t status_at;
   Lang lang;
   bool cursor_visible;
+  bool quit;
 } Editor;
 
 static Editor E = {0};
+
+typedef enum {
+  MODE_VIEW = 0,
+  MODE_INSERT,
+  MODE_COMMAND,
+} Mode;
+
+static Mode mode = MODE_VIEW;
+static char cmd_buf[128];
+static size_t cmd_len;
 
 static const char *keywords[] = {
     "int",      "char",   "void",   "if",       "else",    "for",
@@ -804,17 +815,30 @@ static void draw_status(void) {
   if (E.lang == LANG_HTML) lang_name = "HTML";
   else if (E.lang == LANG_C) lang_name = "C";
   else if (E.lang == LANG_PYTHON) lang_name = "Python";
-  int n = snprintf(buf, sizeof(buf), "\x1b[7m %s%s | %s | %zu:%zu \x1b[m",
+  else if (E.lang == LANG_LUA) lang_name = "Lua";
+
+  const char *mode_name = "VIEW";
+  if (mode == MODE_INSERT) mode_name = "INSERT";
+  else if (mode == MODE_COMMAND) mode_name = "COMMAND";
+
+  int n = snprintf(buf, sizeof(buf), "\x1b[7m %s%s | %s | %zu:%zu | %s \x1b[m",
                    E.buf.filename, E.buf.dirty ? " +" : "",
-                   lang_name, E.cy + 1, E.cx + 1);
+                   lang_name, E.cy + 1, E.cx + 1, mode_name);
   write(STDOUT_FILENO, "\r\n", 2);
   write(STDOUT_FILENO, "\x1b[K", 3);
   write(STDOUT_FILENO, buf, (size_t)n);
 
   write(STDOUT_FILENO, "\r\n", 2);
   write(STDOUT_FILENO, "\x1b[K", 3);
-  if (E.status_msg[0] && time(NULL) - E.status_at < 4) {
+  if (mode == MODE_COMMAND) {
+    write(STDOUT_FILENO, ":", 1);
+    if (cmd_len) {
+      write(STDOUT_FILENO, cmd_buf, cmd_len);
+    }
+  } else if (E.status_msg[0] && time(NULL) - E.status_at < 4) {
     write(STDOUT_FILENO, E.status_msg, strlen(E.status_msg));
+  } else if (mode == MODE_INSERT) {
+    write(STDOUT_FILENO, "-- INSERT --", 12);
   }
 }
 
@@ -827,11 +851,17 @@ static void refresh_screen(void) {
   draw_rows();
   draw_status();
 
-  size_t rx = E.cx - (E.cx >= E.col_off ? E.col_off : E.cx);
-  size_t ry = E.cy - (E.cy >= E.row_off ? E.row_off : E.cy);
-  char cmdbuf[64];
-  int m = snprintf(cmdbuf, sizeof(cmdbuf), "\x1b[%zu;%zuH", ry + 1, rx + 1);
-  write(STDOUT_FILENO, cmdbuf, (size_t)m);
+  if (mode == MODE_COMMAND) {
+    char cmdbuf2[64];
+    int m2 = snprintf(cmdbuf2, sizeof(cmdbuf2), "\x1b[%d;%zuH", term_rows, cmd_len + 2);
+    write(STDOUT_FILENO, cmdbuf2, (size_t)m2);
+  } else {
+    size_t rx = E.cx - (E.cx >= E.col_off ? E.col_off : E.cx);
+    size_t ry = E.cy - (E.cy >= E.row_off ? E.row_off : E.cy);
+    char cmdbuf3[64];
+    int m3 = snprintf(cmdbuf3, sizeof(cmdbuf3), "\x1b[%zu;%zuH", ry + 1, rx + 1);
+    write(STDOUT_FILENO, cmdbuf3, (size_t)m3);
+  }
 }
 
 /* ----- input ----- */
@@ -846,6 +876,22 @@ enum Keys {
   KEY_PAGE_DOWN
 };
 
+static int read_byte_with_retry(char *out) {
+  for (int i = 0; i < 4; i++) {
+    ssize_t n = read(STDIN_FILENO, out, 1);
+    if (n == 1) {
+      return 1;
+    }
+    if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000 * 1000};
+      nanosleep(&ts, NULL);
+      continue;
+    }
+    return 0;
+  }
+  return 0;
+}
+
 static int read_key(void) {
   char c;
   ssize_t nread;
@@ -855,11 +901,26 @@ static int read_key(void) {
   }
 
   if (c == '\x1b') {
+    int oldfl = fcntl(STDIN_FILENO, F_GETFL);
+    if (oldfl != -1) {
+      fcntl(STDIN_FILENO, F_SETFL, oldfl | O_NONBLOCK);
+    }
     char seq[3];
-    if (read(STDIN_FILENO, &seq[0], 1) != 1)
+    if (!read_byte_with_retry(&seq[0])) {
+      if (oldfl != -1) {
+        fcntl(STDIN_FILENO, F_SETFL, oldfl);
+      }
       return '\x1b';
-    if (read(STDIN_FILENO, &seq[1], 1) != 1)
+    }
+    if (!read_byte_with_retry(&seq[1])) {
+      if (oldfl != -1) {
+        fcntl(STDIN_FILENO, F_SETFL, oldfl);
+      }
       return '\x1b';
+    }
+    if (oldfl != -1) {
+      fcntl(STDIN_FILENO, F_SETFL, oldfl);
+    }
 
     if (seq[0] == '[') {
       if (seq[1] >= '0' && seq[1] <= '9') {
@@ -985,6 +1046,85 @@ static void insert_char(int c) {
   }
 }
 
+static void view_move(int c) {
+  switch (c) {
+  case 'h':
+    move_cursor(KEY_ARROW_LEFT);
+    break;
+  case 'j':
+    move_cursor(KEY_ARROW_DOWN);
+    break;
+  case 'k':
+    move_cursor(KEY_ARROW_UP);
+    break;
+  case 'l':
+    move_cursor(KEY_ARROW_RIGHT);
+    break;
+  case '0':
+    move_cursor(KEY_HOME);
+    break;
+  case '$':
+    move_cursor(KEY_END);
+    break;
+  default:
+    break;
+  }
+}
+
+static void command_reset(void) {
+  cmd_len = 0;
+  cmd_buf[0] = '\0';
+}
+
+static void enter_mode(Mode m) {
+  mode = m;
+  if (mode == MODE_COMMAND) {
+    command_reset();
+  }
+}
+
+static void command_exec(void) {
+  cmd_buf[cmd_len] = '\0';
+
+  if (strcmp(cmd_buf, "w") == 0) {
+    if (buf_save(&E.buf) == 0) {
+      set_status("\"%s\" written", E.buf.filename);
+    } else {
+      set_status("write error: %s", strerror(errno));
+    }
+    enter_mode(MODE_VIEW);
+    return;
+  }
+
+  if (strcmp(cmd_buf, "q") == 0) {
+    if (E.buf.dirty) {
+      set_status("No write since last change (add ! to override)");
+      enter_mode(MODE_VIEW);
+      return;
+    }
+    E.quit = true;
+    return;
+  }
+
+  if (strcmp(cmd_buf, "q!") == 0) {
+    E.quit = true;
+    return;
+  }
+
+  if (strcmp(cmd_buf, "wq") == 0) {
+    if (buf_save(&E.buf) == 0) {
+      E.quit = true;
+    } else {
+      set_status("write error: %s", strerror(errno));
+      enter_mode(MODE_VIEW);
+    }
+    return;
+  }
+
+  set_status("Not an editor command: %s", cmd_buf);
+  enter_mode(MODE_VIEW);
+}
+
 /* ----- main ----- */
 
 int main(int argc, char **argv) {
@@ -993,31 +1133,82 @@ int main(int argc, char **argv) {
   const char *path = argc > 1 ? argv[1] : NULL;
   buf_load(&E.buf, path ? path : NULL);
   E.cursor_visible = true;
+  E.quit = false;
 
   update_winsize();
   enable_raw();
-  set_status("insert-only | arrows/Home/End | Enter/Backspace | Ctrl+S save | "
-             "Ctrl+C quit");
+  enter_mode(MODE_VIEW);
+  set_status("vi: VIEW/INSERT | i insert | Esc view | :w :q :wq :q!");
 
-  while (1) {
+  while (!E.quit) {
     refresh_screen();
 
     int c = read_key();
 
-    if (c == CTRL_KEY('c')) {
-      write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
-      break;
+    if (mode == MODE_COMMAND) {
+      if (c == '\x1b' || c == CTRL_KEY('c')) {
+        enter_mode(MODE_VIEW);
+        continue;
+      }
+      if (c == '\r' || c == '\n') {
+        command_exec();
+        continue;
+      }
+      if (c == 127 || c == CTRL_KEY('h')) {
+        if (cmd_len == 0) {
+          enter_mode(MODE_VIEW);
+        } else {
+          cmd_len--;
+          cmd_buf[cmd_len] = '\0';
+        }
+        continue;
+      }
+      if (c >= 32 && c <= 126) {
+        if (cmd_len + 1 < sizeof(cmd_buf)) {
+          cmd_buf[cmd_len++] = (char)c;
+          cmd_buf[cmd_len] = '\0';
+        }
+        continue;
+      }
+      continue;
     }
-    if (c == CTRL_KEY('v')) {          // Ctrl+V toggles visibility
-       E.cursor_visible = !E.cursor_visible;
-       set_status("cursor %s", E.cursor_visible ? "shown" : "hidden");
-       continue;
+
+    if (mode == MODE_VIEW) {
+      if (c == 'i') {
+        enter_mode(MODE_INSERT);
+        continue;
+      }
+      if (c == ':') {
+        enter_mode(MODE_COMMAND);
+        continue;
+      }
+      if (c == '\x1b' || c == CTRL_KEY('c')) {
+        continue;
+      }
+
+      switch (c) {
+      case KEY_ARROW_LEFT:
+      case KEY_ARROW_RIGHT:
+      case KEY_ARROW_UP:
+      case KEY_ARROW_DOWN:
+      case KEY_HOME:
+      case KEY_END:
+      case KEY_PAGE_UP:
+      case KEY_PAGE_DOWN:
+        move_cursor(c);
+        break;
+      default:
+        if (c >= 32 && c <= 126) {
+          view_move(c);
+        }
+        break;
+      }
+      continue;
     }
-    if (c == CTRL_KEY('s')) {
-      if (buf_save(&E.buf) == 0)
-        set_status("saved.");
-      else
-        set_status("save error: %s", strerror(errno));
+
+    // MODE_INSERT
+    if (c == '\x1b' || c == CTRL_KEY('c')) {
+      enter_mode(MODE_VIEW);
       continue;
     }
 
@@ -1047,6 +1238,7 @@ int main(int argc, char **argv) {
     }
   }
 
+  write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
   buf_free(&E.buf);
   return 0;
 }
