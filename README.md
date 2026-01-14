@@ -21,16 +21,15 @@ It currently supports x86_64 architecture. future plans include support for ARM/
 ## Features
 
 - Lightweight and efficient
-- Terminal support (kernel built-in)
-- RTC
-- ACPI - power off
-- VFS, Twilight FS
-- basic unix commands (kernel built-in)
-- asynchronous I/O
-- memory management
-- frame buffer (/dev/fb0)
-- ATA
-- basic shell with shell history
+- Terminal/TTY (kernel built-in)
+- RTC + ACPI power off
+- VFS with mount points (`/`, `/dev`, `/boot`)
+- Filesystems: initramfs rootfs fallback, TwilightFS (TFS), FAT16 (/boot)
+- Storage drivers: ATA + VirtIO block
+- Networking: smoltcp stack + NIC drivers (RTL8139, PCNET) + DHCP + TCP/UDP
+- Framebuffer device (`/dev/fb0`)
+- Input devices (`/dev/input/mice`, keyboard)
+- Userspace apps in `rootfs/bin` (e.g. `tsh`, modal `vi`, `logind`, core utils, `doom`, `chip8`)
 - SMP detection (no multi-threading yet)
 
 ## Goal 0.1.0 Release
@@ -55,7 +54,7 @@ It currently supports x86_64 architecture. future plans include support for ARM/
 
 Twilight OS builds require:
 
-- **Rust** (nightly, with `x86_64-unknown-none` target)
+- **Rust** (nightly pinned by `rust-toolchain.toml`, with `x86_64-unknown-none` target)
 - `llvm-tools-preview` component
 - `cargo build` with build-std
 - `nasm` (for assembly boot code)
@@ -63,6 +62,9 @@ Twilight OS builds require:
 - `xorriso` (for ISO creation)
 - `qemu` (for virtualization)
 - `musl-gcc`
+- `cpio` (for initramfs/rootfs archive)
+- `mtools` + `sgdisk`/`gdisk` (only for `.hdd` targets)
+- `git` + `curl` (Limine + OVMF downloads)
 
 ---
 
@@ -74,7 +76,7 @@ Twilight OS builds require:
 
 ```bash
 sudo apt update
-sudo apt install build-essential nasm qemu-system-x86 xorriso gcc musl-tools
+sudo apt install build-essential nasm qemu-system-x86 xorriso gcc musl-tools cpio mtools gdisk git curl
 rustup target add x86_64-unknown-none
 rustup component add llvm-tools-preview
 ```
@@ -82,7 +84,7 @@ rustup component add llvm-tools-preview
 - _Fedora_
 
 ```bash
-sudo dnf install make nasm qemu-system-x86 xorriso musl-gcc
+sudo dnf install make nasm qemu-system-x86 xorriso musl-gcc cpio mtools gdisk git curl
 rustup target add x86_64-unknown-none
 rustup component add llvm-tools-preview
 ```
@@ -90,7 +92,7 @@ rustup component add llvm-tools-preview
 - _Arch Linux_
 
 ```bash
-sudo pacman -S base-devel nasm qemu xorriso musl
+sudo pacman -S base-devel nasm qemu xorriso musl cpio mtools gptfdisk git curl
 rustup target add x86_64-unknown-none
 rustup component add llvm-tools-preview
 ```
@@ -102,7 +104,7 @@ rustup component add llvm-tools-preview
 You can use **Homebrew**:
 
 ```bash
-brew install nasm qemu xorriso
+brew install nasm qemu xorriso cpio mtools gptfdisk
 rustup target add x86_64-unknown-none
 rustup component add llvm-tools-preview
 ```
@@ -126,9 +128,13 @@ In the workspace directory, run:
 make run
 ```
 
----
+Other useful targets:
 
----
+- `make twilight-os.iso` (build ISO)
+- `make run-x86_64` (BIOS + IDE disk)
+- `make run-x86_64-uefi` (UEFI + IDE disk; downloads OVMF if needed)
+- `make run-blk-bios` (BIOS + VirtIO block device)
+- `make all-hdd` / `make run-hdd` (build/run `.hdd` image; requires `mtools` + `sgdisk`)
 
 ## ✅ First Boot
 
@@ -139,6 +145,12 @@ install
 ```
 
 inside the VM shell to format your disk.
+
+## Userspace Notes
+
+- `userspace/` is built via `cargo build --release` and its build script compiles apps under `userspace/apps/*` and copies resulting binaries into `rootfs/bin/`.
+- `vi` is modal (VIEW/INSERT) with `:w`, `:q`, `:wq`, `:q!`.
+- `logind` can create users and writes to `/etc/passwd`.
 
 ## Documentation
 
