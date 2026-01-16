@@ -69,8 +69,10 @@ pub extern "sysv64" fn syscall_handler(
         SYS_FCNTL => service::fcntl(arg1 as i32, arg2 as i32, arg3),
         SYS_READV => service::readv(arg1 as usize, arg2, arg3),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
-        SYS_EXECVE => service::execev(arg1 as usize, arg2 as usize, arg3 as usize),
-        SYS_EXIT => service::exit(),
+        SYS_SCHED_YIELD => service::sched_yield(),
+        SYS_FORK => service::fork(_stack_frame, regs),
+        SYS_EXECVE => service::execve(arg1 as usize, arg2 as usize, arg3 as usize, _stack_frame, regs),
+        SYS_EXIT => service::exit(arg1 as i32),
         SYS_UNAME => service::uname(arg1 as usize),
         SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
         SYS_CHDIR => service::chdir(arg1 as usize),
@@ -116,7 +118,8 @@ pub extern "sysv64" fn syscall_handler(
             let timespec_ptr = arg2 as *mut Timespec;
             crate::driver::timer::pit::sys_clock_gettime(arg1 as i32, timespec_ptr)
         }
-        SYS_EXIT_GROUP => service::exit(),
+        SYS_EXIT_GROUP => service::exit(arg1 as i32),
+        SYS_WAIT4 => service::wait4(arg1 as i32, arg2 as usize, arg3 as i32, arg4 as usize),
         SYS_OPENAT => {
             let upath = UserPtr(arg2 as *const u8);
 
@@ -158,6 +161,7 @@ pub extern "sysv64" fn syscall_handler(
     };
 
     regs.rax = res as u64;
+    crate::sys::proc::maybe_schedule();
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]

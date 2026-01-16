@@ -5,6 +5,7 @@ pub(crate) mod user;
 
 use crate::arch::x86_64::gdt::{SegmentSelector, USER_CS, USER_SS};
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
+use crate::arch::x86_64::io;
 use crate::kernel_utils::exec::jump_to_user;
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::{VFS, VfsNode};
@@ -12,7 +13,7 @@ use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
 use crate::sys::proc::switch::read_cr3;
-use crate::sys::proc::task::{Context, FpuState, allocate_switch_stack, switch_tasks};
+use crate::sys::proc::task::{Context, FpuState, allocate_switch_stack, switch_tasks, xrstor, xsave};
 use crate::sys::proc::user::USER_ENV;
 use crate::utils::StackHelper;
 use crate::println;
@@ -27,6 +28,7 @@ use core::alloc::Layout;
 use core::arch::naked_asm;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool};
 use object::{Object, ObjectSegment, SegmentFlags};
 use spin::Once;
 use spin::mutex::Mutex;
@@ -44,6 +46,7 @@ const MAIN_DYN_LOAD_BASE: u64 = 0x4000_0000;
 const INTERP_DYN_LOAD_BASE: u64 = 0x6000_0000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
+static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
@@ -259,6 +262,8 @@ pub struct Process {
     pub stdio_flags: [i32; 3],
     pub stdio_fd_flags: [i32; 3],
     pub proc_mm: Box<ProcMM>,
+    pub exit_code: i32,
+    pub preempt_frame: u64, // saved RSP to PreemptFrame on this task's kernel stack
 }
 
 impl Process {
@@ -412,6 +417,8 @@ impl Process {
             parent_pid,
             stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
             stdio_fd_flags: [0; 3],
+            exit_code: 0,
+            preempt_frame: 0,
         };
         Ok(p)
     }
@@ -464,6 +471,167 @@ pub fn exit() {
         PID.store(p_process.pid, Ordering::SeqCst);
         switch_tasks(&mut process, p_process);
     }
+}
+
+pub fn on_timer_tick() {
+    NEED_RESCHED.store(true, Ordering::Relaxed);
+}
+
+pub fn maybe_schedule() {
+    // NOTE: Proper preemptive scheduling requires saving/restoring full user context.
+    // Keep this as a stub for now so timer ticks don't cause unsafe switches.
+    let _ = NEED_RESCHED.swap(false, Ordering::Relaxed);
+}
+
+pub fn schedule_now() {
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let cur_pid = id();
+
+    // Make a contiguous slice so we can index and take raw pointers.
+    let slice = table.proc_list.make_contiguous();
+    if slice.len() < 2 {
+        return;
+    }
+
+    let Some(cur_idx) = slice.iter().position(|p| p.pid == cur_pid) else {
+        return;
+    };
+
+    // Find next runnable process in round-robin order.
+    let mut next_idx = None;
+    for step in 1..=slice.len() {
+        let idx = (cur_idx + step) % slice.len();
+        if matches!(slice[idx].state, ProcessState::Running) {
+            next_idx = Some(idx);
+            break;
+        }
+    }
+    let Some(next_idx) = next_idx else {
+        return;
+    };
+    if next_idx == cur_idx {
+        return;
+    }
+
+    let cur_ptr: *mut Process = &mut slice[cur_idx];
+    let next_ptr: *mut Process = &mut slice[next_idx];
+
+    unsafe {
+        PID.store((*next_ptr).pid, Ordering::SeqCst);
+        switch_tasks(&mut *cur_ptr, &mut *next_ptr);
+    }
+}
+
+#[repr(C)]
+pub struct PreemptFrame {
+    pub cr3: u64,
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rbp: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
+    crate::driver::timer::pit::pit_tick_isr();
+
+    // EOI for IRQ0 (PIC timer)
+    unsafe {
+        crate::arch::x86_64::idt::PICS
+            .lock()
+            .notify_end_of_interrupt(crate::arch::x86_64::idt::PIC_1_OFFSET);
+    }
+
+    if from_user == 0 {
+        return frame;
+    }
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let cur_pid = id();
+
+    let slice = table.proc_list.make_contiguous();
+    if slice.len() < 2 {
+        // Still remember the latest frame.
+        if let Some(p) = slice.iter_mut().find(|p| p.pid == cur_pid) {
+            p.preempt_frame = frame as u64;
+        }
+        return frame;
+    }
+
+    let Some(cur_idx) = slice.iter().position(|p| p.pid == cur_pid) else {
+        return frame;
+    };
+
+    // Save the current user's FS/GS bases and the latest preempt frame.
+    {
+        let cur = &mut slice[cur_idx];
+        cur.preempt_frame = frame as u64;
+        cur.fs_base = io::get_fsbase()();
+        cur.gs_base = io::get_inactive_gsbase()(); // inactive = user GS because we swapgs in ISR
+        if let Some(fpu) = cur.fpu_storage.as_mut() {
+            xsave(fpu);
+        }
+    }
+
+    // Find next runnable task (round robin), requiring that it has a saved frame.
+    let mut next_idx = None;
+    for step in 1..=slice.len() {
+        let idx = (cur_idx + step) % slice.len();
+        if !matches!(slice[idx].state, ProcessState::Running) {
+            continue;
+        }
+        if slice[idx].preempt_frame == 0 {
+            continue;
+        }
+        next_idx = Some(idx);
+        break;
+    }
+    let Some(next_idx) = next_idx else {
+        return frame;
+    };
+    if next_idx == cur_idx {
+        return frame;
+    }
+
+    let next_pid = slice[next_idx].pid;
+    PID.store(next_pid, Ordering::SeqCst);
+
+    // Restore FS/GS + FPU for next task; update kernel stack top for next ring3->ring0 entry.
+    {
+        let next = &mut slice[next_idx];
+        io::set_fsbase()(next.fs_base);
+        io::set_inactive_gsbase()(next.gs_base);
+
+        if let Some(fpu) = next.fpu_storage.as_mut() {
+            xrstor(fpu);
+        }
+
+        let kstack_top = next.kernel_gs.kernel_rsp;
+        #[allow(static_mut_refs)]
+        unsafe {
+            crate::arch::x86_64::gdt::TSS.rsp[0] = kstack_top;
+        }
+        io::wrmsr(io::IA32_SYSENTER_ESP, kstack_top);
+    }
+
+    slice[next_idx].preempt_frame as *mut PreemptFrame
 }
 
 #[unsafe(naked)]
@@ -564,6 +732,8 @@ pub fn init() {
                 parent_pid: 1,
                 stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
                 stdio_fd_flags: [0; 3],
+                exit_code: 0,
+                preempt_frame: 0,
             })
     }
 
@@ -595,6 +765,8 @@ pub fn init() {
         stack_size: 0,
         stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
         stdio_fd_flags: [0; 3],
+        exit_code: 0,
+        preempt_frame: 0,
     };
 
     idle_task.gs_base = VirtAddr::new(&*idle_task.kernel_gs as *const _ as u64);

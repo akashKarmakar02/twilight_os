@@ -457,6 +457,16 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
     }
 }
 
+pub fn execve(
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    _stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
+    _regs: &mut crate::arch::x86_64::idt::Registers,
+) -> i64 {
+    execev(arg1, arg2, arg3)
+}
+
 pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
         return -1;
@@ -505,12 +515,27 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
     0
 }
 
-pub fn exit() -> i64 {
+pub fn exit(_status: i32) -> i64 {
     unsafe { asm!("swapgs") };
 
     crate::sys::proc::exit();
 
     unreachable!()
+}
+
+pub fn fork(
+    _stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
+    _regs: &mut crate::arch::x86_64::idt::Registers,
+) -> i64 {
+    -(crate::sys::syscall::SyscallError::ENOSYS as i64)
+}
+
+pub fn wait4(_pid: i32, _status_ptr: usize, _options: i32, _rusage_ptr: usize) -> i64 {
+    -(crate::sys::syscall::SyscallError::ENOSYS as i64)
+}
+
+pub fn sched_yield() -> i64 {
+    0
 }
 
 pub fn uname(ptr: usize) -> i64 {
