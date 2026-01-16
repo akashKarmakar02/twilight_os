@@ -1,8 +1,6 @@
 pub(crate) mod memory;
 pub mod service;
 mod utils;
-
-use crate::sys::syscall::SyscallError::ENOSYS;
 use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
 use crate::driver::timer::wait;
@@ -11,7 +9,7 @@ use crate::sys::syscall::service::read;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user};
 use alloc::string::String;
 use twilight_common::syscall::numbers::*;
-use twilight_common::syscall::types::{Rlimit64, Timespec};
+use twilight_common::syscall::types::{ENOSYS, Rlimit64, Timespec};
 use x86_64::structures::idt::InterruptStackFrame;
 
 #[allow(dead_code)]
@@ -35,6 +33,7 @@ pub extern "sysv64" fn syscall_handler(
             read(arg1 as usize, buf)
         }
         SYS_WRITE => service::write(arg1 as i32, arg2 as usize, arg3 as usize),
+        SYS_PREAD64 => service::pread64(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
         SYS_OPEN => {
             let upath = UserPtr(arg1 as *const u8);
 
@@ -69,6 +68,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_FCNTL => service::fcntl(arg1 as i32, arg2 as i32, arg3),
         SYS_READV => service::readv(arg1 as usize, arg2, arg3),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
+        SYS_ACCESS => service::access(arg1 as usize, arg2 as i32),
         SYS_SCHED_YIELD => service::sched_yield(),
         SYS_FORK => service::fork(_stack_frame, regs),
         SYS_EXECVE => service::execve(arg1 as usize, arg2 as usize, arg3 as usize, _stack_frame, regs),
@@ -131,6 +131,7 @@ pub extern "sysv64" fn syscall_handler(
             let mode = arg4 as i32;
             service::openat(arg1 as i32, path.as_str(), flags, mode as u32)
         }
+        SYS_NEWFSTATAT => service::newfstatat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as i32),
         SYS_UTIMENAT => service::utimenat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize),
         SYS_PR_LIMIT64 => {
             let pid = arg1;

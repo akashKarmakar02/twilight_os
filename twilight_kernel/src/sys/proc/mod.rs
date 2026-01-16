@@ -889,12 +889,12 @@ fn build_initial_stack(
         AuxvEntry { key: 0, value: 0 },  // AT_NULL
     ];
 
-    // ---- compute padding so final %rsp follows SysV (mod 16 == 8 on entry) ----
+    // ---- compute padding so final %rsp follows SysV (16-byte aligned on entry) ----
     let aux_bytes = (size_of::<AuxvEntry>() * aux_vec.len()) as u64;
     let env_bytes = ((envp_ptrs.len() + 1) * size_of::<u64>()) as u64; // +NULL
     let argv_bytes = ((argv_ptrs.len() + 1) * size_of::<u64>()) as u64; // +NULL
     let total_bytes = aux_bytes + env_bytes + argv_bytes + size_of::<u64>() as u64; // +argc
-    let pad = rsp.wrapping_sub(total_bytes).wrapping_sub(8) & 0xF; // ensure (final_rsp % 16) == 8
+    let pad = rsp.wrapping_sub(total_bytes) & 0xF; // ensure (final_rsp % 16) == 0
     if pad != 0 {
         rsp -= pad;
         unsafe { core::ptr::write_bytes(rsp as *mut u8, 0, pad as usize) };

@@ -65,6 +65,34 @@ fn normalize_path(p: &str) -> String {
     }
 }
 
+#[inline(always)]
+fn fill_stat_from_meta(out: &mut Stat, meta: &crate::sys::fs::vfs::Metadata) {
+    out.st_size = meta.size as i64;
+    out.st_mode = match meta.file_type {
+        FileType::File => 0o100644,        // regular file: rw-r--r--
+        FileType::Dir => 0o040755,         // directory: rwxr-xr-x
+        FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
+        FileType::BlockDevice => 0o060660, // block device: rw-rw----
+    };
+    out.st_uid = 0;
+    out.st_gid = 0;
+    out.st_ino = meta.ino as u64;
+    out.st_nlink = 1;
+    out.st_rdev = 0;
+    out.st_atim = Timespec {
+        tv_sec: meta.access_time as i64,
+        tv_nsec: 0,
+    };
+    out.st_ctim = Timespec {
+        tv_sec: meta.created_time as i64,
+        tv_nsec: 0,
+    };
+    out.st_mtim = Timespec {
+        tv_sec: meta.modified_time as i64,
+        tv_nsec: 0,
+    };
+}
+
 const FD_CLOEXEC: i32 = 0x1;
 const STATUS_FLAG_MUTABLE: i32 = O_APPEND | O_NONBLOCK;
 
@@ -527,15 +555,58 @@ pub fn fork(
     _stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
     _regs: &mut crate::arch::x86_64::idt::Registers,
 ) -> i64 {
-    -(crate::sys::syscall::SyscallError::ENOSYS as i64)
+    -(ENOSYS as i64)
 }
 
 pub fn wait4(_pid: i32, _status_ptr: usize, _options: i32, _rusage_ptr: usize) -> i64 {
-    -(crate::sys::syscall::SyscallError::ENOSYS as i64)
+    -(ENOSYS as i64)
 }
 
 pub fn sched_yield() -> i64 {
     0
+}
+
+pub fn pread64(fd: i32, buf_ptr: usize, count: usize, offset: u64) -> i64 {
+    if buf_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+    if fd <= 2 {
+        return -(EBADF as i64);
+    }
+
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, count) };
+
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
+
+    let file_ref = match clone_open_file(process, fd) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
+    };
+
+    let file = file_ref.lock();
+    let accmode = file.status_flags & O_ACCMODE;
+    if accmode == O_WRONLY {
+        return -(EBADF as i64);
+    }
+
+    let mut node = file.node.lock();
+    match node.metadata.file_type {
+        FileType::Dir => return -(EISDIR as i64),
+        FileType::CharDevice => {}
+        _ => {}
+    }
+
+    match node.read(offset as usize, buf) {
+        Ok(n) => n as i64,
+        Err(_) => -(EIO as i64),
+    }
 }
 
 pub fn uname(ptr: usize) -> i64 {
@@ -913,32 +984,60 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     };
 
     let user_stat = unsafe { &mut *(stat_ptr as *mut Stat) };
+    fill_stat_from_meta(user_stat, &metadata);
 
-    user_stat.st_size = metadata.size as i64;
-    user_stat.st_mode = match metadata.file_type {
-        FileType::File => 0o100644,        // regular file: rw-r--r--
-        FileType::Dir => 0o040755,         // directory: rwxr-xr-x
-        FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
-        FileType::BlockDevice => 0o060660, // block device: rw-rw----
-    };
-    user_stat.st_uid = 0;
-    user_stat.st_gid = 0;
-    user_stat.st_ino = metadata.ino as u64;
-    user_stat.st_nlink = 1;
-    user_stat.st_rdev = 0;
-    user_stat.st_atim = Timespec {
-        tv_sec: metadata.access_time as i64,
-        tv_nsec: 0,
-    };
-    user_stat.st_ctim = Timespec {
-        tv_sec: metadata.created_time as i64,
-        tv_nsec: 0,
-    };
-    user_stat.st_mtim = Timespec {
-        tv_sec: metadata.modified_time as i64,
-        tv_nsec: 0,
+    0
+}
+
+pub fn access(path_ptr: usize, _mode: i32) -> i64 {
+    let path_ptr = UserPtr(path_ptr as *const u8);
+    let Ok(path) = copy_cstr_from_user(path_ptr, 4096) else {
+        return -(EFAULT as i64);
     };
 
+    #[allow(static_mut_refs)]
+    match unsafe { VFS.get_mut().metadata(path.trim()) } {
+        Ok(_) => 0,
+        Err(_) => -(ENOENT as i64),
+    }
+}
+
+pub fn newfstatat(dirfd: i32, pathname_ptr: usize, stat_ptr: usize, _flags: i32) -> i64 {
+    if stat_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+    let pathname_ptr = UserPtr(pathname_ptr as *const u8);
+    let Ok(path) = copy_cstr_from_user(pathname_ptr, 4096) else {
+        return -(EFAULT as i64);
+    };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let full_path = if path.starts_with('/') {
+        normalize_path(path.trim())
+    } else {
+        match base_for_dirfd(process, dirfd) {
+            Ok(base) => normalize_path(&join_paths(&base, path.trim())),
+            Err(e) => return e as i64,
+        }
+    };
+
+    #[allow(static_mut_refs)]
+    let Ok(meta) = (unsafe { VFS.get_mut().metadata(&full_path) }) else {
+        return -(ENOENT as i64);
+    };
+
+    let out = unsafe { &mut *(stat_ptr as *mut Stat) };
+    fill_stat_from_meta(out, &meta);
     0
 }
 
