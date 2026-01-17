@@ -25,7 +25,6 @@ pub extern "sysv64" fn syscall_handler(
     let arg5 = regs.r8;
     let arg6 = regs.r9;
 
-    serial_println!("{syscall_number}");
     let res = match syscall_number {
         SYS_READ => {
             let ptr = arg2 as *mut u8;
