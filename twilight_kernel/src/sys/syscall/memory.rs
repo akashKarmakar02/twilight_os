@@ -32,7 +32,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
             .unwrap()
             .get_process(crate::sys::proc::id())
     };
-    let mut process = match proc {
+    let process = match proc {
         Some(p) => p,
         None => return ESRCH,
     };

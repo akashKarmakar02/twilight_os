@@ -3,13 +3,12 @@ pub mod service;
 mod utils;
 use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
-use crate::driver::timer::wait;
 use crate::serial_println;
 use crate::sys::syscall::service::read;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user};
 use alloc::string::String;
 use twilight_common::syscall::numbers::*;
-use twilight_common::syscall::types::{ENOSYS, Rlimit64, Timespec};
+use twilight_common::syscall::types::{EFAULT, ENOSYS, Rlimit64, Timespec};
 use x86_64::structures::idt::InterruptStackFrame;
 
 #[allow(dead_code)]
@@ -74,6 +73,8 @@ pub extern "sysv64" fn syscall_handler(
         SYS_FCNTL => service::fcntl(arg1 as i32, arg2 as i32, arg3),
         SYS_READV => service::readv(arg1 as usize, arg2, arg3),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
+        SYS_PREADV => service::preadv(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
+        SYS_PWRITEV => service::pwritev(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
         SYS_ACCESS => service::access(arg1 as usize, arg2 as i32),
         SYS_SCHED_YIELD => service::sched_yield(),
         SYS_GETPID => service::getpid(),
@@ -108,16 +109,23 @@ pub extern "sysv64" fn syscall_handler(
         }
         SYS_NANOSLEEP => {
             let req_timespec_ptr = arg1 as *const Timespec;
-            let _rem_timespec_ptr = arg2 as *mut Timespec;
+            let rem_timespec_ptr = arg2 as *mut Timespec;
 
-            unsafe {
-                if !req_timespec_ptr.is_null() {
-                    let req = &*req_timespec_ptr;
-                    wait((req.tv_nsec + req.tv_sec * 10000000000) as u64);
+            if req_timespec_ptr.is_null() {
+                -(EFAULT as i64)
+            } else {
+                let req = unsafe { &*req_timespec_ptr };
+
+                // We don't implement interruption yet; if rem != NULL, return 0 remaining.
+                if !rem_timespec_ptr.is_null() {
+                    unsafe { *rem_timespec_ptr = Timespec { tv_sec: 0, tv_nsec: 0 } };
+                }
+
+                match crate::driver::timer::pit::sleep_timespec(req) {
+                    Ok(()) => 0i64,
+                    Err(e) => e, // negative errno
                 }
             }
-
-            0i64
         }
         SYS_GETDENTS64 => {
             let fd = arg1 as i32;

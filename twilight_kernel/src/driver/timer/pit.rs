@@ -1,6 +1,7 @@
 use crate::driver::timer::cmos::CMOS;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
+use crate::task::executor::halt;
 use twilight_common::syscall::types::{EFAULT, EINVAL, Timespec};
 
 const PIT_BASE_HZ: u64 = 1_193_182;
@@ -23,6 +24,38 @@ pub fn pit_tick_isr() {
 fn monotonic_ns() -> u128 {
     let t = TICKS.load(Ordering::Relaxed) as u128;
     (t * NUM_NS_PER_TICK) / DEN_NS_PER_TICK
+}
+
+pub fn monotonic_ns_u64() -> u64 {
+    core::cmp::min(monotonic_ns(), u64::MAX as u128) as u64
+}
+
+pub fn sleep_ns(nanoseconds: u64) {
+    if nanoseconds == 0 {
+        return;
+    }
+
+    let start = monotonic_ns_u64();
+    let deadline = start.saturating_add(nanoseconds);
+
+    while monotonic_ns_u64() < deadline {
+        halt();
+    }
+}
+
+pub fn sleep_timespec(req: &Timespec) -> Result<(), i64> {
+    if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= (NSEC_PER_SEC as i64) {
+        return Err(-(EINVAL as i64));
+    }
+
+    let secs = req.tv_sec as u128;
+    let nsec = req.tv_nsec as u128;
+    let total = secs
+        .saturating_mul(NSEC_PER_SEC as u128)
+        .saturating_add(nsec);
+
+    sleep_ns(core::cmp::min(total, u64::MAX as u128) as u64);
+    Ok(())
 }
 
 pub fn init_realtime_offset_from_cmos() {

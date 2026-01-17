@@ -1295,6 +1295,141 @@ pub fn readv(fd: usize, iov_ptr: u64, iov_count: u64) -> i64 {
     total
 }
 
+pub fn preadv(fd: i32, iov_ptr: usize, iov_count: usize, offset: u64) -> i64 {
+    if iov_count == 0 {
+        return 0;
+    }
+    if iov_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+    if fd <= 2 {
+        return -(ESPIPE as i64);
+    }
+
+    let iov = unsafe { core::slice::from_raw_parts(iov_ptr as *const Iovec, iov_count) };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let file_ref = match clone_open_file(process, fd) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
+    };
+
+    let file = file_ref.lock();
+    let accmode = file.status_flags & O_ACCMODE;
+    if accmode == O_WRONLY {
+        return -(EBADF as i64);
+    }
+
+    let mut node = file.node.lock();
+    if node.metadata.file_type == FileType::Dir {
+        return -(EISDIR as i64);
+    }
+    if node.metadata.file_type == FileType::CharDevice {
+        return -(ESPIPE as i64);
+    }
+
+    let mut total: usize = 0;
+    for iv in iov {
+        if iv.iov_len == 0 {
+            continue;
+        }
+        if iv.iov_base.is_null() {
+            return -(EFAULT as i64);
+        }
+        let buf = unsafe { core::slice::from_raw_parts_mut(iv.iov_base as *mut u8, iv.iov_len) };
+        match node.read((offset as usize).saturating_add(total), buf) {
+            Ok(n) => {
+                total = total.saturating_add(n);
+                if n < iv.iov_len {
+                    break;
+                }
+            }
+            Err(_) => return -(EIO as i64),
+        }
+    }
+
+    total as i64
+}
+
+pub fn pwritev(fd: i32, iov_ptr: usize, iov_count: usize, offset: u64) -> i64 {
+    if iov_count == 0 {
+        return 0;
+    }
+    if iov_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+    if fd <= 2 {
+        return -(ESPIPE as i64);
+    }
+
+    let iov = unsafe { core::slice::from_raw_parts(iov_ptr as *const Iovec, iov_count) };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let file_ref = match clone_open_file(process, fd) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
+    };
+
+    let file = file_ref.lock();
+    let accmode = file.status_flags & O_ACCMODE;
+    if accmode == O_RDONLY {
+        return -(EBADF as i64);
+    }
+
+    let mut node = file.node.lock();
+    if node.metadata.file_type == FileType::Dir {
+        return -(EISDIR as i64);
+    }
+    if node.metadata.file_type == FileType::CharDevice {
+        return -(ESPIPE as i64);
+    }
+
+    let mut total: usize = 0;
+    for iv in iov {
+        if iv.iov_len == 0 {
+            continue;
+        }
+        if iv.iov_base.is_null() {
+            return -(EFAULT as i64);
+        }
+        let buf = unsafe { core::slice::from_raw_parts(iv.iov_base as *const u8, iv.iov_len) };
+        let start = (offset as usize).saturating_add(total);
+        let end = start.saturating_add(iv.iov_len);
+        match node.write(start, buf) {
+            Ok(()) => {
+                total = total.saturating_add(iv.iov_len);
+                if end > node.metadata.size {
+                    node.metadata.size = end;
+                }
+            }
+            Err(_) => return -(EIO as i64),
+        }
+    }
+
+    // Do not change `file.seek` (pwritev semantics).
+    total as i64
+}
+
 pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
     if fd <= 2 {
         let tty = get_tty();
@@ -1569,7 +1704,9 @@ static GETRANDOM_SEED: AtomicU64 = AtomicU64::new(0);
 fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
-    unsafe { asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags))
+    };
     ((hi as u64) << 32) | (lo as u64)
 }
 
@@ -1579,8 +1716,7 @@ pub fn getrandom(buf: usize, len: usize, _flags: u32) -> i64 {
     }
     let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
 
-    let now = rdtsc()
-        ^ (crate::sys::proc::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let now = rdtsc() ^ (crate::sys::proc::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut x = GETRANDOM_SEED
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
             Some(v ^ now ^ (len as u64).rotate_left(17))
@@ -1605,14 +1741,7 @@ pub fn rseq(_rseq: usize, _rseq_len: u32, _flags: u32, _sig: u32) -> i64 {
     -(ENOSYS as i64)
 }
 
-pub fn futex(
-    uaddr: usize,
-    op: i32,
-    val: u32,
-    _timeout: usize,
-    _uaddr2: usize,
-    _val3: u32,
-) -> i64 {
+pub fn futex(uaddr: usize, op: i32, val: u32, _timeout: usize, _uaddr2: usize, _val3: u32) -> i64 {
     const FUTEX_WAIT: i32 = 0;
     const FUTEX_WAKE: i32 = 1;
     const FUTEX_WAIT_BITSET: i32 = 9;

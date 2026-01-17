@@ -4,8 +4,8 @@ mod task;
 pub(crate) mod user;
 
 use crate::arch::x86_64::gdt::{SegmentSelector, USER_CS, USER_SS};
-use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
 use crate::arch::x86_64::io;
+use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::{VFS, VfsNode};
@@ -13,7 +13,9 @@ use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
 use crate::sys::proc::switch::read_cr3;
-use crate::sys::proc::task::{Context, FpuState, allocate_switch_stack, switch_tasks, xrstor, xsave};
+use crate::sys::proc::task::{
+    Context, FpuState, allocate_switch_stack, switch_tasks, xrstor, xsave,
+};
 use crate::sys::proc::user::USER_ENV;
 use crate::utils::StackHelper;
 use crate::println;
@@ -27,8 +29,8 @@ use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::arch::naked_asm;
 use core::mem::size_of;
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU16, Ordering};
-use core::sync::atomic::{AtomicBool};
 use object::{Object, ObjectSegment, SegmentFlags};
 use spin::Once;
 use spin::mutex::Mutex;
