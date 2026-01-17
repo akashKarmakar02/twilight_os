@@ -224,6 +224,14 @@ impl ProcessTable {
         let prev_task = prev_slice.last_mut().unwrap();
         let next_task = &mut next_slice[0];
 
+        // This is a *kernel* context switch (e.g., exec/spawn). The previous task is now blocked
+        // in the kernel until the new process exits. Prevent the preemptive timer from resuming it
+        // from a stale user preempt frame.
+        prev_task.state = ProcessState::Waiting;
+        prev_task.preempt_frame = 0;
+        next_task.state = ProcessState::Running;
+        next_task.preempt_frame = 0;
+
         switch_tasks(prev_task, next_task);
     }
 }
@@ -461,6 +469,11 @@ pub fn exit() {
     let mut process = table.proc_list.pop_back().unwrap();
 
     if let Some(p_process) = table.get_process(process.parent_pid) {
+        // Parent can run again; clear any stale preempt frame so it won't be resumed from an old
+        // user snapshot.
+        p_process.state = ProcessState::Running;
+        p_process.preempt_frame = 0;
+
         let (pre_table_frame, flags) = Cr3::read();
         unsafe {
             // Use the parent's page table while tearing down the exiting process.
@@ -889,12 +902,12 @@ fn build_initial_stack(
         AuxvEntry { key: 0, value: 0 },  // AT_NULL
     ];
 
-    // ---- compute padding so final %rsp follows SysV (mod 16 == 8 on entry) ----
+    // ---- compute padding so final %rsp follows SysV (16-byte aligned on entry) ----
     let aux_bytes = (size_of::<AuxvEntry>() * aux_vec.len()) as u64;
     let env_bytes = ((envp_ptrs.len() + 1) * size_of::<u64>()) as u64; // +NULL
     let argv_bytes = ((argv_ptrs.len() + 1) * size_of::<u64>()) as u64; // +NULL
     let total_bytes = aux_bytes + env_bytes + argv_bytes + size_of::<u64>() as u64; // +argc
-    let pad = rsp.wrapping_sub(total_bytes).wrapping_sub(8) & 0xF; // ensure (final_rsp % 16) == 8
+    let pad = rsp.wrapping_sub(total_bytes) & 0xF; // ensure (final_rsp % 16) == 0
     if pad != 0 {
         rsp -= pad;
         unsafe { core::ptr::write_bytes(rsp as *mut u8, 0, pad as usize) };

@@ -18,6 +18,7 @@ pub const EEXIST: i32 = 17;
 pub const ENOTDIR: i32 = 20;
 pub const EISDIR: i32 = 21;
 pub const EINVAL: i32 = 22;
+pub const ENOSYS: i32 = 38;
 pub const EOPNOTSUPP: i32 = 95;
 
 pub const O_RDONLY: i32 = 0;

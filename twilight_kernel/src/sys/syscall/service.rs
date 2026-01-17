@@ -12,6 +12,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::mutex::Mutex;
 use twilight_common::syscall::types::*;
 
@@ -63,6 +64,34 @@ fn normalize_path(p: &str) -> String {
     } else {
         format!("/{}", out.join("/"))
     }
+}
+
+#[inline(always)]
+fn fill_stat_from_meta(out: &mut Stat, meta: &crate::sys::fs::vfs::Metadata) {
+    out.st_size = meta.size as i64;
+    out.st_mode = match meta.file_type {
+        FileType::File => 0o100644,        // regular file: rw-r--r--
+        FileType::Dir => 0o040755,         // directory: rwxr-xr-x
+        FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
+        FileType::BlockDevice => 0o060660, // block device: rw-rw----
+    };
+    out.st_uid = 0;
+    out.st_gid = 0;
+    out.st_ino = meta.ino as u64;
+    out.st_nlink = 1;
+    out.st_rdev = 0;
+    out.st_atim = Timespec {
+        tv_sec: meta.access_time as i64,
+        tv_nsec: 0,
+    };
+    out.st_ctim = Timespec {
+        tv_sec: meta.created_time as i64,
+        tv_nsec: 0,
+    };
+    out.st_mtim = Timespec {
+        tv_sec: meta.modified_time as i64,
+        tv_nsec: 0,
+    };
 }
 
 const FD_CLOEXEC: i32 = 0x1;
@@ -527,15 +556,58 @@ pub fn fork(
     _stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
     _regs: &mut crate::arch::x86_64::idt::Registers,
 ) -> i64 {
-    -(crate::sys::syscall::SyscallError::ENOSYS as i64)
+    -(ENOSYS as i64)
 }
 
 pub fn wait4(_pid: i32, _status_ptr: usize, _options: i32, _rusage_ptr: usize) -> i64 {
-    -(crate::sys::syscall::SyscallError::ENOSYS as i64)
+    -(ENOSYS as i64)
 }
 
 pub fn sched_yield() -> i64 {
     0
+}
+
+pub fn pread64(fd: i32, buf_ptr: usize, count: usize, offset: u64) -> i64 {
+    if buf_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+    if fd <= 2 {
+        return -(EBADF as i64);
+    }
+
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, count) };
+
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
+
+    let file_ref = match clone_open_file(process, fd) {
+        Ok(f) => f,
+        Err(code) => return code as i64,
+    };
+
+    let file = file_ref.lock();
+    let accmode = file.status_flags & O_ACCMODE;
+    if accmode == O_WRONLY {
+        return -(EBADF as i64);
+    }
+
+    let mut node = file.node.lock();
+    match node.metadata.file_type {
+        FileType::Dir => return -(EISDIR as i64),
+        FileType::CharDevice => {}
+        _ => {}
+    }
+
+    match node.read(offset as usize, buf) {
+        Ok(n) => n as i64,
+        Err(_) => -(EIO as i64),
+    }
 }
 
 pub fn uname(ptr: usize) -> i64 {
@@ -913,32 +985,60 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     };
 
     let user_stat = unsafe { &mut *(stat_ptr as *mut Stat) };
+    fill_stat_from_meta(user_stat, &metadata);
 
-    user_stat.st_size = metadata.size as i64;
-    user_stat.st_mode = match metadata.file_type {
-        FileType::File => 0o100644,        // regular file: rw-r--r--
-        FileType::Dir => 0o040755,         // directory: rwxr-xr-x
-        FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
-        FileType::BlockDevice => 0o060660, // block device: rw-rw----
-    };
-    user_stat.st_uid = 0;
-    user_stat.st_gid = 0;
-    user_stat.st_ino = metadata.ino as u64;
-    user_stat.st_nlink = 1;
-    user_stat.st_rdev = 0;
-    user_stat.st_atim = Timespec {
-        tv_sec: metadata.access_time as i64,
-        tv_nsec: 0,
-    };
-    user_stat.st_ctim = Timespec {
-        tv_sec: metadata.created_time as i64,
-        tv_nsec: 0,
-    };
-    user_stat.st_mtim = Timespec {
-        tv_sec: metadata.modified_time as i64,
-        tv_nsec: 0,
+    0
+}
+
+pub fn access(path_ptr: usize, _mode: i32) -> i64 {
+    let path_ptr = UserPtr(path_ptr as *const u8);
+    let Ok(path) = copy_cstr_from_user(path_ptr, 4096) else {
+        return -(EFAULT as i64);
     };
 
+    #[allow(static_mut_refs)]
+    match unsafe { VFS.get_mut().metadata(path.trim()) } {
+        Ok(_) => 0,
+        Err(_) => -(ENOENT as i64),
+    }
+}
+
+pub fn newfstatat(dirfd: i32, pathname_ptr: usize, stat_ptr: usize, _flags: i32) -> i64 {
+    if stat_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+    let pathname_ptr = UserPtr(pathname_ptr as *const u8);
+    let Ok(path) = copy_cstr_from_user(pathname_ptr, 4096) else {
+        return -(EFAULT as i64);
+    };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let full_path = if path.starts_with('/') {
+        normalize_path(path.trim())
+    } else {
+        match base_for_dirfd(process, dirfd) {
+            Ok(base) => normalize_path(&join_paths(&base, path.trim())),
+            Err(e) => return e as i64,
+        }
+    };
+
+    #[allow(static_mut_refs)]
+    let Ok(meta) = (unsafe { VFS.get_mut().metadata(&full_path) }) else {
+        return -(ENOENT as i64);
+    };
+
+    let out = unsafe { &mut *(stat_ptr as *mut Stat) };
+    fill_stat_from_meta(out, &meta);
     0
 }
 
@@ -1430,5 +1530,114 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
         if ready > 0 {
             return ready as i64;
         }
+    }
+}
+
+pub fn getpid() -> i64 {
+    crate::sys::proc::id() as i64
+}
+
+pub fn rt_sigaction(_signum: i32, _act: usize, _oldact: usize, _sigsetsize: usize) -> i64 {
+    // No signal support yet; report success so glibc can proceed.
+    0
+}
+
+pub fn rt_sigprocmask(_how: i32, _set: usize, oldset: usize, sigsetsize: usize) -> i64 {
+    // No signal masks yet; return an empty mask.
+    if oldset != 0 && sigsetsize != 0 {
+        unsafe { core::ptr::write_bytes(oldset as *mut u8, 0, sigsetsize) };
+    }
+    0
+}
+
+pub fn tgkill(tgid: i32, tid: i32, _sig: i32) -> i64 {
+    let cur = crate::sys::proc::id() as i32;
+    if tgid != cur || tid != cur {
+        return -(ESRCH as i64);
+    }
+    0
+}
+
+pub fn set_robust_list(_head: usize, _len: usize) -> i64 {
+    // Robust futex lists are ignored for now.
+    0
+}
+
+static GETRANDOM_SEED: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+fn rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe { asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags)) };
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+pub fn getrandom(buf: usize, len: usize, _flags: u32) -> i64 {
+    if buf == 0 && len != 0 {
+        return -(EFAULT as i64);
+    }
+    let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
+
+    let now = rdtsc()
+        ^ (crate::sys::proc::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut x = GETRANDOM_SEED
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v ^ now ^ (len as u64).rotate_left(17))
+        })
+        .unwrap_or(0)
+        ^ now;
+
+    for b in out.iter_mut() {
+        // xorshift64*
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        let y = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        *b = (y & 0xFF) as u8;
+    }
+
+    len as i64
+}
+
+pub fn rseq(_rseq: usize, _rseq_len: u32, _flags: u32, _sig: u32) -> i64 {
+    // glibc probes this; returning ENOSYS makes it fall back.
+    -(ENOSYS as i64)
+}
+
+pub fn futex(
+    uaddr: usize,
+    op: i32,
+    val: u32,
+    _timeout: usize,
+    _uaddr2: usize,
+    _val3: u32,
+) -> i64 {
+    const FUTEX_WAIT: i32 = 0;
+    const FUTEX_WAKE: i32 = 1;
+    const FUTEX_WAIT_BITSET: i32 = 9;
+    const FUTEX_WAKE_BITSET: i32 = 10;
+    const FUTEX_PRIVATE_FLAG: i32 = 128;
+    const FUTEX_CLOCK_REALTIME: i32 = 256;
+
+    let cmd = op & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+
+    if uaddr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    match cmd {
+        FUTEX_WAIT | FUTEX_WAIT_BITSET => {
+            let cur = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+            if cur != val {
+                return -(EAGAIN as i64);
+            }
+
+            // Minimal behavior: don't block indefinitely; yield once and report "woken".
+            halt();
+            0
+        }
+        FUTEX_WAKE | FUTEX_WAKE_BITSET => 0,
+        _ => -(ENOSYS as i64),
     }
 }

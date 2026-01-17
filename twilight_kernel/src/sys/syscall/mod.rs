@@ -1,8 +1,6 @@
 pub(crate) mod memory;
 pub mod service;
 mod utils;
-
-use crate::sys::syscall::SyscallError::ENOSYS;
 use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
 use crate::driver::timer::wait;
@@ -11,7 +9,7 @@ use crate::sys::syscall::service::read;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user};
 use alloc::string::String;
 use twilight_common::syscall::numbers::*;
-use twilight_common::syscall::types::{Rlimit64, Timespec};
+use twilight_common::syscall::types::{ENOSYS, Rlimit64, Timespec};
 use x86_64::structures::idt::InterruptStackFrame;
 
 #[allow(dead_code)]
@@ -35,6 +33,13 @@ pub extern "sysv64" fn syscall_handler(
             read(arg1 as usize, buf)
         }
         SYS_WRITE => service::write(arg1 as i32, arg2 as usize, arg3 as usize),
+        SYS_PREAD64 => service::pread64(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
+        SYS_RT_SIGACTION => {
+            service::rt_sigaction(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize)
+        }
+        SYS_RT_SIGPROCMASK => {
+            service::rt_sigprocmask(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize)
+        }
         SYS_OPEN => {
             let upath = UserPtr(arg1 as *const u8);
 
@@ -69,9 +74,17 @@ pub extern "sysv64" fn syscall_handler(
         SYS_FCNTL => service::fcntl(arg1 as i32, arg2 as i32, arg3),
         SYS_READV => service::readv(arg1 as usize, arg2, arg3),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
+        SYS_ACCESS => service::access(arg1 as usize, arg2 as i32),
         SYS_SCHED_YIELD => service::sched_yield(),
+        SYS_GETPID => service::getpid(),
         SYS_FORK => service::fork(_stack_frame, regs),
-        SYS_EXECVE => service::execve(arg1 as usize, arg2 as usize, arg3 as usize, _stack_frame, regs),
+        SYS_EXECVE => service::execve(
+            arg1 as usize,
+            arg2 as usize,
+            arg3 as usize,
+            _stack_frame,
+            regs,
+        ),
         SYS_EXIT => service::exit(arg1 as i32),
         SYS_UNAME => service::uname(arg1 as usize),
         SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
@@ -113,13 +126,23 @@ pub extern "sysv64" fn syscall_handler(
 
             service::getdent64(fd, buf, buf_len as usize)
         }
-        SYS_SETTID_ADDR => arg1 as i64,
+        // Linux returns the thread id (tid) and records the location for clear_tid on exit.
+        // We don't implement clear_tid yet, but returning a real tid is critical for glibc.
+        SYS_SETTID_ADDR => crate::sys::proc::id() as i64,
         SYS_CLOCK_GETTIME => {
             let timespec_ptr = arg2 as *mut Timespec;
             crate::driver::timer::pit::sys_clock_gettime(arg1 as i32, timespec_ptr)
         }
         SYS_EXIT_GROUP => service::exit(arg1 as i32),
         SYS_WAIT4 => service::wait4(arg1 as i32, arg2 as usize, arg3 as i32, arg4 as usize),
+        SYS_FUTEX => service::futex(
+            arg1 as usize,
+            arg2 as i32,
+            arg3 as u32,
+            arg4 as usize,
+            arg5 as usize,
+            arg6 as u32,
+        ),
         SYS_OPENAT => {
             let upath = UserPtr(arg2 as *const u8);
 
@@ -131,6 +154,10 @@ pub extern "sysv64" fn syscall_handler(
             let mode = arg4 as i32;
             service::openat(arg1 as i32, path.as_str(), flags, mode as u32)
         }
+        SYS_NEWFSTATAT => {
+            service::newfstatat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as i32)
+        }
+        SYS_TGKILL => service::tgkill(arg1 as i32, arg2 as i32, arg3 as i32),
         SYS_UTIMENAT => service::utimenat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize),
         SYS_PR_LIMIT64 => {
             let pid = arg1;
@@ -153,6 +180,9 @@ pub extern "sysv64" fn syscall_handler(
 
             service::pr_limit64(pid as i32, resource, new_limit, old_limit)
         }
+        SYS_SET_ROBUST_LIST => service::set_robust_list(arg1 as usize, arg2 as usize),
+        SYS_GETRANDOM => service::getrandom(arg1 as usize, arg2 as usize, arg3 as u32),
+        SYS_RSEQ => service::rseq(arg1 as usize, arg2 as u32, arg3 as u32, arg4 as u32),
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
             -(ENOSYS as i64)
