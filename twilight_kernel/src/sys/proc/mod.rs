@@ -224,6 +224,14 @@ impl ProcessTable {
         let prev_task = prev_slice.last_mut().unwrap();
         let next_task = &mut next_slice[0];
 
+        // This is a *kernel* context switch (e.g., exec/spawn). The previous task is now blocked
+        // in the kernel until the new process exits. Prevent the preemptive timer from resuming it
+        // from a stale user preempt frame.
+        prev_task.state = ProcessState::Waiting;
+        prev_task.preempt_frame = 0;
+        next_task.state = ProcessState::Running;
+        next_task.preempt_frame = 0;
+
         switch_tasks(prev_task, next_task);
     }
 }
@@ -461,6 +469,11 @@ pub fn exit() {
     let mut process = table.proc_list.pop_back().unwrap();
 
     if let Some(p_process) = table.get_process(process.parent_pid) {
+        // Parent can run again; clear any stale preempt frame so it won't be resumed from an old
+        // user snapshot.
+        p_process.state = ProcessState::Running;
+        p_process.preempt_frame = 0;
+
         let (pre_table_frame, flags) = Cr3::read();
         unsafe {
             // Use the parent's page table while tearing down the exiting process.
