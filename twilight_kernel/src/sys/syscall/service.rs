@@ -12,6 +12,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::mutex::Mutex;
 use twilight_common::syscall::types::*;
 
@@ -1529,5 +1530,114 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
         if ready > 0 {
             return ready as i64;
         }
+    }
+}
+
+pub fn getpid() -> i64 {
+    crate::sys::proc::id() as i64
+}
+
+pub fn rt_sigaction(_signum: i32, _act: usize, _oldact: usize, _sigsetsize: usize) -> i64 {
+    // No signal support yet; report success so glibc can proceed.
+    0
+}
+
+pub fn rt_sigprocmask(_how: i32, _set: usize, oldset: usize, sigsetsize: usize) -> i64 {
+    // No signal masks yet; return an empty mask.
+    if oldset != 0 && sigsetsize != 0 {
+        unsafe { core::ptr::write_bytes(oldset as *mut u8, 0, sigsetsize) };
+    }
+    0
+}
+
+pub fn tgkill(tgid: i32, tid: i32, _sig: i32) -> i64 {
+    let cur = crate::sys::proc::id() as i32;
+    if tgid != cur || tid != cur {
+        return -(ESRCH as i64);
+    }
+    0
+}
+
+pub fn set_robust_list(_head: usize, _len: usize) -> i64 {
+    // Robust futex lists are ignored for now.
+    0
+}
+
+static GETRANDOM_SEED: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+fn rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe { asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags)) };
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+pub fn getrandom(buf: usize, len: usize, _flags: u32) -> i64 {
+    if buf == 0 && len != 0 {
+        return -(EFAULT as i64);
+    }
+    let out = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) };
+
+    let now = rdtsc()
+        ^ (crate::sys::proc::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut x = GETRANDOM_SEED
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v ^ now ^ (len as u64).rotate_left(17))
+        })
+        .unwrap_or(0)
+        ^ now;
+
+    for b in out.iter_mut() {
+        // xorshift64*
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        let y = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        *b = (y & 0xFF) as u8;
+    }
+
+    len as i64
+}
+
+pub fn rseq(_rseq: usize, _rseq_len: u32, _flags: u32, _sig: u32) -> i64 {
+    // glibc probes this; returning ENOSYS makes it fall back.
+    -(ENOSYS as i64)
+}
+
+pub fn futex(
+    uaddr: usize,
+    op: i32,
+    val: u32,
+    _timeout: usize,
+    _uaddr2: usize,
+    _val3: u32,
+) -> i64 {
+    const FUTEX_WAIT: i32 = 0;
+    const FUTEX_WAKE: i32 = 1;
+    const FUTEX_WAIT_BITSET: i32 = 9;
+    const FUTEX_WAKE_BITSET: i32 = 10;
+    const FUTEX_PRIVATE_FLAG: i32 = 128;
+    const FUTEX_CLOCK_REALTIME: i32 = 256;
+
+    let cmd = op & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+
+    if uaddr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    match cmd {
+        FUTEX_WAIT | FUTEX_WAIT_BITSET => {
+            let cur = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+            if cur != val {
+                return -(EAGAIN as i64);
+            }
+
+            // Minimal behavior: don't block indefinitely; yield once and report "woken".
+            halt();
+            0
+        }
+        FUTEX_WAKE | FUTEX_WAKE_BITSET => 0,
+        _ => -(ENOSYS as i64),
     }
 }

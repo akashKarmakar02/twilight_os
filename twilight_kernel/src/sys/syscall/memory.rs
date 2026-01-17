@@ -3,6 +3,7 @@ use crate::logger;
 use crate::sys::memory::{alloc_pages, dealloc_pages, unmap_user_pages};
 use crate::sys::proc::PROCESS_TABLE;
 use crate::sys::proc::mem::{MmapKind, PAGE, align_up};
+use twilight_common::syscall::types::EIO;
 
 // minimal flag bits
 #[allow(dead_code)]
@@ -78,6 +79,8 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     }
 
     if is_file_backed {
+        // Generic file-backed mapping: map anonymous pages then read file bytes into them.
+        // This avoids relying on per-filesystem `VfsNodeOps::mmap` implementations.
         let fd_i32 = fd as i32;
         if fd_i32 < 0 || fd_i32 < 3 {
             return EBADF;
@@ -86,17 +89,40 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         let Some(entry) = process.fd_table.get(idx).and_then(|slot| slot.as_ref()) else {
             return EBADF;
         };
+
+        // Map writable while populating (we don't have full mprotect/flag updates yet).
+        if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, true, executable) {
+            return ENOMEM;
+        }
+
         let file_ref = entry.file.clone();
         let file = file_ref.lock();
-        let mut vfs_node = file.node.lock();
-        match vfs_node.mmap(&mut process, va, len, prot, flags, offset as usize) {
-            Ok(mapped) => {
-                if mapped != va {
-                    return EINVAL;
-                }
-            }
-            Err(code) => return code as i64,
+        let mut node = file.node.lock();
+        if node.metadata.file_type == crate::sys::fs::vfs::FileType::Dir {
+            return EINVAL;
         }
+
+        let file_size = node.metadata.size;
+        let mut remaining = len;
+        let mut pos = 0usize;
+        let mut file_off = offset as usize;
+
+        // Copy file bytes into mapped memory; remaining bytes are already zeroed by alloc_pages.
+        while remaining > 0 && file_off < file_size {
+            let chunk = core::cmp::min(remaining, file_size - file_off);
+            let dst = unsafe { core::slice::from_raw_parts_mut((va + pos) as *mut u8, chunk) };
+            match node.read(file_off, dst) {
+                Ok(0) => break,
+                Ok(n) => {
+                    pos += n;
+                    file_off += n;
+                    remaining = remaining.saturating_sub(n);
+                }
+                Err(_) => return -(EIO as i64),
+            }
+        }
+
+        // Track as "shared" (close enough for now).
         process.proc_mm.track_mmap(va, len, MmapKind::Shared);
     } else {
         if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, writable, executable) {
