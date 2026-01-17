@@ -79,8 +79,10 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     }
 
     if is_file_backed {
-        // Generic file-backed mapping: map anonymous pages then read file bytes into them.
-        // This avoids relying on per-filesystem `VfsNodeOps::mmap` implementations.
+        // File-backed mapping:
+        // - First, give the underlying node a chance to provide a real mapping (e.g. /dev/fb0).
+        // - If it doesn't support mmap (ENOSYS), fall back to a generic "read file into pages"
+        //   implementation for regular files (needed by dynamic loaders).
         let fd_i32 = fd as i32;
         if fd_i32 < 0 || fd_i32 < 3 {
             return EBADF;
@@ -90,16 +92,27 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
             return EBADF;
         };
 
-        // Map writable while populating (we don't have full mprotect/flag updates yet).
-        if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, true, executable) {
-            return ENOMEM;
-        }
-
         let file_ref = entry.file.clone();
         let file = file_ref.lock();
         let mut node = file.node.lock();
         if node.metadata.file_type == crate::sys::fs::vfs::FileType::Dir {
             return EINVAL;
+        }
+
+        match node.mmap(process, va, len, prot, flags, offset as usize) {
+            Ok(mapped) => {
+                process.proc_mm.track_mmap(mapped, len, MmapKind::Shared);
+                return mapped as i64;
+            }
+            Err(-38) => {
+                // ENOSYS: continue with generic mapping for regular files.
+            }
+            Err(code) => return code as i64,
+        }
+
+        // Map writable while populating (we don't have full mprotect/flag updates yet).
+        if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, true, executable) {
+            return ENOMEM;
         }
 
         let file_size = node.metadata.size;
