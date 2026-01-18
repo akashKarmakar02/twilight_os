@@ -262,10 +262,12 @@ impl Tty {
 
     pub fn move_cursor_left(&mut self) {
         self.term.cursor_x -= 1;
+        self.term.refresh_cursor();
     }
 
     pub fn move_cursor_right(&mut self) {
         self.term.cursor_x += 1;
+        self.term.refresh_cursor();
     }
 
     fn handle_csi_final(&mut self) {
@@ -332,6 +334,7 @@ impl Tty {
         let max_cols = (self.term.width / 8).max(1);
         self.term.cursor_y = row.saturating_sub(1).min(max_rows - 1);
         self.term.cursor_x = col.saturating_sub(1).min(max_cols - 1);
+        self.term.refresh_cursor();
     }
 
     fn csi_ed(&mut self, nums: &[i32]) {

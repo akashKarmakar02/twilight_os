@@ -7,6 +7,10 @@ use crate::driver::disk::dummy_blockdev;
 use crate::sys::fs::vfs::VfsNodeOps;
 use alloc::vec;
 
+const CURSOR_W: usize = 8;
+const CURSOR_H: usize = 16;
+const CURSOR_BACKUP_LEN: usize = CURSOR_W * CURSOR_H;
+
 /// A framebuffer-based terminal backend (no ANSI parsing, pure rendering)
 #[derive(Clone, Copy, Debug)]
 pub struct FramebufferTerminal {
@@ -17,6 +21,11 @@ pub struct FramebufferTerminal {
     pub color: u32,
     pub bg_color: u32,
     pub reverse: bool,
+    cursor_visible: bool,
+    cursor_drawn: bool,
+    cursor_saved_x: usize,
+    cursor_saved_y: usize,
+    cursor_backup: [u32; CURSOR_BACKUP_LEN],
 }
 
 #[derive(Clone, Copy)]
@@ -41,31 +50,131 @@ impl FramebufferTerminal {
             color: 0xFFFFFF,
             bg_color: 0x101010,
             reverse: false,
+            cursor_visible: true,
+            cursor_drawn: false,
+            cursor_saved_x: 0,
+            cursor_saved_y: 0,
+            cursor_backup: [0; CURSOR_BACKUP_LEN],
         };
         term.clear();
+        term.draw_cursor();
         term
     }
 
-    pub fn set_cursor_visible(&mut self, _v: bool) {
-        // store a flag if you later want to draw a caret; for now this can be a no-op
+    pub fn set_cursor_visible(&mut self, v: bool) {
+        if v {
+            self.cursor_visible = true;
+            self.draw_cursor();
+        } else {
+            self.erase_cursor();
+            self.cursor_visible = false;
+        }
+    }
+
+    fn cursor_rect(&self, cell_x: usize, cell_y: usize) -> Option<(usize, usize, usize, usize)> {
+        let x = cell_x.saturating_mul(Self::CHAR_W);
+        let y = cell_y.saturating_mul(Self::CHAR_H);
+        if x + CURSOR_W > self.width || y + CURSOR_H > self.height {
+            return None;
+        }
+        Some((x, y, CURSOR_W, CURSOR_H))
+    }
+
+    fn erase_cursor(&mut self) {
+        if !self.cursor_drawn {
+            return;
+        }
+        let Some((x, y, w, h)) = self.cursor_rect(self.cursor_saved_x, self.cursor_saved_y) else {
+            self.cursor_drawn = false;
+            return;
+        };
+
+        #[allow(static_mut_refs)]
+        unsafe {
+            let fb = FRAMEBUFFER.get_mut().unwrap();
+            let pitch_pixels = fb.width as usize;
+            for row in 0..h {
+                let start = row * w;
+                let bytes = core::slice::from_raw_parts(
+                    self.cursor_backup[start..start + w].as_ptr() as *const u8,
+                    w * 4,
+                );
+                let pixel_offset = (y + row) * pitch_pixels + x;
+                let _ = fb.write(&mut dummy_blockdev(), pixel_offset, bytes);
+            }
+            fb.sync_partial(((y * pitch_pixels) + x) as u64, (w * h) as u64);
+        }
+
+        self.cursor_drawn = false;
+    }
+
+    fn draw_cursor(&mut self) {
+        if !self.cursor_visible {
+            return;
+        }
+        // If cursor is currently drawn at some position, erase it first.
+        self.erase_cursor();
+
+        let Some((x, y, w, h)) = self.cursor_rect(self.cursor_x, self.cursor_y) else {
+            return;
+        };
+
+        // Save the pixels under the cursor so we can restore later.
+        #[allow(static_mut_refs)]
+        unsafe {
+            let fb = FRAMEBUFFER.get_mut().unwrap();
+            let pitch_pixels = fb.width as usize;
+            for row in 0..h {
+                let mut row_buf = [0u32; CURSOR_W];
+                let bytes = core::slice::from_raw_parts_mut(row_buf.as_mut_ptr() as *mut u8, w * 4);
+                let pixel_offset = (y + row) * pitch_pixels + x;
+                let _ = fb.read(&mut dummy_blockdev(), pixel_offset, bytes);
+                let start = row * w;
+                self.cursor_backup[start..start + w].copy_from_slice(&row_buf[..w]);
+            }
+
+            // Draw block cursor (full cell) in the current foreground color.
+            let color_bytes = convert_color(self.color);
+            let mut out_row = vec![0u8; w * 4];
+            for px in 0..w {
+                let off = px * 4;
+                out_row[off..off + 4].copy_from_slice(&color_bytes);
+            }
+            for row in 0..h {
+                let pixel_offset = (y + row) * pitch_pixels + x;
+                let _ = fb.write(&mut dummy_blockdev(), pixel_offset, &out_row);
+            }
+            fb.sync_partial(((y * pitch_pixels) + x) as u64, (w * h) as u64);
+        }
+
+        self.cursor_saved_x = self.cursor_x;
+        self.cursor_saved_y = self.cursor_y;
+        self.cursor_drawn = true;
     }
 
     pub fn erase_line(&mut self) {
+        self.erase_cursor();
         let y = self.cursor_y * 16;
         self.fill_rect(0, y, self.width, 16, self.bg_color);
         self.cursor_x = 0;
+        self.draw_cursor();
     }
     pub fn erase_in_line_from_cursor(&mut self) {
+        self.erase_cursor();
         let x = self.cursor_x * 8;
         let y = self.cursor_y * 16;
         self.fill_rect(x, y, self.width.saturating_sub(x), 16, self.bg_color);
+        self.draw_cursor();
     }
     pub fn erase_in_line_to_cursor(&mut self) {
+        self.erase_cursor();
         let x = self.cursor_x * 8;
         let y = self.cursor_y * 16;
         self.fill_rect(0, y, x, 16, self.bg_color);
+        self.draw_cursor();
     }
     pub fn erase_display_from_cursor(&mut self) {
+        self.erase_cursor();
         // clear from cursor to end of screen
         let x = self.cursor_x * 8;
         let y = self.cursor_y * 16;
@@ -75,8 +184,10 @@ impl FramebufferTerminal {
         if y + 16 < self.height {
             self.fill_rect(0, y + 16, self.width, self.height - (y + 16), self.bg_color);
         }
+        self.draw_cursor();
     }
     pub fn erase_display_to_cursor(&mut self) {
+        self.erase_cursor();
         let x = self.cursor_x * 8;
         let y = self.cursor_y * 16;
         // clear all lines above
@@ -85,6 +196,7 @@ impl FramebufferTerminal {
         }
         // clear part of current line up to cursor
         self.fill_rect(0, y, x, 16, self.bg_color);
+        self.draw_cursor();
     }
 
     fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
@@ -136,24 +248,30 @@ impl FramebufferTerminal {
 
     /// Clears the framebuffer with the background color
     pub fn clear(&mut self) {
+        self.erase_cursor();
         apply_console_bg(self.bg_color);
         self.cursor_x = 0;
         self.cursor_y = 0;
+        self.draw_cursor();
     }
 
     /// Write a single character at the current cursor position
     pub fn put_char(&mut self, c: u8) {
+        self.erase_cursor();
         match c {
             b'\n' => {
                 self.new_line();
+                self.draw_cursor();
                 return;
             }
             0x08 | 0x7F => {
                 self.backspace();
+                self.draw_cursor();
                 return;
             }
             b'\r' => {
                 self.cursor_x = 0;
+                self.draw_cursor();
                 return;
             }
             _ => {}
@@ -177,6 +295,7 @@ impl FramebufferTerminal {
         if self.cursor_x * Self::CHAR_W > self.width {
             self.new_line();
         }
+        self.draw_cursor();
     }
 
     /// Writes a full string (no ANSI yet)
@@ -184,6 +303,10 @@ impl FramebufferTerminal {
         for &b in s.as_bytes() {
             self.put_char(b);
         }
+    }
+
+    pub fn refresh_cursor(&mut self) {
+        self.draw_cursor();
     }
 
     /// Move cursor to new line, scroll if needed
