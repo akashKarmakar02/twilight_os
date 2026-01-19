@@ -6,7 +6,6 @@ pub(crate) use crate::sys::console::tty::{Tty, get_tty};
 use crate::sys::fs::vfs::{VFS, VfsNodeOps};
 use crate::sys::proc::{PROCESS_TABLE, Process};
 use crate::{print, println};
-use alloc::collections::VecDeque;
 use alloc::{format, vec};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -24,14 +23,6 @@ pub static mut DIR: String = String::new();
 
 static mut CONSOLE_HISTORY: Vec<String> = Vec::new();
 static mut CONSOLE_HISTORY_INDEX: Mutex<usize> = Mutex::new(0);
-
-struct PipelineState {
-    input: Option<VecDeque<u8>>,
-    capture_output: bool,
-    output: Vec<u8>,
-}
-
-static PIPELINE_STATE: Mutex<Option<PipelineState>> = Mutex::new(None);
 
 pub fn init_tty() {
     #[allow(static_mut_refs)]
@@ -240,105 +231,9 @@ fn execute_command_line(cmd_line: &str) {
     if cmd_line.trim().is_empty() {
         return;
     }
-
-    let segments: Vec<&str> = cmd_line
-        .split('|')
-        .filter(|seg| seg.trim() != "")
-        .map(|seg| seg.trim())
-        .collect();
-
-    if segments.len() == 1 {
-        let args: Vec<&str> = segments[0].split_whitespace().collect();
-        if !args.is_empty() {
-            exec(args[0], &args);
-        }
-        return;
-    }
-
-    let mut pending_output: Option<Vec<u8>> = None;
-
-    for (idx, segment) in segments.iter().enumerate() {
-        if segment.is_empty() {
-            println!("pipeline: empty command");
-            PIPELINE_STATE.lock().take();
-            return;
-        }
-
-        let args: Vec<&str> = segment.split_whitespace().collect();
-        if args.is_empty() {
-            println!("pipeline: empty command");
-            PIPELINE_STATE.lock().take();
-            return;
-        }
-
-        let capture_output = idx < segments.len() - 1;
-
-        start_pipeline_stage(pending_output.take(), capture_output);
+    // Kernel console does not support pipelines. (Userspace shell `tsh` does.)
+    let args: Vec<&str> = cmd_line.split_whitespace().collect();
+    if !args.is_empty() {
         exec(args[0], &args);
-
-        let stage_output = finish_pipeline_stage();
-        if capture_output {
-            pending_output = Some(stage_output.unwrap_or_default());
-        } else {
-            pending_output = None;
-        }
     }
-}
-
-fn start_pipeline_stage(input: Option<Vec<u8>>, capture_output: bool) {
-    if !capture_output && input.is_none() {
-        PIPELINE_STATE.lock().take();
-        return;
-    }
-
-    let pipeline_input = input.map(VecDeque::from);
-
-    let mut state = PIPELINE_STATE.lock();
-    *state = Some(PipelineState {
-        input: pipeline_input,
-        capture_output,
-        output: Vec::new(),
-    });
-}
-
-fn finish_pipeline_stage() -> Option<Vec<u8>> {
-    let mut state = PIPELINE_STATE.lock();
-    state.take().and_then(|stage| {
-        if stage.capture_output {
-            Some(stage.output)
-        } else {
-            None
-        }
-    })
-}
-
-pub(crate) fn pipeline_read(buf: &mut [u8]) -> Option<usize> {
-    let mut state = PIPELINE_STATE.lock();
-    let stage = state.as_mut()?;
-    let input = stage.input.as_mut()?;
-
-    let mut bytes_read = 0;
-    while bytes_read < buf.len() {
-        match input.pop_front() {
-            Some(byte) => {
-                buf[bytes_read] = byte;
-                bytes_read += 1;
-            }
-            None => break,
-        }
-    }
-
-    Some(bytes_read)
-}
-
-pub(crate) fn pipeline_write(data: &[u8]) -> bool {
-    let mut state = PIPELINE_STATE.lock();
-    if let Some(stage) = state.as_mut() {
-        if stage.capture_output {
-            stage.output.extend_from_slice(data);
-            return true;
-        }
-    }
-
-    false
 }

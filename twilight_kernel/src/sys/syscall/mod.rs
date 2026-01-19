@@ -66,6 +66,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_MPROTECT => memory::mprotect(arg1, arg2 as usize, arg3 as usize),
         SYS_MUNMAP => memory::munmap(arg1, arg2 as usize),
         SYS_BRK => memory::brk(arg1 as usize),
+        SYS_DUP2 => service::dup2(arg1 as i32, arg2 as i32),
         SYS_IOCTL => {
             service::ioctl(arg1 as usize, arg2 as usize, arg3 as usize)
             // 0
@@ -76,6 +77,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_PREADV => service::preadv(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
         SYS_PWRITEV => service::pwritev(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
         SYS_ACCESS => service::access(arg1 as usize, arg2 as i32),
+        SYS_PIPE => service::pipe(arg1 as usize),
         SYS_SCHED_YIELD => service::sched_yield(),
         SYS_GETPID => service::getpid(),
         SYS_FORK => service::fork(_stack_frame, regs),
@@ -167,6 +169,7 @@ pub extern "sysv64" fn syscall_handler(
         }
         SYS_TGKILL => service::tgkill(arg1 as i32, arg2 as i32, arg3 as i32),
         SYS_UTIMENAT => service::utimenat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize),
+        SYS_PIPE2 => service::pipe2(arg1 as usize, arg2 as i32),
         SYS_PR_LIMIT64 => {
             let pid = arg1;
             let resource = arg2 as u32;
