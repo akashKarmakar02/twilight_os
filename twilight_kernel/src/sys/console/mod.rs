@@ -6,9 +6,9 @@ pub(crate) use crate::sys::console::tty::{Tty, get_tty};
 use crate::sys::fs::vfs::{VFS, VfsNodeOps};
 use crate::sys::proc::{PROCESS_TABLE, Process};
 use crate::{print, println};
-use alloc::{format, vec};
 use alloc::string::String;
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use spin::{Mutex, Once};
 
 pub mod font;
@@ -193,7 +193,6 @@ fn exec(cmd: &str, args: &[&str]) {
         }
         "gs" => crate::kernel_utils::gs::main(),
         "df" => crate::kernel_utils::df::main(args),
-        "mkdir" => crate::kernel_utils::mkdir::main(args),
         "cd" => crate::kernel_utils::cd::main(args),
         "readelf" => crate::kernel_utils::readelf::main(args),
         "install" => crate::kernel_utils::install::main(),

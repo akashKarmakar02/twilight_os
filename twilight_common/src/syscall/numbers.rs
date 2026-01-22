@@ -46,6 +46,7 @@ pub const SYS_CLOCK_GETTIME: usize = 228;
 pub const SYS_EXIT_GROUP: usize = 231;
 pub const SYS_TGKILL: usize = 234;
 pub const SYS_OPENAT: usize = 257;
+pub const SYS_MKDIRAT: usize = 258;
 pub const SYS_NEWFSTATAT: usize = 262;
 pub const SYS_PREADV: usize = 295;
 pub const SYS_PWRITEV: usize = 296;

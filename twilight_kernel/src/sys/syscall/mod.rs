@@ -164,6 +164,7 @@ pub extern "sysv64" fn syscall_handler(
             let mode = arg4 as i32;
             service::openat(arg1 as i32, path.as_str(), flags, mode as u32)
         }
+        SYS_MKDIRAT => service::mkdirat(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_NEWFSTATAT => {
             service::newfstatat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as i32)
         }

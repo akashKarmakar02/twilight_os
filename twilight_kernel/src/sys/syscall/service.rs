@@ -1706,10 +1706,10 @@ pub fn utimenat(dirfd: i32, str_ptr: usize, _time_ptr: usize, _flags: usize) -> 
 
 pub fn mkdir(path_str: usize, _mode: usize) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(path_str as *const u8), 4096) else {
-        return -1;
+        return -(EFAULT as i64);
     };
 
-    let can_path = format_path(path);
+    let can_path = normalize_path(&format_path(path));
 
     #[allow(static_mut_refs)]
     let fs = unsafe { VFS.get_mut() };
@@ -1718,13 +1718,66 @@ pub fn mkdir(path_str: usize, _mode: usize) -> i64 {
         return -EEXIST as i64;
     };
 
-    let parent_path = parent_path(can_path.as_str());
-    let dir_name = can_path.split("/").last().unwrap();
+    let trimmed = if can_path != "/" {
+        can_path.trim_end_matches('/')
+    } else {
+        can_path.as_str()
+    };
+    let parent_path = parent_path(trimmed);
+    let dir_name = trimmed.rsplit('/').next().unwrap_or("");
+    if dir_name.is_empty() {
+        return -(EINVAL as i64);
+    }
 
     if let Ok(_) = fs.mkdir(parent_path, dir_name) {
         0
     } else {
-        -1
+        -(EIO as i64)
+    }
+}
+
+pub fn mkdirat(dirfd: i32, path_ptr: usize, _mode: usize) -> i64 {
+    let Ok(path) = copy_cstr_from_user(UserPtr(path_ptr as *const u8), 4096) else {
+        return -(EFAULT as i64);
+    };
+    if path.is_empty() {
+        return -(ENOENT as i64);
+    }
+
+    // For now, support the most common libc usage: mkdirat(AT_FDCWD, ...).
+    // If path is absolute, dirfd is ignored.
+    let full = if path.starts_with('/') {
+        path
+    } else if dirfd == twilight_common::syscall::types::AT_FDCWD {
+        format_path(path)
+    } else {
+        return -(ENOSYS as i64);
+    };
+
+    let can_path = normalize_path(&full);
+
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if let Ok(_node) = fs.open(can_path.as_str()) {
+        return -(EEXIST as i64);
+    };
+
+    let trimmed = if can_path != "/" {
+        can_path.trim_end_matches('/')
+    } else {
+        can_path.as_str()
+    };
+    let parent_path = parent_path(trimmed);
+    let dir_name = trimmed.rsplit('/').next().unwrap_or("");
+    if dir_name.is_empty() {
+        return -(EINVAL as i64);
+    }
+
+    if fs.mkdir(parent_path, dir_name).is_ok() {
+        0
+    } else {
+        -(EIO as i64)
     }
 }
 

@@ -397,12 +397,6 @@ impl Bus {
         }
         // If the command errored, don't try to read data.
         if self.status().get_bit(Status::ERR as usize) {
-            let err = unsafe { self.error_register.read() };
-            let st = self.status();
-            println!(
-                "ATA-DMA identify error (bus {} drive {}): err={:#x} st={:#x}",
-                self.id, drive, err, st
-            );
             return Ok(IdentifyResponse::None);
         }
         if self.poll(Status::DRQ, true).is_err() {
@@ -468,7 +462,6 @@ pub fn init() {
     // If we couldn't enumerate any drives, fall back to PIO so boot can proceed.
     #[allow(static_mut_refs)]
     if unsafe { crate::driver::disk::BLOCK_DEVICE.is_none() } {
-        println!("ata-dma: no drives found; falling back to PIO");
         crate::driver::disk::ata::init();
     }
 }
