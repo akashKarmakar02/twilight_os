@@ -1,5 +1,5 @@
-use crate::{driver::disk::mount_ata, serial_print};
-use crate::{println, serial_println};
+use crate::driver::disk::mount_ata;
+use crate::println;
 use alloc::string::String;
 use alloc::vec::Vec;
 use bit_field::BitField;
@@ -511,7 +511,6 @@ pub fn list() -> Vec<Drive> {
 }
 
 pub fn read(bus: u8, drive: u8, block: u32, buf: &mut [u8]) -> Result<(), ()> {
-    serial_println!("PIO read");
     ensure_buses();
     let mut buses = BUSES.lock();
     let Some(b) = buses.get_mut(bus as usize) else {
@@ -521,7 +520,6 @@ pub fn read(bus: u8, drive: u8, block: u32, buf: &mut [u8]) -> Result<(), ()> {
 }
 
 pub fn write(bus: u8, drive: u8, block: u32, buf: &[u8]) -> Result<(), ()> {
-    serial_println!("PIO write");
     ensure_buses();
     let mut buses = BUSES.lock();
     let Some(b) = buses.get_mut(bus as usize) else {

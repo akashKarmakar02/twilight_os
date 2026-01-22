@@ -19,7 +19,6 @@ pub enum AtaImpl {
     Dma,
 }
 
-/// Default ATA implementation. Keep `Pio` as the default so existing setups keep working.
 pub const ATA_DEFAULT_IMPL: AtaImpl = AtaImpl::Dma;
 
 struct DummyBlockDev;

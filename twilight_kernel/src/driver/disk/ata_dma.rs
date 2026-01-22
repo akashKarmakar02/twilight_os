@@ -1,5 +1,5 @@
-use crate::driver::disk::mount_ata_with_impl;
 use crate::driver::disk::AtaImpl;
+use crate::driver::disk::mount_ata_with_impl;
 use crate::println;
 use crate::sys::memory::phys::PhysBuf;
 use crate::sys::pci::DeviceConfig;
@@ -9,6 +9,7 @@ use bit_field::BitField;
 use core::convert::TryInto;
 use core::fmt;
 use core::hint::spin_loop;
+use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
@@ -21,6 +22,17 @@ pub const BLOCK_SIZE: usize = 512;
 const DMA_BUF_BYTES: usize = 32 * 512; // 16KiB
 const PRDT_BYTES: usize = 4096;
 const POLL_SPINS: usize = 5_000_000;
+
+static IDE_IRQ_PRIMARY: AtomicBool = AtomicBool::new(false);
+static IDE_IRQ_SECONDARY: AtomicBool = AtomicBool::new(false);
+
+fn on_irq_primary() {
+    IDE_IRQ_PRIMARY.store(true, Ordering::Release);
+}
+
+fn on_irq_secondary() {
+    IDE_IRQ_SECONDARY.store(true, Ordering::Release);
+}
 
 // Keep track of the last selected bus and drive pair to speed up operations
 pub static LAST_SELECTED: Mutex<Option<(u8, u8)>> = Mutex::new(None);
@@ -75,9 +87,9 @@ pub struct Bus {
     control_register: PortWriteOnly<u8>,
 
     // bus master IDE ports
-    bm_cmd: Port<u8>,     // +0
-    bm_status: Port<u8>,  // +2
-    bm_prdt: Port<u32>,   // +4
+    bm_cmd: Port<u8>,    // +0
+    bm_status: Port<u8>, // +2
+    bm_prdt: Port<u32>,  // +4
 
     prdt: PhysBuf,
     dma_buf: PhysBuf,
@@ -187,8 +199,12 @@ impl Bus {
         let mut offset = 0usize;
         let mut entries: usize = 0;
 
-        let prd_slice =
-            unsafe { core::slice::from_raw_parts_mut(self.prdt.virt_addr().as_mut_ptr::<Prd>(), PRDT_BYTES / core::mem::size_of::<Prd>()) };
+        let prd_slice = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.prdt.virt_addr().as_mut_ptr::<Prd>(),
+                PRDT_BYTES / core::mem::size_of::<Prd>(),
+            )
+        };
         for prd in prd_slice.iter_mut() {
             *prd = Prd::default();
         }
@@ -237,18 +253,32 @@ impl Bus {
     }
 
     fn dma_wait_done(&mut self) -> Result<(), ()> {
+        // Wait primarily on IRQ, but also accept completion via ACTIVE clearing.
+        let irq_flag = if self.id == 0 {
+            &IDE_IRQ_PRIMARY
+        } else {
+            &IDE_IRQ_SECONDARY
+        };
+        irq_flag.store(false, Ordering::Release);
+
         for _ in 0..POLL_SPINS {
             let st = unsafe { self.bm_status.read() };
             if (st & 0x02) != 0 {
                 // error
                 return Err(());
             }
-            // Many setups don't reliably set the "interrupt" status bit when we're polling.
-            // The controller clears the ACTIVE bit when the DMA engine is done.
+            // Completion: controller clears ACTIVE bit when the DMA engine is done.
             if (st & 0x01) == 0 {
                 break;
             }
-            spin_loop();
+
+            // If we have an IRQ pending, re-check immediately.
+            if irq_flag.swap(false, Ordering::AcqRel) {
+                continue;
+            }
+
+            // Sleep until next interrupt to avoid busy-waiting.
+            crate::arch::x86_64::halt();
         }
 
         unsafe {
@@ -379,7 +409,9 @@ impl Bus {
             // No DRQ -> no data; treat as unsupported so we can fall back to PIO.
             return Ok(IdentifyResponse::None);
         }
-        Ok(IdentifyResponse::Ata([(); 256].map(|_| unsafe { self.data_register.read() })))
+        Ok(IdentifyResponse::Ata(
+            [(); 256].map(|_| unsafe { self.data_register.read() }),
+        ))
     }
 }
 
@@ -409,13 +441,12 @@ fn find_bmide_base() -> Option<u16> {
 }
 
 pub fn init() {
-    println!("ata-dma: init");
+    let _ = crate::arch::x86_64::idt::register_irq_handler(14, on_irq_primary);
+    let _ = crate::arch::x86_64::idt::register_irq_handler(15, on_irq_secondary);
     let Some(bmide) = find_bmide_base() else {
-        println!("ata-dma: no BMIDE base found; falling back to PIO");
         crate::driver::disk::ata::init();
         return;
     };
-    println!("ata-dma: BMIDE base={:#x}", bmide);
 
     {
         let mut buses = BUSES.lock();

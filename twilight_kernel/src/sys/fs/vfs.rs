@@ -73,6 +73,17 @@ impl Metadata {
             modified_time: 0,
         }
     }
+    pub(crate) fn blk(ino: u32, name: &str, size: usize) -> Self {
+        Metadata {
+            ino,
+            name: name.into(),
+            file_type: FileType::BlockDevice,
+            size,
+            access_time: 0,
+            created_time: 0,
+            modified_time: 0,
+        }
+    }
 }
 pub type BlockDev = Arc<Mutex<Box<dyn BlockDeviceIO + Send>>>;
 
