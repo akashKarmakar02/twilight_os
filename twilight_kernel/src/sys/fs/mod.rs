@@ -6,6 +6,7 @@ pub mod twilight_fs;
 pub mod vfs;
 pub mod fat32;
 pub mod fat16;
+pub mod pipe;
 
 use crate::println;
 use crate::sys::fs::devfs::DevFs;

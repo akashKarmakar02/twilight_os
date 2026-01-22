@@ -1,6 +1,7 @@
 #include <stdio.h>
 
 typedef long long i64;
+typedef double f64;
 
 static int is_space(int c) {
   return c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v';
@@ -41,31 +42,40 @@ static int eat(Lex *L, int c) {
   return 0;
 }
 
-static i64 parse_expr(Lex *L, int *ok);
+static f64 parse_expr(Lex *L, int *ok);
 
-static i64 parse_number(Lex *L, int *ok) {
+static f64 parse_number(Lex *L, int *ok) {
   skip_ws(L);
-  int neg = 0;
-  if (L->s[L->i] == '-') {
-    neg = 1;
-    L->i++;
-  }
-  if (!is_digit((unsigned char)L->s[L->i])) {
-    *ok = 0;
-    return 0;
-  }
-  i64 v = 0;
+  int saw_digit = 0;
+  f64 v = 0;
   while (is_digit((unsigned char)L->s[L->i])) {
     v = v * 10 + (L->s[L->i] - '0');
     L->i++;
+    saw_digit = 1;
   }
-  return neg ? -v : v;
+  if (L->s[L->i] == '.') {
+    L->i++;
+    f64 frac = 0;
+    f64 div = 1;
+    while (is_digit((unsigned char)L->s[L->i])) {
+      frac = frac * 10 + (L->s[L->i] - '0');
+      div *= 10;
+      L->i++;
+      saw_digit = 1;
+    }
+    v += frac / div;
+  }
+  if (!saw_digit) {
+    *ok = 0;
+    return 0;
+  }
+  return v;
 }
 
-static i64 parse_atom(Lex *L, int *ok) {
+static f64 parse_atom(Lex *L, int *ok) {
   skip_ws(L);
   if (eat(L, '(')) {
-    i64 v = parse_expr(L, ok);
+    f64 v = parse_expr(L, ok);
     if (!*ok || !eat(L, ')')) {
       *ok = 0;
       return 0;
@@ -79,10 +89,18 @@ static i64 parse_atom(Lex *L, int *ok) {
   return parse_number(L, ok);
 }
 
-static i64 ipow(i64 a, i64 b) {
-  if (b < 0)
-    return 0;
-  i64 r = 1;
+static f64 dpow_int(f64 a, i64 b, int *ok) {
+  if (b == 0)
+    return 1.0;
+  if (b < 0) {
+    if (a == 0.0) {
+      *ok = 0;
+      return 0;
+    }
+    a = 1.0 / a;
+    b = -b;
+  }
+  f64 r = 1.0;
   while (b) {
     if (b & 1)
       r *= a;
@@ -91,61 +109,74 @@ static i64 ipow(i64 a, i64 b) {
   }
   return r;
 }
-static i64 parse_pow(Lex *L, int *ok) {
-  i64 v = parse_atom(L, ok);
+static f64 parse_pow(Lex *L, int *ok) {
+  f64 v = parse_atom(L, ok);
   if (!*ok)
     return 0;
   while (eat(L, '^')) {
-    i64 rhs = parse_pow(L, ok);
+    f64 rhs = parse_pow(L, ok);
     if (!*ok)
       return 0;
-    v = ipow(v, rhs);
+    i64 e = (i64)rhs;
+    if ((f64)e != rhs) {
+      *ok = 0;
+      return 0;
+    }
+    v = dpow_int(v, e, ok);
+    if (!*ok)
+      return 0;
   }
   return v;
 }
 
-static i64 parse_term(Lex *L, int *ok) {
-  i64 v = parse_pow(L, ok);
+static f64 parse_term(Lex *L, int *ok) {
+  f64 v = parse_pow(L, ok);
   if (!*ok)
     return 0;
   for (;;) {
     if (eat(L, '*')) {
-      i64 r = parse_pow(L, ok);
+      f64 r = parse_pow(L, ok);
       if (!*ok)
         return 0;
       v *= r;
     } else if (eat(L, '/')) {
-      i64 r = parse_pow(L, ok);
+      f64 r = parse_pow(L, ok);
       if (!*ok || r == 0) {
         *ok = 0;
         return 0;
       }
       v /= r;
     } else if (eat(L, '%')) {
-      i64 r = parse_pow(L, ok);
-      if (!*ok || r == 0) {
+      f64 r = parse_pow(L, ok);
+      if (!*ok || r == 0.0) {
         *ok = 0;
         return 0;
       }
-      v %= r;
+      i64 a = (i64)v;
+      i64 b = (i64)r;
+      if ((f64)a != v || (f64)b != r || b == 0) {
+        *ok = 0;
+        return 0;
+      }
+      v = (f64)(a % b);
     } else
       break;
   }
   return v;
 }
 
-static i64 parse_expr(Lex *L, int *ok) {
-  i64 v = parse_term(L, ok);
+static f64 parse_expr(Lex *L, int *ok) {
+  f64 v = parse_term(L, ok);
   if (!*ok)
     return 0;
   for (;;) {
     if (eat(L, '+')) {
-      i64 r = parse_term(L, ok);
+      f64 r = parse_term(L, ok);
       if (!*ok)
         return 0;
       v += r;
     } else if (eat(L, '-')) {
-      i64 r = parse_term(L, ok);
+      f64 r = parse_term(L, ok);
       if (!*ok)
         return 0;
       v -= r;
@@ -196,13 +227,18 @@ int main(void) {
 
     Lex L = {line, 0};
     int ok = 1;
-    i64 v = parse_expr(&L, &ok);
+    f64 v = parse_expr(&L, &ok);
     skip_ws(&L);
     if (!ok || line[L.i] != '\0') {
       puts("error");
       continue;
     }
-    printf("%lld\n", (long long)v);
+    i64 iv = (i64)v;
+    if ((f64)iv == v) {
+      printf("%lld\n", (long long)iv);
+    } else {
+      printf("%.12g\n", v);
+    }
   }
   return 0;
 }

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO, ATA_CACHE_SIZE};
+use crate::driver::disk::{ATA_CACHE_SIZE, BLOCK_DEVICE, BlockDeviceIO};
 use crate::println;
 use crate::sys::memory::phys::PhysBuf;
 use alloc::boxed::Box;
@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use core::mem::size_of;
 use core::ptr::{read_volatile, write_bytes, write_volatile};
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{Ordering, compiler_fence};
 use spin::Mutex;
 use x86_64::align_up;
 use x86_64::instructions::port::Port;
@@ -38,6 +38,14 @@ const VIRTIO_BLK_T_FLUSH: u32 = 4;
 const VIRTIO_PCI_CONFIG_OFF: u16 = 0x14; // legacy: device-specific config base
 
 const MAX_RETRIES: usize = 3;
+
+// Virtio legacy 32-bit feature bits (subset).
+const VIRTIO_F_RING_INDIRECT_DESC: u32 = 1 << 28;
+const VIRTIO_F_RING_EVENT_IDX: u32 = 1 << 29;
+
+const VIRTIO_BLK_F_BLK_SIZE: u32 = 1 << 6;
+const VIRTIO_BLK_F_FLUSH: u32 = 1 << 9;
+const VIRTIO_BLK_F_CONFIG_WCE: u32 = 1 << 11;
 
 #[repr(C)]
 pub struct VirtqDesc {
@@ -140,7 +148,7 @@ pub fn init() {
 }
 
 const QSZ: usize = 256;
-const DMA_DATA_BYTES: usize = 64 * 1024; // batch more sectors per request
+const DMA_DATA_BYTES: usize = 512 * 1024;
 const CACHE_LINES: usize = 1024; // 1024 * 512B = 512KiB
 
 #[derive(Clone, Copy)]
@@ -244,13 +252,13 @@ impl VirtQueue {
         let a_idx = unsafe { read_volatile(avail_u16.add(1)) };
         let ring = unsafe { avail_u16.add(2) };
         unsafe { write_volatile(ring.add((a_idx as usize) % qsz), head) };
-        // Make descriptor/avail writes visible before updating idx and notifying.
-        // This must be a real barrier for DMA, not just a compiler fence.
-        fence(Ordering::SeqCst);
+        // Ensure descriptor/avail writes are not reordered by the compiler.
+        // On x86 (and with coherent DMA memory), a compiler fence is sufficient here.
+        compiler_fence(Ordering::Release);
         unsafe {
             write_volatile(avail_u16.add(1), a_idx.wrapping_add(1));
         }
-        fence(Ordering::SeqCst);
+        compiler_fence(Ordering::Release);
 
         // notify queue 0
         let mut notify = Port::<u16>::new(io_base + VIRTIO_PCI_QUEUE_NOTIFY);
@@ -270,7 +278,7 @@ impl VirtQueue {
             core::hint::spin_loop();
         }
 
-        fence(Ordering::SeqCst);
+        compiler_fence(Ordering::Acquire);
         let used_slot = (self.last_used as usize) % qsz;
         let used_ring = unsafe { self.used.add(4) as *mut VirtqUsedElem };
         let used_id = unsafe { read_volatile(&(*used_ring.add(used_slot)).id) as u16 };
@@ -303,6 +311,9 @@ pub struct VirtioBlkDev {
 }
 
 impl VirtioBlkDev {
+    const MAX_BLOCK_CACHE_BYTES: usize = 4096;
+    const VIRTIO_BLK_CFG_WRITEBACK_OFF: u16 = 0x20; // struct virtio_blk_config::writeback
+
     fn probe_and_init() -> Option<Self> {
         let mut dev = crate::sys::pci::find_device(0x1AF4, 0x1001)?;
         dev.enable_bus_mastering();
@@ -322,7 +333,24 @@ impl VirtioBlkDev {
 
         // legacy feature negotiation (we don't require any features)
         unsafe {
-            Port::<u32>::new(io + VIRTIO_PCI_GUEST_FEATURES).write(0);
+            let dev_features = Port::<u32>::new(io + VIRTIO_PCI_DEVICE_FEATURES).read();
+            // Ask for useful bits when available. CONFIG_WCE can materially affect write speed
+            // because it enables the device's write cache behavior.
+            let wanted = VIRTIO_F_RING_INDIRECT_DESC
+                | VIRTIO_F_RING_EVENT_IDX
+                | VIRTIO_BLK_F_BLK_SIZE
+                | VIRTIO_BLK_F_FLUSH
+                | VIRTIO_BLK_F_CONFIG_WCE;
+            let guest = dev_features & wanted;
+            Port::<u32>::new(io + VIRTIO_PCI_GUEST_FEATURES).write(guest);
+
+            if (guest & VIRTIO_BLK_F_CONFIG_WCE) != 0 {
+                let mut wb = Port::<u8>::new(
+                    io + VIRTIO_PCI_CONFIG_OFF + Self::VIRTIO_BLK_CFG_WRITEBACK_OFF,
+                );
+                // 1 = writeback enabled (when supported by device).
+                wb.write(1);
+            }
         }
 
         // select queue 0, read size
@@ -458,6 +486,22 @@ impl VirtioBlkDev {
         Ok(())
     }
 
+    #[inline]
+    fn cache_invalidate_range(&mut self, start_lba: u32, byte_len: usize) {
+        if byte_len == 0 {
+            return;
+        }
+        let sectors = (byte_len + 511) / 512;
+        for i in 0..sectors {
+            let lba = start_lba.wrapping_add(i as u32);
+            let idx = Self::cache_idx(lba);
+            if self.cache[idx].valid && self.cache[idx].tag == lba {
+                self.cache[idx].valid = false;
+                self.cache[idx].dirty = false;
+            }
+        }
+    }
+
     pub fn flush(&mut self) -> Result<(), ()> {
         self.cache_flush_all()?;
 
@@ -545,8 +589,6 @@ impl VirtioBlkDev {
                     self.data_dma.virt_addr().as_mut_ptr(),
                     len,
                 );
-            } else {
-                write_bytes(self.data_dma.virt_addr().as_mut_ptr::<u8>(), 0xCC, len);
             }
 
             let d0 = self.vq.alloc_desc();
@@ -659,7 +701,6 @@ impl VirtioBlkDev {
         Ok(())
     }
 
-
     fn hash(&self, block_addr: u32) -> usize {
         (block_addr as usize) % self.cache_data.len()
     }
@@ -675,6 +716,9 @@ impl VirtioBlkDev {
     }
 
     fn set_cached_block(&mut self, block_addr: u32, buf: &[u8]) {
+        if buf.len() > Self::MAX_BLOCK_CACHE_BYTES {
+            return;
+        }
         let h = self.hash(block_addr);
         self.cache_data[h] = Some((block_addr, buf.to_vec()));
     }
@@ -693,6 +737,17 @@ impl BlockDeviceIO for VirtioBlkDev {
         if buf.is_empty() || (buf.len() % 512) != 0 {
             return Err(());
         }
+
+        // Fast path: do a single multi-sector virtio request (chunked internally).
+        // The previous implementation routed all reads through a 512B cache and ended up
+        // submitting one virtqueue request per sector, which is extremely slow.
+        if buf.len() > 512 {
+            self.rw_bytes(lba as u64, Some(buf), None)?;
+            self.set_cached_block(lba, buf);
+            return Ok(());
+        }
+
+        // Small reads: allow sector cache hits.
         if let Some(cached) = self.cached_block(lba) {
             if cached.len() == buf.len() {
                 buf.copy_from_slice(cached);
@@ -700,12 +755,8 @@ impl BlockDeviceIO for VirtioBlkDev {
             }
         }
 
-        for (i, chunk) in buf.chunks_mut(512).enumerate() {
-            let cur_lba = lba.wrapping_add(i as u32);
-            let sector: &mut [u8; 512] = chunk.try_into().map_err(|_| ())?;
-            self.cache_read_sector(cur_lba, sector)?;
-        }
-
+        let sector: &mut [u8; 512] = buf.try_into().map_err(|_| ())?;
+        self.cache_read_sector(lba, sector)?;
         self.set_cached_block(lba, buf);
         Ok(())
     }
@@ -715,11 +766,12 @@ impl BlockDeviceIO for VirtioBlkDev {
             return Err(());
         }
 
-        for (i, chunk) in buf.chunks(512).enumerate() {
-            let cur_lba = lba.wrapping_add(i as u32);
-            let sector: &[u8; 512] = chunk.try_into().map_err(|_| ())?;
-            self.cache_write_sector(cur_lba, sector)?;
-        }
+        // Write-through: issue the actual virtio write in large chunks.
+        // The prior write-back cache never hit the device unless evicted/flush() ran.
+        self.rw_bytes(lba as u64, None, Some(buf))?;
+
+        // Keep cache coherent: invalidate any cached sectors we overwrote.
+        self.cache_invalidate_range(lba, buf.len());
         self.unset_cached_block(lba);
         Ok(())
     }

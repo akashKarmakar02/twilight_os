@@ -51,6 +51,8 @@ lazy_static! {
         }
         idt[interrupt_index(1)].set_handler_fn(keyboard_interrupt_handler);
         idt[interrupt_index(12)].set_handler_fn(mouse_interrupt_handler);
+        idt[interrupt_index(14)].set_handler_fn(ide_primary_interrupt_handler);
+        idt[interrupt_index(15)].set_handler_fn(ide_secondary_interrupt_handler);
         idt
     };
 }
@@ -258,10 +260,37 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 pub static PICS: Mutex<ChainedPics> =
     Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
+static IRQ_HANDLERS: Mutex<[Option<fn()>; 16]> = Mutex::new([None; 16]);
+
+pub fn register_irq_handler(irq: u8, handler: fn()) -> Result<(), ()> {
+    if irq >= 16 {
+        return Err(());
+    }
+    IRQ_HANDLERS.lock()[irq as usize] = Some(handler);
+    Ok(())
+}
+
+pub fn irq_vector(irq: u8) -> u8 {
+    interrupt_index(irq)
+}
+
+fn dispatch_irq(irq: u8) {
+    if irq < 16 {
+        if let Some(h) = IRQ_HANDLERS.lock()[irq as usize] {
+            h();
+        }
+    }
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(interrupt_index(irq));
+    }
+}
+
 pub fn init_pics() {
     unsafe {
         PICS.lock().initialize();
-        PICS.lock().write_masks(0b11111000, 0b11101111);
+        // PIC1: unmask IRQ0..2 (timer, keyboard, cascade).
+        // PIC2: unmask IRQ12 (mouse), IRQ14/15 (IDE).
+        PICS.lock().write_masks(0b11111000, 0b00101111);
     }
 }
 
@@ -363,4 +392,12 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(12));
     }
+}
+
+extern "x86-interrupt" fn ide_primary_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(14);
+}
+
+extern "x86-interrupt" fn ide_secondary_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(15);
 }

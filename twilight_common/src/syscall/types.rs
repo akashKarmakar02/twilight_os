@@ -18,9 +18,13 @@ pub const EEXIST: i32 = 17;
 pub const ENOTDIR: i32 = 20;
 pub const EISDIR: i32 = 21;
 pub const EINVAL: i32 = 22;
+pub const ENOTTY: i32 = 25;
 pub const ESPIPE: i32 = 29;
 pub const ENOSYS: i32 = 38;
 pub const EOPNOTSUPP: i32 = 95;
+pub const EPIPE: i32 = 32;
+pub const EMFILE: i32 = 24;
+pub const ENFILE: i32 = 23;
 
 pub const O_RDONLY: i32 = 0;
 pub const O_WRONLY: i32 = 1;

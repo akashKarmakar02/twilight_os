@@ -91,6 +91,9 @@ static int head_stream(int fd, int lines, const char *label) {
 }
 
 static int head_file(const char *path, int lines) {
+  if (strcmp(path, "-") == 0) {
+    return head_stream(0, lines, NULL);
+  }
   int fd = open(path, O_RDONLY);
   if (fd < 0) {
     dprintf(2, "head: %s: cannot open (%d)\n", path, errno);

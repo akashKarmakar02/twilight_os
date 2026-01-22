@@ -1,7 +1,8 @@
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
 use crate::driver::disk::dummy_blockdev;
 use crate::driver::timer::pit::uptime;
-use crate::sys::console::{self, DIR, get_tty};
+use crate::sys::console::{DIR, get_tty};
+use crate::sys::fs::pipe::{IOCTL_PIPE_GET_ERRNO, IOCTL_PIPE_GET_LAST_WRITE, make_pipe_nodes};
 use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
 use crate::sys::proc::{FdEntry, OpenFile, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
@@ -214,63 +215,101 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     let len = arg3;
     let buf = unsafe { core::slice::from_raw_parts(buf, len) };
 
+    #[allow(static_mut_refs)]
+    let process_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+
+    fn write_to_fd(process: &mut Process, fd: i32, data: &[u8]) -> i64 {
+        match clone_open_file(process, fd) {
+            Ok(file_ref) => {
+                let mut file = file_ref.lock();
+                let accmode = file.status_flags & O_ACCMODE;
+                if accmode == O_RDONLY {
+                    return -(EBADF as i64);
+                }
+                let append = (file.status_flags & O_APPEND) != 0;
+
+                let (ret, new_seek) = {
+                    let mut node = file.node.lock();
+                    let is_pipe = node.metadata.name == "pipe";
+
+                    let start = if is_pipe {
+                        0
+                    } else if append {
+                        node.metadata.size
+                    } else {
+                        file.seek
+                    };
+                    let end = start.saturating_add(data.len());
+
+                    let result = node.write(start, data);
+
+                    if result.is_ok() {
+                        if is_pipe {
+                            let wrote = node
+                                .ioctl(IOCTL_PIPE_GET_LAST_WRITE, 0)
+                                .unwrap_or(data.len() as i64);
+                            (wrote, None)
+                        } else {
+                            if end > node.metadata.size {
+                                node.metadata.size = end;
+                            }
+                            (data.len() as i64, Some(end))
+                        }
+                    } else if is_pipe {
+                        let errno = node
+                            .ioctl(IOCTL_PIPE_GET_ERRNO, 0)
+                            .unwrap_or(EIO as i64);
+                        (-(errno as i64), None)
+                    } else {
+                        (-1, None)
+                    }
+                };
+
+                if let Some(seek) = new_seek {
+                    file.seek = seek;
+                }
+
+                ret
+            }
+            Err(code) => code as i64,
+        }
+    }
+
     let res = match file_descriptor {
         1 => {
-            if console::pipeline_write(buf) {
-                len as i64
-            } else {
-                print!("{}", String::from_utf8_lossy(buf));
-                len as i64
+            if let Some(process) = process_opt {
+                let t = process.stdio_target[1];
+                if t >= 3 {
+                    return write_to_fd(process, t, buf);
+                }
             }
+            print!("{}", String::from_utf8_lossy(buf));
+            len as i64
         }
         2 => {
+            if let Some(process) = process_opt {
+                let t = process.stdio_target[2];
+                if t >= 3 {
+                    return write_to_fd(process, t, buf);
+                }
+            }
             print!("{}", String::from_utf8_lossy(buf));
 
             len as i64
         }
         n => {
             #[allow(static_mut_refs)]
-            let process = unsafe {
-                PROCESS_TABLE
-                    .get_mut()
-                    .unwrap()
-                    .get_process(crate::sys::proc::id())
-                    .unwrap()
+            let process = match process_opt {
+                Some(p) => p,
+                None => return -(ESRCH as i64),
             };
 
-            match clone_open_file(process, n) {
-                Ok(file_ref) => {
-                    let mut file = file_ref.lock();
-                    let accmode = file.status_flags & O_ACCMODE;
-                    if accmode == O_RDONLY {
-                        return -(EBADF as i64);
-                    }
-                    let append = (file.status_flags & O_APPEND) != 0;
-                    let start = if append {
-                        file.node.lock().metadata.size
-                    } else {
-                        file.seek
-                    };
-                    let end = start.saturating_add(len);
-
-                    let result = {
-                        let mut node = file.node.lock();
-                        let r = node.write(start, buf);
-                        if r.is_ok() && end > node.metadata.size {
-                            node.metadata.size = end;
-                        }
-                        r
-                    };
-
-                    if result.is_ok() {
-                        file.seek = end;
-                        len as i64
-                    } else {
-                        -1
-                    }
-                }
-                Err(code) => code as i64,
-            }
+            write_to_fd(process, n, buf)
         }
     };
 
@@ -306,6 +345,149 @@ pub fn close(fd: i32) -> i64 {
     -(EBADF as i64)
 }
 
+pub fn dup2(oldfd: i32, newfd: i32) -> i64 {
+    if oldfd < 0 || newfd < 0 {
+        return -(EBADF as i64);
+    }
+    if oldfd == newfd {
+        return newfd as i64;
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    // Redirecting stdio.
+    if (0..=2).contains(&newfd) {
+        if (0..=2).contains(&oldfd) {
+            // tty -> tty (no-op)
+            process.stdio_target[newfd as usize] = -1;
+            return newfd as i64;
+        }
+
+        // Validate oldfd exists
+        if oldfd < 3 {
+            return -(EBADF as i64);
+        }
+        let idx = (oldfd - 3) as usize;
+        if process.fd_table.get(idx).and_then(|s| s.as_ref()).is_none() {
+            return -(EBADF as i64);
+        }
+
+        process.stdio_target[newfd as usize] = oldfd;
+        return newfd as i64;
+    }
+
+    // newfd >= 3: duplicate into fd table slot.
+    if oldfd <= 2 {
+        // Duplicating tty into an fd table slot is not supported yet.
+        return -(ENOSYS as i64);
+    }
+    if oldfd < 3 {
+        return -(EBADF as i64);
+    }
+
+    let old_entry = match fd_slot(process, oldfd) {
+        Ok(e) => e,
+        Err(code) => return code as i64,
+    };
+    let cloned = FdEntry {
+        file: old_entry.file.clone(),
+        fd_flags: old_entry.fd_flags,
+    };
+
+    let idx = (newfd - 3) as usize;
+    if process.fd_table.len() <= idx {
+        process.fd_table.resize_with(idx + 1, || None);
+    }
+    // Close existing
+    process.fd_table[idx] = Some(cloned);
+    newfd as i64
+}
+
+pub fn pipe(pipefd_ptr: usize) -> i64 {
+    pipe2(pipefd_ptr, 0)
+}
+
+pub fn pipe2(pipefd_ptr: usize, flags: i32) -> i64 {
+    if pipefd_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let allowed = O_CLOEXEC | O_NONBLOCK;
+    if (flags & !allowed) != 0 {
+        return -(EINVAL as i64);
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let nonblock = (flags & O_NONBLOCK) != 0;
+    let (r_node, w_node) = make_pipe_nodes(nonblock);
+    let cloexec = (flags & O_CLOEXEC) != 0;
+
+    let r_open = OpenFile {
+        node: Arc::new(Mutex::new(r_node)),
+        seek: 0,
+        path: "pipe".to_string(),
+        status_flags: status_flags_from_open(O_RDONLY | (flags & O_NONBLOCK)),
+    };
+    let w_open = OpenFile {
+        node: Arc::new(Mutex::new(w_node)),
+        seek: 0,
+        path: "pipe".to_string(),
+        status_flags: status_flags_from_open(O_WRONLY | (flags & O_NONBLOCK)),
+    };
+
+    let r_entry = FdEntry {
+        file: Arc::new(Mutex::new(r_open)),
+        fd_flags: if cloexec { FD_CLOEXEC } else { 0 },
+    };
+    let w_entry = FdEntry {
+        file: Arc::new(Mutex::new(w_open)),
+        fd_flags: if cloexec { FD_CLOEXEC } else { 0 },
+    };
+
+    let rfd = match install_fd_entry(process, r_entry, 3) {
+        Ok(fd) => fd,
+        Err(code) => return -(code as i64),
+    };
+    let wfd = match install_fd_entry(process, w_entry, 3) {
+        Ok(fd) => fd,
+        Err(code) => {
+            // Roll back read end
+            let idx = (rfd - 3) as usize;
+            if let Some(slot) = process.fd_table.get_mut(idx) {
+                let _ = slot.take();
+            }
+            return -(code as i64);
+        }
+    };
+
+    unsafe {
+        let out = pipefd_ptr as *mut i32;
+        out.add(0).write(rfd);
+        out.add(1).write(wfd);
+    }
+
+    0
+}
+
 pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
     #[allow(static_mut_refs)]
     let process = unsafe {
@@ -316,12 +498,65 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
             .unwrap()
     };
 
+    fn read_from_fd(process: &mut Process, fd: i32, buf: &mut [u8]) -> i64 {
+        let file_ref = match clone_open_file(process, fd) {
+            Ok(f) => f,
+            Err(code) => return code as i64,
+        };
+        let mut file = file_ref.lock();
+        let accmode = file.status_flags & O_ACCMODE;
+        if accmode == O_WRONLY {
+            return -(EBADF as i64);
+        }
+        let mut vfs_node = file.node.lock();
+        match vfs_node.metadata.file_type {
+            FileType::Dir => -(EISDIR as i64),
+            FileType::CharDevice => {
+                let is_pipe = vfs_node.metadata.name == "pipe";
+                match vfs_node.read(buf.len(), buf) {
+                    Ok(n) => n as i64,
+                    Err(_) => {
+                        if is_pipe {
+                            let errno = vfs_node
+                                .ioctl(IOCTL_PIPE_GET_ERRNO, 0)
+                                .unwrap_or(EIO as i64);
+                            -(errno as i64)
+                        } else {
+                            -1
+                        }
+                    }
+                }
+            }
+            _ => {
+                let seek = file.seek;
+                let is_pipe = vfs_node.metadata.name == "pipe";
+                match vfs_node.read(seek, buf) {
+                    Ok(copy_len) => {
+                        drop(vfs_node);
+                        file.seek += copy_len;
+                        copy_len as i64
+                    }
+                    Err(_) => {
+                        if is_pipe {
+                            let errno = vfs_node
+                                .ioctl(IOCTL_PIPE_GET_ERRNO, 0)
+                                .unwrap_or(EIO as i64);
+                            -(errno as i64)
+                        } else {
+                            -1
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if fd <= 2 {
         if fd == 0 {
-            if let Some(bytes) = console::pipeline_read(buf) {
-                return bytes as i64;
+            let t = process.stdio_target[0];
+            if t >= 3 {
+                return read_from_fd(process, t, buf);
             }
-
             let flags = process.stdio_flags[0];
             let tty = get_tty();
             let mut dev = dummy_blockdev();
@@ -339,37 +574,7 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
         return 0;
     }
 
-    let file_ref = match clone_open_file(process, fd as i32) {
-        Ok(f) => f,
-        Err(code) => return code as i64,
-    };
-    let mut file = file_ref.lock();
-    let accmode = file.status_flags & O_ACCMODE;
-    if accmode == O_WRONLY {
-        return -(EBADF as i64);
-    }
-    let mut vfs_node = file.node.lock();
-    match vfs_node.metadata.file_type {
-        FileType::Dir => -(EISDIR as i64),
-        FileType::CharDevice => {
-            if let Ok(content) = vfs_node.read(buf.len(), buf) {
-                let copy_len = content.min(buf.len());
-                copy_len as i64
-            } else {
-                -1
-            }
-        }
-        _ => {
-            let seek = file.seek;
-            if let Ok(copy_len) = vfs_node.read(seek, buf) {
-                drop(vfs_node); // Release the immutable borrow before modifying file
-                file.seek += copy_len;
-                copy_len as i64
-            } else {
-                -1
-            }
-        }
-    }
+    read_from_fd(process, fd as i32, buf)
 }
 
 pub fn open(path: &str, flags: i32, mode: u32) -> i64 {
@@ -523,11 +728,16 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
     #[allow(static_mut_refs)]
     let process_table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
 
-    let pwd = process_table
-        .get_process(crate::sys::proc::id())
-        .unwrap()
-        .pwd
-        .clone();
+    let (pwd, inherited_fds, stdio_flags, stdio_fd_flags, stdio_target) = {
+        let parent = process_table.get_process(crate::sys::proc::id()).unwrap();
+        (
+            parent.pwd.clone(),
+            parent.fd_table.clone(),
+            parent.stdio_flags,
+            parent.stdio_fd_flags,
+            parent.stdio_target,
+        )
+    };
 
     if let Ok(p) = Process::new(
         elf_buf,
@@ -535,6 +745,11 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         argv.as_slice(),
         crate::sys::proc::id(),
     ) {
+        let mut p = p;
+        p.fd_table = inherited_fds;
+        p.stdio_flags = stdio_flags;
+        p.stdio_fd_flags = stdio_fd_flags;
+        p.stdio_target = stdio_target;
         unsafe { asm!("swapgs") };
         process_table.run(p);
     } else {

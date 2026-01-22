@@ -244,6 +244,7 @@ pub struct OpenFile {
     pub status_flags: i32,
 }
 
+#[derive(Clone)]
 pub struct FdEntry {
     pub file: Arc<Mutex<OpenFile>>,
     pub fd_flags: i32,
@@ -271,6 +272,8 @@ pub struct Process {
     pub fd_table: Vec<Option<FdEntry>>,
     pub stdio_flags: [i32; 3],
     pub stdio_fd_flags: [i32; 3],
+    /// For fd 0/1/2 redirection: -1 means tty, otherwise points to an fd >= 3.
+    pub stdio_target: [i32; 3],
     pub proc_mm: Box<ProcMM>,
     pub exit_code: i32,
     pub preempt_frame: u64, // saved RSP to PreemptFrame on this task's kernel stack
@@ -427,6 +430,7 @@ impl Process {
             parent_pid,
             stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
             stdio_fd_flags: [0; 3],
+            stdio_target: [-1; 3],
             exit_code: 0,
             preempt_frame: 0,
         };
@@ -747,6 +751,7 @@ pub fn init() {
                 parent_pid: 1,
                 stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
                 stdio_fd_flags: [0; 3],
+                stdio_target: [-1; 3],
                 exit_code: 0,
                 preempt_frame: 0,
             })
@@ -780,6 +785,7 @@ pub fn init() {
         stack_size: 0,
         stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
         stdio_fd_flags: [0; 3],
+        stdio_target: [-1; 3],
         exit_code: 0,
         preempt_frame: 0,
     };
