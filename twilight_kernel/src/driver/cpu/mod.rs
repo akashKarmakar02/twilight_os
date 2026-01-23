@@ -5,6 +5,9 @@ use limine::response::MpResponse;
 use raw_cpuid::CpuId;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::xcontrol::{XCr0, XCr0Flags};
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 
 unsafe extern "C" fn ap_main(cpu: &limine::mp::Cpu) -> ! {
     use x86_64::instructions::hlt;
@@ -20,6 +23,7 @@ unsafe extern "C" fn ap_main(cpu: &limine::mp::Cpu) -> ! {
 pub fn init_smp(mp_response: &'static MpResponse) {
     let smp = mp_response;
     let bsp_id = mp_response.bsp_lapic_id();
+    CPU_COUNT.store(smp.cpus().len(), Ordering::Relaxed);
 
     let time = driver::timer::pit::uptime();
 
@@ -79,6 +83,10 @@ pub fn init(mp_response: &'static MpResponse) {
         name
     );
     init_smp(mp_response);
+}
+
+pub fn cpu_count() -> usize {
+    CPU_COUNT.load(Ordering::Relaxed).max(1)
 }
 
 pub fn has_fsgsbase() -> bool {

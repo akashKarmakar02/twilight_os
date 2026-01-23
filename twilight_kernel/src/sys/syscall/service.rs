@@ -261,9 +261,7 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
                             (data.len() as i64, Some(end))
                         }
                     } else if is_pipe {
-                        let errno = node
-                            .ioctl(IOCTL_PIPE_GET_ERRNO, 0)
-                            .unwrap_or(EIO as i64);
+                        let errno = node.ioctl(IOCTL_PIPE_GET_ERRNO, 0).unwrap_or(EIO as i64);
                         (-(errno as i64), None)
                     } else {
                         (-1, None)
@@ -845,7 +843,7 @@ pub fn uname(ptr: usize) -> i64 {
             fill(&mut uname_s.release, "0.1.0-testing-build.x86_64");
             fill(&mut uname_s.version, "#1 NON-SMP 26-10-2025");
             fill(&mut uname_s.machine, "x86_64");
-            fill(&mut uname_s.domainname, "-");
+            fill(&mut uname_s.domainname, "(none)");
         }
     }
 

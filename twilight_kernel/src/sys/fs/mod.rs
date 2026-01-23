@@ -1,5 +1,6 @@
 mod devfs;
 mod gdt;
+mod procfs;
 pub mod partition;
 pub mod ram_fs;
 pub mod twilight_fs;
@@ -10,6 +11,7 @@ pub mod pipe;
 
 use crate::println;
 use crate::sys::fs::devfs::DevFs;
+use crate::sys::fs::procfs::ProcFs;
 use crate::sys::fs::fat16::{detect_fat16_partition, Fat16Fs};
 use crate::sys::fs::twilight_fs::{TfsProxy, TwilightFs};
 use crate::sys::fs::vfs::VFS;
@@ -57,6 +59,11 @@ pub fn init(show_log: bool) {
                     VFS.get_mut()
                         .mount("/dev", Arc::new(Mutex::new(DevFs::new())));
                 }
+                #[allow(static_mut_refs)]
+                unsafe {
+                    VFS.get_mut()
+                        .mount("/proc", Arc::new(Mutex::new(ProcFs::new())));
+                }
                 try_mount_boot(bus, dsk, show_log);
                 if show_log {
                     println!(
@@ -90,6 +97,11 @@ pub fn init(show_log: bool) {
             VFS.get_mut()
                 .mount("/dev", Arc::new(Mutex::new(DevFs::new())));
         }
+        #[allow(static_mut_refs)]
+        unsafe {
+            VFS.get_mut()
+                .mount("/proc", Arc::new(Mutex::new(ProcFs::new())));
+        }
         if show_log {
             println!(
                 "\x1b[93m[{:.6}]\x1b[0m TwilightFS Superblock found in Virtio Block Device",
@@ -103,6 +115,11 @@ pub fn init(show_log: bool) {
     unsafe {
         VFS.get_mut()
             .mount("/dev", Arc::new(Mutex::new(DevFs::new())));
+    }
+    #[allow(static_mut_refs)]
+    unsafe {
+        VFS.get_mut()
+            .mount("/proc", Arc::new(Mutex::new(ProcFs::new())));
     }
     println!(
         "\x1b[93m[{:.6}]\x1b[0m No TwilightFS Superblock found",

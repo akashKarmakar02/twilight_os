@@ -24,6 +24,15 @@ static mut KERNEL_PAGE_TABLE_FRAME: PhysFrame = PhysFrame::containing_address(Ph
 static MEMORY_MAP: OnceCell<&'static [&Entry]> = OnceCell::uninit();
 static MEMORY_SIZE: AtomicUsize = AtomicUsize::new(0);
 
+pub fn mem_stats_bytes() -> (usize, usize) {
+    // Total = total usable frames managed by allocator.
+    // Free = frames not allocated in the bitmap.
+    let (total_frames, free_frames) = with_frame_allocator(|a| (a.total_frames(), a.free_frames()));
+    let total = total_frames.saturating_mul(4096);
+    let free = free_frames.saturating_mul(4096);
+    (total, free)
+}
+
 pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static [&Entry]) {
     let level_4_table = unsafe { active_level_4_table() };
     let (frame, _) = x86_64::registers::control::Cr3::read();

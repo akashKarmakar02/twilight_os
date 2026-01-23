@@ -195,6 +195,31 @@ impl BitmapFrameAllocator {
         self.bitmap[word_index].set_bit(bit_index, allocated);
     }
 
+    pub fn total_frames(&self) -> usize {
+        self.frames_count
+    }
+
+    pub fn allocated_frames(&self) -> usize {
+        if self.frames_count == 0 {
+            return 0;
+        }
+        let full_words = self.frames_count / 64;
+        let rem_bits = self.frames_count % 64;
+        let mut used: usize = 0;
+        for i in 0..full_words {
+            used += self.bitmap[i].count_ones() as usize;
+        }
+        if rem_bits != 0 {
+            let mask = (1u64 << rem_bits) - 1;
+            used += (self.bitmap[full_words] & mask).count_ones() as usize;
+        }
+        used
+    }
+
+    pub fn free_frames(&self) -> usize {
+        self.total_frames().saturating_sub(self.allocated_frames())
+    }
+
     /// Allocate `num_pages` physically-contiguous 4KiB frames.
     pub fn allocate_contiguous(&mut self, num_pages: usize) -> Option<PhysFrame<Size4KiB>> {
         if num_pages == 0 {
