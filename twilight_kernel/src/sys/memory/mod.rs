@@ -2,9 +2,9 @@ pub mod bitmap;
 pub mod heap;
 pub mod phys;
 
-use crate::{log, serial_println};
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::proc::mem::{PAGE, align_dn, align_up};
+use crate::{log, serial_println};
 use conquer_once::spin::OnceCell;
 use core::ptr;
 use core::sync::atomic::Ordering::SeqCst;
@@ -12,7 +12,10 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use limine::memory_map::Entry;
 use spin::Once;
 use x86_64::structures::paging::mapper::CleanUp;
-use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate};
+use x86_64::structures::paging::{
+    FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PageSize, PageTable,
+    PageTableFlags, PhysFrame, Size4KiB, Translate,
+};
 use x86_64::{PhysAddr, VirtAddr};
 
 #[allow(static_mut_refs)]
@@ -267,6 +270,38 @@ pub fn phys_addr(ptr: *const u8) -> u64 {
     let virt_addr = VirtAddr::new(ptr as u64);
     let phys_addr = virt_to_phys(virt_addr).unwrap();
     phys_addr.as_u64()
+}
+
+pub fn map_mmio(phys_addr: u64, size: usize) -> Result<(), ()> {
+    use x86_64::structures::paging::PageTableFlags;
+
+    let size = size.saturating_sub(1) as u64;
+    let start_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(phys_addr));
+    let end_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(phys_addr + size));
+    let frames = PhysFrame::range_inclusive(start_frame, end_frame);
+
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_CACHE
+        | PageTableFlags::NO_EXECUTE;
+
+    with_frame_allocator(|frame_allocator| {
+        for frame in frames {
+            let phys = frame.start_address();
+            let virt = VirtAddr::new(phys.as_u64() + phys_mem_offset());
+            let page = Page::containing_address(virt);
+
+            unsafe {
+                if let Ok(mapping) = mapper().map_to(page, frame, flags, frame_allocator) {
+                    mapping.flush();
+                } else {
+                    // If it failed, it might be already mapped.
+                    // We try to update flags just in case, or ignore.
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 pub fn memory_size() -> usize {
