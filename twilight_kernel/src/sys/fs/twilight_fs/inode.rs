@@ -3,7 +3,7 @@ use crate::sys::fs::vfs::{BlockDev, FsCtx, VfsNodeOps};
 use alloc::string::String;
 use alloc::sync::Arc;
 use spin::Mutex;
-use twilight_common::syscall::types::EISDIR;
+use twilight_common::syscall::types::{EIO, EISDIR};
 
 #[allow(dead_code)]
 #[repr(u16)]
@@ -500,5 +500,35 @@ impl VfsNodeOps for TFSVfsNode {
         } else {
             Ok(0)
         }
+    }
+
+    fn truncate(&mut self, device: &mut BlockDev, len: usize) -> Result<(), i32> {
+        let cur = self.inode.size as usize;
+        if len == cur {
+            return Ok(());
+        }
+
+        if len < cur {
+            self.inode.size = len as u64;
+            self.ctx
+                .lock()
+                .write_inode_twilight(self.inode_no, self.inode)
+                .map_err(|_| -(EIO as i32))?;
+            return Ok(());
+        }
+
+        // Extend by writing zeros from current size up to `len`.
+        let mut remaining = len - cur;
+        let mut offset = cur;
+        let zero = [0u8; 2048];
+        while remaining > 0 {
+            let n = core::cmp::min(remaining, zero.len());
+            self.write(device, offset, &zero[..n])
+                .map_err(|_| -(EIO as i32))?;
+            offset += n;
+            remaining -= n;
+        }
+
+        Ok(())
     }
 }

@@ -308,6 +308,10 @@ impl Tty {
             b'm' => self.apply_sgr(params_str),
             b'J' => self.csi_ed(&nums),
             b'K' => self.csi_el(&nums),
+            b'A' => self.csi_cuu(&nums),
+            b'B' => self.csi_cud(&nums),
+            b'C' => self.csi_cuf(&nums),
+            b'D' => self.csi_cub(&nums),
             b'H' | b'f' => self.csi_cup(&nums),
             b'h' if is_private => self.csi_dec_private_set(&nums),
             b'l' if is_private => self.csi_dec_private_reset(&nums),
@@ -319,11 +323,37 @@ impl Tty {
     }
 
     fn csi_el(&mut self, nums: &[i32]) {
-        match *nums.get(0).unwrap_or(&2) {
+        match *nums.get(0).unwrap_or(&0) {
             2 => self.term.erase_line(),                // clear whole line
             1 => self.term.erase_in_line_to_cursor(),   // BOL..cursor
             _ => self.term.erase_in_line_from_cursor(), // cursor..EOL (default 0)
         }
+    }
+
+    fn csi_cuu(&mut self, nums: &[i32]) {
+        let n = nums.get(0).copied().unwrap_or(1).max(1) as usize;
+        self.term.cursor_y = self.term.cursor_y.saturating_sub(n);
+        self.term.refresh_cursor();
+    }
+
+    fn csi_cud(&mut self, nums: &[i32]) {
+        let n = nums.get(0).copied().unwrap_or(1).max(1) as usize;
+        let max_rows = (self.term.height / 16).max(1);
+        self.term.cursor_y = (self.term.cursor_y + n).min(max_rows - 1);
+        self.term.refresh_cursor();
+    }
+
+    fn csi_cuf(&mut self, nums: &[i32]) {
+        let n = nums.get(0).copied().unwrap_or(1).max(1) as usize;
+        let max_cols = (self.term.width / 8).max(1);
+        self.term.cursor_x = (self.term.cursor_x + n).min(max_cols - 1);
+        self.term.refresh_cursor();
+    }
+
+    fn csi_cub(&mut self, nums: &[i32]) {
+        let n = nums.get(0).copied().unwrap_or(1).max(1) as usize;
+        self.term.cursor_x = self.term.cursor_x.saturating_sub(n);
+        self.term.refresh_cursor();
     }
 
     fn csi_cup(&mut self, nums: &[i32]) {
@@ -573,7 +603,7 @@ impl KeyboardListener for Tty {
 }
 
 impl VfsNodeOps for Tty {
-    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<usize,()> {
+    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
         let mut i = 0;
 
         loop {

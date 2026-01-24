@@ -16,6 +16,7 @@ pub const SYS_PREAD64: usize = 17;
 pub const SYS_RT_SIGACTION: usize = 13;
 pub const SYS_RT_SIGPROCMASK: usize = 14;
 pub const SYS_FCNTL: usize = 72;
+pub const SYS_FTRUNCATE: usize = 77;
 pub const SYS_READV: usize = 19;
 pub const SYS_WRITEV: usize = 20;
 pub const SYS_ACCESS: usize = 21;

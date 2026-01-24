@@ -72,6 +72,7 @@ pub extern "sysv64" fn syscall_handler(
             // 0
         }
         SYS_FCNTL => service::fcntl(arg1 as i32, arg2 as i32, arg3),
+        SYS_FTRUNCATE => service::ftruncate(arg1 as i32, arg2 as u64),
         SYS_READV => service::readv(arg1 as usize, arg2, arg3),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
         SYS_PREADV => service::preadv(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),

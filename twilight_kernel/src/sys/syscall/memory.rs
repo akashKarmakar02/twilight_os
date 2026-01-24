@@ -143,16 +143,16 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         }
         process.proc_mm.track_mmap(va, len, MmapKind::Owned);
     }
-    logger!(
-        "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
-        addr,
-        size,
-        prot,
-        flags,
-        fd,
-        offset,
-        va
-    );
+    // logger!(
+    //     "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
+    //     addr,
+    //     size,
+    //     prot,
+    //     flags,
+    //     fd,
+    //     offset,
+    //     va
+    // );
     va as i64
 }
 
@@ -160,12 +160,12 @@ pub fn mprotect(addr: u64, size: usize, prot: usize) -> i64 {
     if size == 0 {
         return EINVAL;
     }
-    logger!(
-        "mprotect: addr=0x{:x}, size=0x{:x}, prot=0x{:x}",
-        addr,
-        size,
-        prot
-    );
+    // logger!(
+    //     "mprotect: addr=0x{:x}, size=0x{:x}, prot=0x{:x}",
+    //     addr,
+    //     size,
+    //     prot
+    // );
     0
 }
 
@@ -183,11 +183,11 @@ pub fn brk(addr: usize) -> i64 {
     };
 
     if addr == 0 {
-        logger!(
-            "brk:- addr: {:#X} => {:#X}",
-            addr,
-            process.proc_mm.curr_brk()
-        );
+        // logger!(
+        //     "brk:- addr: {:#X} => {:#X}",
+        //     addr,
+        //     process.proc_mm.curr_brk()
+        // );
         return process.proc_mm.curr_brk() as i64; // report current break
     }
     let res = match process.proc_mm.set_brk(&mut process.mapper, addr) {
@@ -195,7 +195,7 @@ pub fn brk(addr: usize) -> i64 {
         Err(_) => process.proc_mm.curr_brk() as i64, // failure: return current break
     };
 
-    logger!("brk:- addr: {:#X} => {:#X}", addr, res);
+    // logger!("brk:- addr: {:#X} => {:#X}", addr, res);
     res
 }
 

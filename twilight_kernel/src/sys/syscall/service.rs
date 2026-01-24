@@ -343,6 +343,68 @@ pub fn close(fd: i32) -> i64 {
     -(EBADF as i64)
 }
 
+pub fn ftruncate(fd: i32, length: u64) -> i64 {
+    if fd < 0 {
+        return -(EBADF as i64);
+    }
+    if length > (usize::MAX as u64) {
+        return -(EINVAL as i64);
+    }
+    let new_len = length as usize;
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    // If stdio is redirected to a real fd, apply truncation there.
+    let target_fd = if (0..=2).contains(&fd) {
+        let t = process.stdio_target[fd as usize];
+        if t >= 3 { t } else { fd }
+    } else {
+        fd
+    };
+    if target_fd < 3 {
+        return -(EBADF as i64);
+    }
+
+    match clone_open_file(process, target_fd) {
+        Ok(file_ref) => {
+            let mut file = file_ref.lock();
+
+            let accmode = file.status_flags & O_ACCMODE;
+            if accmode == O_RDONLY {
+                return -(EBADF as i64);
+            }
+
+            let truncate_res = {
+                let mut node = file.node.lock();
+                if node.metadata.file_type != FileType::File {
+                    return -(EINVAL as i64);
+                }
+                node.truncate(new_len)
+            };
+
+            match truncate_res {
+                Ok(()) => {
+                    if file.seek > new_len {
+                        file.seek = new_len;
+                    }
+                    0
+                }
+                Err(errno) => errno as i64,
+            }
+        }
+        Err(code) => code as i64,
+    }
+}
+
 pub fn dup2(oldfd: i32, newfd: i32) -> i64 {
     if oldfd < 0 || newfd < 0 {
         return -(EBADF as i64);
@@ -605,7 +667,7 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
     let mut existed = true;
     #[allow(static_mut_refs)]
     let node = unsafe { VFS.get_mut().open(&full_path) };
-    let node = match (node, (flags & O_CREAT) != 0) {
+    let mut node = match (node, (flags & O_CREAT) != 0) {
         (Ok(n), _) => n,
         (Err(_), true) => {
             // create new file with mode
@@ -653,11 +715,11 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
 
     // O_TRUNC (only for regular files)
     if (flags & O_TRUNC) != 0 && node.metadata.file_type == FileType::File {
-        // You don't have truncate: emulate by writing empty content
-        // #[allow(static_mut_refs)]
-        // if unsafe { VFS.get_mut().write(&full_path, &[]) }.is_err() {
-        //     return -(EOPNOTSUPP as i64);
-        // }
+        if accmode != O_RDONLY {
+            if let Err(errno) = node.truncate(0) {
+                return errno as i64;
+            }
+        }
     }
 
     let mut initial_seek: usize = 0;
