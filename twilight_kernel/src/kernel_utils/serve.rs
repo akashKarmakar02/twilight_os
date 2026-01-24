@@ -116,7 +116,7 @@ impl Response {
         );
         headers.insert(
             "Server".to_string(),
-            format!("MOROS/{}", env!("CARGO_PKG_VERSION")),
+            format!("TwilightOS/{}", env!("CARGO_PKG_VERSION")),
         );
         Self {
             req,
@@ -228,14 +228,20 @@ fn get(req: &Request, res: &mut Response) {
     let file_path = format!("/var/www/{}", file);
     if let Ok(mut inode) = vfs.open(file_path.as_str()) {
         res.code = 200;
-        let mut buf = [0u8; 4096];
-        let Ok(_) = inode.read(0, &mut buf) else {
-            res.body
-                .extend_from_slice(b"<h1>Hello World From Twilight OS!</h1>\n");
-            return;
-        };
+        let mut buf = [0u8; 2048];
+        let mut response_buf = Vec::new();
 
-        res.body.extend_from_slice(buf.as_slice());
+        for i in 0..((inode.metadata.size/2048)+1) {
+            buf.fill(0);
+            let Ok(read) = inode.read(i*2048, &mut buf) else {
+                res.body
+                    .extend_from_slice(b"<h1>Hello World From Twilight OS!</h1>\n");
+                return;
+            };
+            response_buf.extend_from_slice(&buf[..read]);
+        }
+
+        res.body.extend_from_slice(response_buf.as_slice());
     } else {
         res.code = 404;
         res.body.extend_from_slice(b"<h1>404 Not Found</h1>\n");
