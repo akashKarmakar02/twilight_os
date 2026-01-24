@@ -7,6 +7,7 @@ use crate::arch::x86_64::gdt::{SegmentSelector, USER_CS, USER_SS};
 use crate::arch::x86_64::io;
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
+use crate::println;
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::{VFS, VfsNode};
 use crate::sys::memory::bitmap::with_frame_allocator;
@@ -18,7 +19,6 @@ use crate::sys::proc::task::{
 };
 use crate::sys::proc::user::USER_ENV;
 use crate::utils::StackHelper;
-use crate::println;
 use alloc::alloc::alloc_zeroed;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -216,25 +216,49 @@ impl ProcessTable {
         process.context_switch_rsp = VirtAddr::new(stack_ptr);
         process.context = context_ptr;
 
+        let current_pid = crate::sys::proc::id();
+
         PID.store(pid, Ordering::SeqCst);
 
         self.proc_list.push_back(process);
 
-        let len = self.proc_list.len();
-        let (prev_slice, next_slice) = self.proc_list.make_contiguous().split_at_mut(len - 1);
+        let slice = self.proc_list.make_contiguous();
+        let len = slice.len();
 
-        let prev_task = prev_slice.last_mut().unwrap();
-        let next_task = &mut next_slice[0];
+        let mut prev_idx = None;
+        for (i, p) in slice.iter().enumerate() {
+            if p.pid == current_pid {
+                prev_idx = Some(i);
+                break;
+            }
+        }
 
-        // This is a *kernel* context switch (e.g., exec/spawn). The previous task is now blocked
-        // in the kernel until the new process exits. Prevent the preemptive timer from resuming it
-        // from a stale user preempt frame.
-        prev_task.state = ProcessState::Waiting;
-        prev_task.preempt_frame = 0;
-        next_task.state = ProcessState::Running;
-        next_task.preempt_frame = 0;
+        // If we can't find the current process, something is very wrong, but fallback
+        // to previous behavior (second to last) might be saf-ish or just panic.
+        // For now, let's assume we found it.
+        let prev_idx = prev_idx.unwrap_or(len - 2);
+        let next_idx = len - 1;
 
-        switch_tasks(prev_task, next_task);
+        if prev_idx == next_idx {
+            // Should not happen if we pushed a new process
+            return;
+        }
+
+        let ptr = slice.as_mut_ptr();
+        unsafe {
+            let prev_task = &mut *ptr.add(prev_idx);
+            let next_task = &mut *ptr.add(next_idx);
+
+            // This is a *kernel* context switch (e.g., exec/spawn). The previous task is now blocked
+            // in the kernel until the new process exits. Prevent the preemptive timer from resuming it
+            // from a stale user preempt frame.
+            prev_task.state = ProcessState::Waiting;
+            prev_task.preempt_frame = 0;
+            next_task.state = ProcessState::Running;
+            next_task.preempt_frame = 0;
+
+            switch_tasks(prev_task, next_task);
+        }
     }
 }
 pub struct OpenFile {
@@ -472,7 +496,21 @@ pub fn id() -> u16 {
 pub fn exit() {
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-    let mut process = table.proc_list.pop_back().unwrap();
+
+    let current_pid = id();
+    let mut idx = None;
+    for (i, p) in table.proc_list.iter().enumerate() {
+        if p.pid == current_pid {
+            idx = Some(i);
+            break;
+        }
+    }
+
+    let mut process = if let Some(i) = idx {
+        table.proc_list.remove(i).unwrap()
+    } else {
+        table.proc_list.pop_back().unwrap()
+    };
 
     if let Some(p_process) = table.get_process(process.parent_pid) {
         // Parent can run again; clear any stale preempt frame so it won't be resumed from an old

@@ -748,7 +748,6 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         p.stdio_flags = stdio_flags;
         p.stdio_fd_flags = stdio_fd_flags;
         p.stdio_target = stdio_target;
-        unsafe { asm!("swapgs") };
         process_table.run(p);
     } else {
         return -1;
