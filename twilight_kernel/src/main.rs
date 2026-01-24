@@ -235,6 +235,16 @@ pub fn init(
     x86_64::instructions::interrupts::enable();
     driver::timer::init();
 
+    // Switch to APIC timer
+    driver::apic::lapic::init();
+
+    // Mask PIT (IRQ0) to prevent double ticks
+    unsafe {
+        arch::x86_64::idt::PICS
+            .lock()
+            .write_masks(0b11111001, 0b00101111);
+    }
+
     kernel_utils::dhcp::main();
 }
 

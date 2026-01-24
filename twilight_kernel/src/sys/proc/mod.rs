@@ -691,6 +691,105 @@ pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mu
     slice[next_idx].preempt_frame as *mut PreemptFrame
 }
 
+pub extern "C" fn apic_timer_preempt(
+    frame: *mut PreemptFrame,
+    from_user: u64,
+) -> *mut PreemptFrame {
+    crate::driver::timer::pit::pit_tick_isr();
+
+    // EOI for Local APIC
+    crate::driver::apic::lapic::end_of_interrupt();
+
+    if from_user == 0 {
+        return frame;
+    }
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let cur_pid = id();
+
+    let slice = table.proc_list.make_contiguous();
+    let len = slice.len();
+
+    // Find index of current process
+    // We can't rely on valid pointers if we don't find it, so be careful.
+    let mut cur_idx_opt = None;
+    for (i, p) in slice.iter().enumerate() {
+        if p.pid == cur_pid {
+            cur_idx_opt = Some(i);
+            break;
+        }
+    }
+
+    // Still remember the latest frame.
+    if let Some(cur_idx) = cur_idx_opt {
+        slice[cur_idx].preempt_frame = frame as u64;
+    } else {
+        return frame;
+    }
+
+    // Create copy of slice length to avoid borrow issues if we need it
+    if len < 2 {
+        return frame;
+    }
+
+    let cur_idx = cur_idx_opt.unwrap();
+
+    // Save the current user's FS/GS bases and the latest preempt frame.
+    {
+        let cur = &mut slice[cur_idx];
+        cur.preempt_frame = frame as u64;
+        cur.fs_base = io::get_fsbase()();
+        cur.gs_base = io::get_inactive_gsbase()(); // inactive = user GS because we swapgs in ISR
+        if let Some(fpu) = cur.fpu_storage.as_mut() {
+            xsave(fpu);
+        }
+    }
+
+    // Find next runnable task (round robin)
+    let mut next_idx = None;
+    for step in 1..=len {
+        let idx = (cur_idx + step) % len;
+        if !matches!(slice[idx].state, ProcessState::Running) {
+            continue;
+        }
+        if slice[idx].preempt_frame == 0 {
+            continue;
+        }
+        next_idx = Some(idx);
+        break;
+    }
+    let Some(next_idx) = next_idx else {
+        return frame;
+    };
+    if next_idx == cur_idx {
+        return frame;
+    }
+
+    let next_pid = slice[next_idx].pid;
+    PID.store(next_pid, Ordering::SeqCst);
+
+    // Restore FS/GS + FPU for next task; update kernel stack top for next ring3->ring0 entry.
+    {
+        let next = &mut slice[next_idx];
+        io::set_fsbase()(next.fs_base);
+        io::set_inactive_gsbase()(next.gs_base);
+
+        if let Some(fpu) = next.fpu_storage.as_mut() {
+            xrstor(fpu);
+        }
+
+        let kstack_top = next.kernel_gs.kernel_rsp;
+        #[allow(static_mut_refs)]
+        unsafe {
+            crate::arch::x86_64::gdt::TSS.rsp[0] = kstack_top;
+        }
+        io::wrmsr(io::IA32_SYSENTER_ESP, kstack_top);
+    }
+
+    slice[next_idx].preempt_frame as *mut PreemptFrame
+}
+
 #[unsafe(naked)]
 unsafe extern "C" fn iretq_init() {
     naked_asm!(

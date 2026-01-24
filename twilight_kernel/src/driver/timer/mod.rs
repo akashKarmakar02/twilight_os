@@ -17,6 +17,7 @@ pub fn tsc() -> u64 {
 }
 
 pub fn init() {
+    pit::init(); // Set PIT to 1000Hz (1ms) before calibration
     let calibration_time = 250_000; // 0.25 seconds
     let a = tsc();
     crate::task::executor::sleep(calibration_time as f64 / 1e6);

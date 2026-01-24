@@ -1,20 +1,35 @@
 use crate::driver::timer::cmos::CMOS;
+use crate::task::executor::halt;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
-use crate::task::executor::halt;
 use twilight_common::syscall::types::{EFAULT, EINVAL, Timespec};
 
-const PIT_BASE_HZ: u64 = 1_193_182;
-const PIT_DIVISOR: u64 = 65_536;
+// We are now using APIC timer at 1000Hz (1ms)
 const NSEC_PER_SEC: u64 = 1_000_000_000;
+const FREQ_HZ: u64 = 1_000;
 
-const NUM_NS_PER_TICK: u128 = (NSEC_PER_SEC as u128) * (PIT_DIVISOR as u128);
-const DEN_NS_PER_TICK: u128 = PIT_BASE_HZ as u128;
+const NUM_NS_PER_TICK: u128 = (NSEC_PER_SEC as u128) / (FREQ_HZ as u128);
+const DEN_NS_PER_TICK: u128 = 1;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
 static REALTIME_OFFSET_NS: AtomicUsize = AtomicUsize::new(0);
 static OFFSET_INITED: AtomicU64 = AtomicU64::new(0); // 0 = no, 1 = yes
+
+pub fn init() {
+    // 1193182 / 1000 = 1193
+    let divisor: u16 = 1193;
+    unsafe {
+        use x86_64::instructions::port::Port;
+        let mut command: Port<u8> = Port::new(0x43);
+        let mut data: Port<u8> = Port::new(0x40);
+
+        // 0x36: Channel 0, Access lo/hi, Mode 3 (Square wave), Binary
+        command.write(0x36);
+        data.write((divisor & 0xFF) as u8);
+        data.write((divisor >> 8) as u8);
+    }
+}
 
 pub fn pit_tick_isr() {
     TICKS.fetch_add(1, Ordering::Relaxed);

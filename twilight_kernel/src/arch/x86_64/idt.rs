@@ -5,8 +5,8 @@ use core::arch::naked_asm;
 use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use x86_64::VirtAddr;
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 #[repr(C, align(8))]
 pub struct Registers {
@@ -48,6 +48,7 @@ lazy_static! {
         }
         unsafe {
             idt[interrupt_index(0)].set_handler_addr(VirtAddr::new(timer_preempt_isr as u64));
+            idt[0xFD].set_handler_addr(VirtAddr::new(apic_timer_preempt_isr as u64));
         }
         idt[interrupt_index(1)].set_handler_fn(keyboard_interrupt_handler);
         idt[interrupt_index(12)].set_handler_fn(mouse_interrupt_handler);
@@ -364,6 +365,79 @@ unsafe extern "C" fn timer_preempt_isr() -> ! {
         "pop rax",
         "iretq",
         timer_preempt = sym crate::sys::proc::timer_preempt,
+    );
+}
+
+#[unsafe(naked)]
+unsafe extern "C" fn apic_timer_preempt_isr() -> ! {
+    naked_asm!(
+        // Stack at entry:
+        //   RIP, CS, RFLAGS, (if CPL change) RSP, SS
+        //
+        // Save full GPR state so we can iretq into a (potentially different) process.
+        "push rax",
+        "push rbx",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push rbp",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        // Determine if we came from ring3 by inspecting saved CS.
+        // After pushing 15 regs, saved iret CS is at [rsp + 120 + 8].
+        "xor rsi, rsi",
+        "mov rax, [rsp + 128]",
+        "and rax, 3",
+        "cmp rax, 3",
+        "sete sil",
+        // If from user, swap to kernel GS base so kernel helpers work correctly.
+        "test sil, sil",
+        "jz 2f",
+        "swapgs",
+        "2:",
+        // Push CR3 so the restore path can switch address spaces.
+        "mov rax, cr3",
+        "push rax",
+        // Call Rust scheduler: rdi=frame_ptr, rsi=from_user (0/1)
+        "mov rdi, rsp",
+        "call {apic_timer_preempt}",
+        // Switch to returned frame (may be same task).
+        "mov rsp, rax",
+        // Restore CR3
+        "pop rax",
+        "mov cr3, rax",
+        // If returning to ring3, swapgs back to user GS base.
+        "mov rax, [rsp + 128]",
+        "and rax, 3",
+        "cmp rax, 3",
+        "jne 3f",
+        "swapgs",
+        "3:",
+        // Restore regs and return from interrupt.
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rbp",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rbx",
+        "pop rax",
+        "iretq",
+        apic_timer_preempt = sym crate::sys::proc::apic_timer_preempt,
     );
 }
 
