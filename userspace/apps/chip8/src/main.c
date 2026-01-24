@@ -677,7 +677,9 @@ int main(int argc, char **argv) {
     uint64_t last_timer = ms_now();
     const uint64_t timer_interval = 1000 / 60;
     const int cycles_per_frame = 10;
-    struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 1 * 1000 * 10 };
+    // Sleep for 12ms between batches of 10 instructions.
+    // 10 inst / 12ms ~= 833 inst/sec (Hz).
+    struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 12 * 1000 * 1000 };
     int running = 1;
 
     while (running) {
