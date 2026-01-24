@@ -276,6 +276,9 @@ impl FramebufferTerminal {
             }
             _ => {}
         }
+        if self.cursor_x >= self.width / Self::CHAR_W {
+            self.new_line();
+        }
 
         // Keep controls invisible; everything else can use the expanded font table
         let ch = if c.is_ascii_control() { b'?' } else { c };
@@ -313,7 +316,7 @@ impl FramebufferTerminal {
     fn new_line(&mut self) {
         self.cursor_x = 0;
         self.cursor_y += 1;
-        if (self.cursor_y) * 16 >= self.height {
+        if (self.cursor_y + 1) * 16 > self.height {
             self.scroll();
             self.cursor_y -= 1;
         }
@@ -371,7 +374,8 @@ impl FramebufferTerminal {
                     }
 
                     let pixel_offset = (y + row) * pitch_pixels + x; // pixel index
-                    fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf).unwrap();
+                    fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf)
+                        .unwrap();
                 }
 
                 // Optional: sync only the glyph area
