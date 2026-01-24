@@ -72,6 +72,7 @@ struct Prd {
     flags: u16, // bit15 = EOT
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Bus {
     id: u8,
@@ -272,15 +273,6 @@ impl Bus {
         }
 
         None
-    }
-
-    fn mode_str(mode: u8) -> &'static str {
-        match mode & 0xF0 {
-            0x40 => "UDMA",
-            0x20 => "MWDMA",
-            0x00 | 0x08 => "PIO",
-            _ => "UNK",
-        }
     }
 
     fn set_transfer_mode(&mut self, drive: u8, mode: u8) -> Result<(), ()> {
