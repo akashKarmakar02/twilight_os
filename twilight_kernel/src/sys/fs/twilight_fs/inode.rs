@@ -86,7 +86,7 @@ impl VfsNodeOps for TFSVfsNode {
             written += to_read;
             block_offset = 0;
             if remaining == 0 {
-                break;
+                return Ok(written);
             }
         }
 
@@ -134,7 +134,7 @@ impl VfsNodeOps for TFSVfsNode {
                 block_index += 1;
 
                 if remaining == 0 {
-                    break;
+                    return Ok(written);
                 }
             }
         }
@@ -197,7 +197,7 @@ impl VfsNodeOps for TFSVfsNode {
                     block_offset = 0;
                     block_index += 1;
                     if remaining == 0 {
-                        break;
+                        return Ok(written)
                     }
                 }
             }
