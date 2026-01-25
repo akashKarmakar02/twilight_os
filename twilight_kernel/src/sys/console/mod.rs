@@ -220,7 +220,31 @@ fn exec(cmd: &str, args: &[&str]) {
                     }
                 }
             } else {
-                println!("{}: not a command", cmd);
+                let pwd = {
+                    #[allow(static_mut_refs)]
+                    let process_table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+                    let p = process_table.get_process(crate::sys::proc::id()).unwrap();
+                    p.pwd.clone()
+                };
+
+                if let Ok(mut node) = fs.open(format!("{}/{}", pwd, cmd.replace("./", "")).as_str())
+                {
+                    let mut buf = vec![0u8; node.metadata.size];
+                    let Ok(_) = node.read(0, &mut buf) else {
+                        println!("{}: failed to read from file", cmd);
+                        return;
+                    };
+
+                    #[allow(static_mut_refs)]
+                    if let Ok(process) = Process::new(buf.clone(), unsafe { DIR.as_str() }, args, 1)
+                    {
+                        unsafe {
+                            PROCESS_TABLE.get_mut().unwrap().run(process);
+                        }
+                    }
+                } else {
+                    println!("{}: not a command", cmd);
+                }
             }
         }
     }

@@ -842,16 +842,16 @@ void editorExecuteCommand() {
 void editorProcessKeypress() {
   int c = editorReadKey();
 
-  if (E.mode == MODE_NORMAL) {
-      switch (c) {
-          case 'i':
-              E.mode = MODE_INSERT;
-              editorSetStatusMessage("-- INSERT --");
-              break;
-          case ':':
-              E.mode = MODE_COMMAND;
-              E.command_len = 0;
-              break;
+	  if (E.mode == MODE_NORMAL) {
+	      switch (c) {
+	          case 'i':
+	              E.mode = MODE_INSERT;
+	              editorSetStatusMessage("-- INSERT --");
+	              break;
+	          case ':':
+	              E.mode = MODE_COMMAND;
+	              E.command_len = 0;
+	              break;
           case 'h': editorMoveCursor(ARROW_LEFT); break;
           case 'j': editorMoveCursor(ARROW_DOWN); break;
           case 'k': editorMoveCursor(ARROW_UP); break;
@@ -910,7 +910,7 @@ void editorProcessKeypress() {
               break;
       }
       return;
-  }
+	  }
 
 	  // INSERT MODE
 	  static int quit_times = KILO_QUIT_TIMES; // Legacy cheat if someone gets stuck
@@ -919,15 +919,15 @@ void editorProcessKeypress() {
 	    case '\n':
 	      editorInsertNewline();
 	      break;
-    case '\x1b': // Escape -> Normal
-        E.mode = MODE_NORMAL;
-        editorSetStatusMessage("");
-        break;
-    case CTRL_KEY('q'):
-      // Keep legacy quit just in case
-      if (E.dirty && quit_times > 0) {
-        editorSetStatusMessage("WARNING!!! File has unsaved changes. "
-          "Press Ctrl-Q %d more times to quit.", quit_times);
+	    case '\x1b': // Escape -> Normal
+	        E.mode = MODE_NORMAL;
+	        editorSetStatusMessage("");
+	        break;
+	    case CTRL_KEY('q'):
+	      // Keep legacy quit just in case
+	      if (E.dirty && quit_times > 0) {
+	        editorSetStatusMessage("WARNING!!! File has unsaved changes. "
+	          "Press Ctrl-Q %d more times to quit.", quit_times);
         quit_times--;
         return;
       }

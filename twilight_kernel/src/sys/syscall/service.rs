@@ -7,7 +7,7 @@ use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
 use crate::sys::proc::{FdEntry, OpenFile, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
 use crate::task::executor::halt;
-use crate::{logger, print, sys};
+use crate::{logger, print, serial_println, sys};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -679,6 +679,7 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
                     return -(ENOTDIR as i64);
                 }
             } else {
+                serial_println!("{}", full_path);
                 return -(ENOENT as i64);
             }
 

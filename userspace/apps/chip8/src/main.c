@@ -593,31 +593,27 @@ static void draw_rect(uint32_t *buf, uint32_t width, uint32_t height,
 }
 
 static void render_framebuffer(uint32_t *fb, uint32_t width, uint32_t height, const Chip8 *c) {
-    size_t total = (size_t)width * (size_t)height;
-    uint32_t bg = 0xFF10121A;
-    uint32_t fg = 0xFF50FA7B;
-    for (size_t i = 0; i < total; ++i) {
-        fb[i] = bg;
-    }
-
+    // 1. Calculate the scale and offsets FIRST
     int scale_x = width / c->screen_width;
     int scale_y = height / c->screen_height;
     int scale = scale_x < scale_y ? scale_x : scale_y;
-    if (scale < 1) {
-        scale = 1;
-    }
+    if (scale < 1) scale = 1;
+
     int disp_w = scale * c->screen_width;
     int disp_h = scale * c->screen_height;
     int off_x = (int)(width - disp_w) / 2;
     int off_y = (int)(height - disp_h) / 2;
 
+    uint32_t bg = 0xFF10121A;
+    uint32_t fg = 0xFF50FA7B;
+
+    // 2. Only iterate over the emulator's screen area, not the whole monitor
     for (uint16_t y = 0; y < c->screen_height; ++y) {
         for (uint16_t x = 0; x < c->screen_width; ++x) {
             size_t idx = (size_t)y * c->screen_width + x;
             uint32_t color = c->gfx[idx] ? fg : bg;
-            if (!c->gfx[idx]) {
-                continue;
-            }
+
+            // Draw the scaled pixel (rect) directly
             draw_rect(fb, width, height,
                       off_x + x * scale,
                       off_y + y * scale,

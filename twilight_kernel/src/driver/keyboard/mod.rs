@@ -379,6 +379,9 @@ pub fn keyboard_interrupt(scancode: u8) {
                     }
                 }
                 DecodedKey::RawKey(key) => match key {
+                    KeyCode::Escape => {
+                        put_char_in_tty(b'\x1b');
+                    }
                     KeyCode::ArrowUp => {
                         for c in "\x1b[A".chars() {
                             put_char_in_tty(c as u8);
