@@ -5,8 +5,10 @@ use crate::sys::fs::init;
 use crate::sys::fs::partition::{self, PartitionEntry};
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::sys::fs::twilight_fs::inode::Inode;
+use crate::print;
 use crate::println;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp;
 use lazy_static::lazy_static;
@@ -113,23 +115,134 @@ pub fn main() {
         }
     };
 
-    // Clone to avoid consuming the global initramfs iterator (rootfs mount also iterates it).
-    let mut initramfs = INITRAMFS.lock().clone();
     if need_copy {
+        // Clone to avoid consuming the global initramfs iterator (rootfs mount also iterates it).
+        let mut scan = INITRAMFS.lock().clone();
+        let mut total_files: u64 = 0;
+        let mut total_bytes: u64 = 0;
+
+        while let Some(cpio_res) = scan.next() {
+            if let Ok(entry) = cpio_res {
+                if entry.header.is_regular_file() {
+                    total_files += 1;
+                    total_bytes += entry.data.len() as u64;
+                }
+            }
+        }
+
+        if total_files == 0 {
+            println!("install: nothing to copy");
+            return;
+        }
+
+        print!("\x1b[?25l"); // hide cursor
+
+        let mut initramfs = INITRAMFS.lock().clone();
+        let mut done_files: u64 = 0;
+        let mut done_bytes: u64 = 0;
+
+        render_progress(done_files, total_files, done_bytes, total_bytes, None);
+
         while let Some(cpio_res) = initramfs.next() {
             match cpio_res {
                 Ok(entry) => {
                     if entry.header.is_regular_file() {
-                        copy_file(
-                            format!("/{}", entry.filename().unwrap()).as_str(),
-                            entry.data,
-                            true,
-                        );
+                        let name = entry.filename().unwrap_or("");
+                        done_files += 1;
+                        done_bytes += entry.data.len() as u64;
+                        render_progress(done_files, total_files, done_bytes, total_bytes, Some(name));
+
+                        copy_file(format!("/{}", name).as_str(), entry.data, false);
+
+                        // Re-render in case copy_file printed messages.
+                        render_progress(done_files, total_files, done_bytes, total_bytes, Some(name));
                     }
                 }
                 Err(_e) => {}
             }
         }
+
+        render_progress(total_files, total_files, done_bytes, total_bytes, Some("done"));
+        print!("\n\x1b[?25h"); // newline + show cursor
+    }
+}
+
+fn render_progress(
+    done_files: u64,
+    total_files: u64,
+    done_bytes: u64,
+    total_bytes: u64,
+    current: Option<&str>,
+) {
+    let pct = if total_files == 0 {
+        100
+    } else {
+        ((done_files * 100) / total_files).min(100)
+    };
+
+    let width: usize = 32;
+    let filled = ((pct as usize) * width) / 100;
+    let mut bar = String::with_capacity(width);
+    for i in 0..width {
+        bar.push(if i < filled { '#' } else { '.' });
+    }
+
+    let cur = current.unwrap_or("");
+    let cur = tail_str(cur, 40);
+
+    print!(
+        "\r\x1b[2Kinstall: [{}] {:3}% {}/{} {} / {}  {}",
+        bar,
+        pct,
+        done_files,
+        total_files,
+        fmt_bytes(done_bytes),
+        fmt_bytes(total_bytes),
+        cur
+    );
+}
+
+fn tail_str(s: &str, max_chars: usize) -> &str {
+    if max_chars == 0 {
+        return "";
+    }
+
+    let mut count = 0usize;
+    for _ in s.chars() {
+        count += 1;
+        if count > max_chars {
+            break;
+        }
+    }
+    if count <= max_chars {
+        return s;
+    }
+
+    let mut seen = 0usize;
+    let mut start = 0usize;
+    for (idx, _) in s.char_indices().rev() {
+        seen += 1;
+        if seen == max_chars {
+            start = idx;
+            break;
+        }
+    }
+    &s[start..]
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    if n < KIB {
+        format!("{} B", n)
+    } else if n < MIB {
+        format!("{} KiB", n / KIB)
+    } else if n < GIB {
+        format!("{} MiB", n / MIB)
+    } else {
+        format!("{} GiB", n / GIB)
     }
 }
 
