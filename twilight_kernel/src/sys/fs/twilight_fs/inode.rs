@@ -207,116 +207,156 @@ impl VfsNodeOps for TFSVfsNode {
     }
 
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()> {
-        let block_size = 2048;
-        let mut bytes_written = 0;
-        let mut remaining = data.len();
+        const BLOCK_SIZE: usize = 2048;
 
-        let zones = self.inode.zones;
+        let mut bytes_written: usize = 0;
+        let mut remaining: usize = data.len();
+        let mut pos: usize = lba;
+        let mut direct_zones = self.inode.zones;
 
-        for i in 0..zones.len() {
-            if lba / 2048 < i {
-                continue;
-            }
-            if remaining == 0 {
+        // ---- direct blocks ----
+        while remaining > 0 {
+            let block_idx = pos / BLOCK_SIZE;
+            if block_idx >= direct_zones.len() {
                 break;
             }
 
-            if self.inode.zones[i] == 0 {
-                let zones = self.ctx.lock().alloc_zone().unwrap();
-                self.inode.zones[i] = zones;
-            }
+            let offset_in_block = pos % BLOCK_SIZE;
+            let max_copy = BLOCK_SIZE - offset_in_block;
+            let copy_size = core::cmp::min(remaining, max_copy);
 
-            let block = self.inode.zones[i];
-            let mut buffer = [0u8; 2048];
-
-            let copy_size = core::cmp::min(remaining, block_size);
-            if lba != 0 && lba > i * 2048 {
-                if let Err(_) = read_tfs_block(device.lock().as_mut(), block, &mut buffer) {
+            if direct_zones[block_idx] == 0 {
+                let zone = self.ctx.lock().alloc_zone().unwrap();
+                direct_zones[block_idx] = zone;
+                let zero_block = [0u8; BLOCK_SIZE];
+                if write_tfs_block(device.lock().as_mut(), zone, &zero_block).is_err() {
                     return Err(());
                 }
-                buffer[(lba % 2048)..((lba % 2048) + copy_size)]
-                    .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
-            } else {
-                buffer[..copy_size]
-                    .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
             }
-            if let Err(_) = write_tfs_block(device.lock().as_mut(), block, &buffer) {
+
+            let zone = direct_zones[block_idx];
+            let mut buffer = [0u8; BLOCK_SIZE];
+
+            // Preserve existing content for partial-block writes.
+            if offset_in_block != 0 || copy_size < BLOCK_SIZE {
+                if read_tfs_block(device.lock().as_mut(), zone, &mut buffer).is_err() {
+                    return Err(());
+                }
+            }
+
+            buffer[offset_in_block..offset_in_block + copy_size]
+                .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+
+            if write_tfs_block(device.lock().as_mut(), zone, &buffer).is_err() {
                 return Err(());
             }
 
             bytes_written += copy_size;
             remaining -= copy_size;
+            pos += copy_size;
         }
 
+        // ---- single indirect blocks ----
         if remaining > 0 {
+            let ind_cap = (BLOCK_SIZE / 4) - 1;
+            let direct_blocks = direct_zones.len();
+
             if self.inode.indirect_zones == 0 {
-                let zones = self.ctx.lock().alloc_zone().unwrap();
-                self.inode.indirect_zones = zones;
-                let zero_buf = [0u8; 2048];
-                if let Err(_) = write_tfs_block(device.lock().as_mut(), zones, &zero_buf) {
+                let zone = self.ctx.lock().alloc_zone().unwrap();
+                self.inode.indirect_zones = zone;
+                let zero_block = [0u8; BLOCK_SIZE];
+                if write_tfs_block(device.lock().as_mut(), zone, &zero_block).is_err() {
                     return Err(());
                 }
             }
 
-            let mut indirect_block = [0u8; 2048];
-            self.ctx
-                .lock()
-                .read_block(self.inode.indirect_zones, &mut indirect_block)?;
+            let mut indirect_block = [0u8; BLOCK_SIZE];
+            if read_tfs_block(
+                device.lock().as_mut(),
+                self.inode.indirect_zones,
+                &mut indirect_block,
+            )
+            .is_err()
+            {
+                return Err(());
+            }
 
-            let zone_entries = 2048 / 4;
-            for i in 0..(zone_entries - 1) {
-                if lba / 2048 < i + 7 {
-                    continue;
+            let mut indirect_dirty = false;
+
+            while remaining > 0 {
+                let logical_block = pos / BLOCK_SIZE;
+                if logical_block < direct_blocks {
+                    break;
                 }
-                if remaining == 0 {
+                let idx = logical_block - direct_blocks;
+                if idx >= ind_cap {
                     break;
                 }
 
+                let offset_in_block = pos % BLOCK_SIZE;
+                let max_copy = BLOCK_SIZE - offset_in_block;
+                let copy_size = core::cmp::min(remaining, max_copy);
+
+                let entry_off = idx * 4;
                 let entry = u32::from_le_bytes([
-                    indirect_block[i * 4],
-                    indirect_block[i * 4 + 1],
-                    indirect_block[i * 4 + 2],
-                    indirect_block[i * 4 + 3],
+                    indirect_block[entry_off],
+                    indirect_block[entry_off + 1],
+                    indirect_block[entry_off + 2],
+                    indirect_block[entry_off + 3],
                 ]);
 
                 let zone = if entry == 0 {
-                    let zones = self.ctx.lock().alloc_zone().unwrap();
-                    indirect_block[i * 4..i * 4 + 4].copy_from_slice(&zones.to_le_bytes());
-                    zones
+                    let new_zone = self.ctx.lock().alloc_zone().unwrap();
+                    indirect_block[entry_off..entry_off + 4].copy_from_slice(&new_zone.to_le_bytes());
+                    let zero_block = [0u8; BLOCK_SIZE];
+                    if write_tfs_block(device.lock().as_mut(), new_zone, &zero_block).is_err() {
+                        return Err(());
+                    }
+                    indirect_dirty = true;
+                    new_zone
                 } else {
                     entry
                 };
 
-                let mut buffer = [0u8; 2048];
-                let copy_size = core::cmp::min(remaining, block_size);
-                if lba != 0 && lba > (i + 7) * 2048 {
-                    if let Err(_) = read_tfs_block(device.lock().as_mut(), zone, &mut buffer) {
+                let mut buffer = [0u8; BLOCK_SIZE];
+
+                if offset_in_block != 0 || copy_size < BLOCK_SIZE {
+                    if read_tfs_block(device.lock().as_mut(), zone, &mut buffer).is_err() {
                         return Err(());
                     }
-                    buffer[(lba % 2048)..((lba % 2048) + copy_size)]
-                        .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
-                } else {
-                    buffer[..copy_size]
-                        .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
                 }
-                if let Err(_) = write_tfs_block(device.lock().as_mut(), zone, &buffer) {
+
+                buffer[offset_in_block..offset_in_block + copy_size]
+                    .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+
+                if write_tfs_block(device.lock().as_mut(), zone, &buffer).is_err() {
                     return Err(());
                 }
 
                 bytes_written += copy_size;
                 remaining -= copy_size;
+                pos += copy_size;
+            }
+
+            if indirect_dirty {
+                if write_tfs_block(
+                    device.lock().as_mut(),
+                    self.inode.indirect_zones,
+                    &indirect_block,
+                )
+                .is_err()
+                {
+                    return Err(());
+                }
             }
         }
 
-        if remaining > 0 {
-            const BLOCK_SIZE: usize = 2048;
-            let zone_entries = BLOCK_SIZE / 4;
-            let ind_cap = zone_entries - 1; // you iterate 0..(zone_entries - 1)
-
-            let zones = self.inode.zones;
-
-            let direct_bytes = zones.len() * BLOCK_SIZE; // 7 * 2048
-            let single_bytes = ind_cap * BLOCK_SIZE; // single-indirect payload
+	        if remaining > 0 {
+	            const BLOCK_SIZE: usize = 2048;
+	            let zone_entries = BLOCK_SIZE / 4;
+	            let ind_cap = zone_entries - 1; // you iterate 0..(zone_entries - 1)
+	            let direct_bytes = direct_zones.len() * BLOCK_SIZE; // 7 * 2048
+	            let single_bytes = ind_cap * BLOCK_SIZE; // single-indirect payload
 
             // lba inside the "double-indirect region"
             let (first_block_idx, first_block_off) = if lba > direct_bytes + single_bytes {
@@ -469,7 +509,11 @@ impl VfsNodeOps for TFSVfsNode {
             }
         }
 
-        self.inode.size = (bytes_written + lba) as u64;
+        let end_pos = bytes_written + lba;
+        if end_pos > self.inode.size as usize {
+            self.inode.size = end_pos as u64;
+        }
+        self.inode.zones = direct_zones;
         self.ctx
             .lock()
             .write_inode_twilight(self.inode_no, self.inode)
