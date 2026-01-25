@@ -1,20 +1,138 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>TwilightOS</title>
-    <link rel="stylesheet" href="/style.css" />
-  </head>
-  <body>
-    <main class="card">
-      <h1>TwilightOS httpd</h1>
-      <p>If you can read this page, the userspace HTTP server is working.</p>
-      <p><a href="/missing.html">Try a 404</a></p>
-      <button id="btn">Click</button>
-      <pre id="out"></pre>
-    </main>
-    <script src="/app.js"></script>
-  </body>
-</html>
 
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TwilightOS</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="container topbar__inner">
+      <a class="brand" href="/">
+        TwilightOS
+      </a>
+
+      <nav class="nav" aria-label="Primary">
+        <a href="#features">Features</a>
+        <a href="#kernel">Kernel</a>
+        <a href="/userspace/">Userspace</a>
+      </nav>
+
+      <a class="btn" href="#start">Get Started</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="container">
+        <span class="hero__eyebrow">Release v0.1.0</span>
+        <h1 class="hero__title">Embedded Power.<br>Desktop Feel.</h1>
+        <p class="hero__subtitle">
+          A self-hosting operating system with native C compilation, dynamic binary loading, and a custom robust network
+          stack.
+        </p>
+
+        <div class="hero__cta">
+          <a class="btn" href="#features">Explore Features</a>
+          <a class="btn btn--ghost" href="#kernel" style="margin-left: 10px;">Kernel Specs</a>
+        </div>
+
+        <div class="hero__visual">
+          <div class="glass-panel">
+            <div class="glass-row">
+              <span>Compiler</span>
+              <span>TCC (Self-Hosting)</span>
+            </div>
+            <div class="glass-row">
+              <span>Binaries</span>
+              <span>ELF Dynamic (.so)</span>
+            </div>
+            <div class="glass-row">
+              <span>Filesystem</span>
+              <span>TwilightFS + VFS</span>
+            </div>
+            <div class="glass-row">
+              <span>Networking</span>
+              <span>TCP/IP Stack</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="section">
+      <div class="container">
+        <h2 style="text-align: center; margin-bottom: 40px;">Userspace Redefined.</h2>
+
+        <div class="grid">
+          <article class="card">
+            <h3>Native Development</h3>
+            <p>Compile C code directly on the OS using <code>tcc</code>. No cross-compiler needed for simple apps.</p>
+          </article>
+          <article class="card">
+            <h3>Scripting Ready</h3>
+            <p>Prototype fast with <code>tpy</code>, a built-in Python-like interpreter for system scripting.</p>
+          </article>
+          <article class="card">
+            <h3>Full Networking</h3>
+            <p>Browse with <code>curl</code>, host with <code>httpd</code>. Real TCP/UDP implementation.</p>
+          </article>
+          <article class="card">
+            <h3>Unix Utilities</h3>
+            <p>Feel at home with pipe-ready <code>grep</code>, <code>cat</code>, <code>ls</code>, and a modal
+              <code>vi</code> editor.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="kernel" class="section" style="background: var(--bg-secondary);">
+      <div class="container">
+        <div style="text-align: center; margin-bottom: 40px;">
+          <h2>Kernel Architecture.</h2>
+          <p style="color: var(--text-secondary); margin-top: 10px; font-size: 19px;">
+            Built from scratch in Rust for safety and performance.
+          </p>
+        </div>
+
+        <div class="glass-panel" style="margin: 0 auto;">
+          <div class="glass-row">
+            <span>Init System</span>
+            <span>Work in progress</span>
+          </div>
+          <div class="glass-row">
+            <span>Drivers</span>
+            <span>ATA, VirtIO, RTL8139, PCNET</span>
+          </div>
+          <div class="glass-row">
+            <span>Memory</span>
+            <span>Paging, Heap, User/Kernel Split</span>
+          </div>
+          <div class="glass-row">
+            <span>Graphics</span>
+            <span>UEFI Framebuffer Compositor</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <div class="container footer__inner">
+      <div>
+        Copyright © 2026 TwilightOS. All rights reserved.
+      </div>
+      <div class="footer-links">
+        <a href="#">Source Code</a>
+        <a href="#">Documentation</a>
+      </div>
+    </div>
+  </footer>
+</body>
+
+</html>

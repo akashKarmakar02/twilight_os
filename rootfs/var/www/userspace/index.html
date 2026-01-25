@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Userspace Documentation - TwilightOS</title>
+    <link rel="stylesheet" href="/style.css" />
+</head>
+
+<body>
+    <header class="topbar">
+        <div class="container topbar__inner">
+            <a class="brand" href="/">
+                TwilightOS
+            </a>
+
+            <nav class="nav" aria-label="Primary">
+                <a href="/">Home</a>
+                <a href="/userspace/" style="color: var(--accent); opacity: 1;">Userspace</a>
+            </nav>
+
+            <a class="btn" href="#">v0.1.0</a>
+        </div>
+    </header>
+
+    <div class="docs-layout">
+        <!-- Sidebar -->
+        <aside class="docs-sidebar">
+            <div class="menu-group">
+                <div class="menu-title">Development</div>
+                <div class="menu-list">
+                    <a class="menu-item active" onclick="showDoc('tcc', this)">TCC Compiler</a>
+                    <a class="menu-item" onclick="showDoc('tpy', this)">TPY Interpreter</a>
+                    <a class="menu-item" onclick="showDoc('make', this)">Make</a>
+                </div>
+            </div>
+
+            <div class="menu-group">
+                <div class="menu-title">Productivity</div>
+                <div class="menu-list">
+                    <a class="menu-item" onclick="showDoc('vi', this)">Vi Editor</a>
+                    <a class="menu-item" onclick="showDoc('httpd', this)">HTTP Server</a>
+                    <a class="menu-item" onclick="showDoc('curl', this)">Curl</a>
+                    <a class="menu-item" onclick="showDoc('twifetch', this)">Twifetch</a>
+                </div>
+            </div>
+
+            <div class="menu-group">
+                <div class="menu-title">Core Utilities</div>
+                <div class="menu-list">
+                    <a class="menu-item" onclick="showDoc('ls', this)">ls</a>
+                    <a class="menu-item" onclick="showDoc('cat', this)">cat</a>
+                    <a class="menu-item" onclick="showDoc('grep', this)">grep</a>
+                    <a class="menu-item" onclick="showDoc('mkdir', this)">mkdir</a>
+                    <a class="menu-item" onclick="showDoc('rm', this)">rm</a>
+                    <a class="menu-item" onclick="showDoc('touch', this)">touch</a>
+                    <a class="menu-item" onclick="showDoc('headtail', this)">head / tail</a>
+                    <a class="menu-item" onclick="showDoc('date', this)">date</a>
+                    <a class="menu-item" onclick="showDoc('sleep', this)">sleep</a>
+                </div>
+            </div>
+            <div class="menu-group">
+                <div class="menu-title">Games</div>
+                <div class="menu-list">
+                    <a class="menu-item" onclick="showDoc('chip8', this)">CHIP-8</a>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="docs-content">
+
+            <!-- TCC -->
+            <article id="doc-tcc" class="doc-section active">
+                <div class="doc-header">
+                    <h1 class="doc-title">Tiny C Compiler</h1>
+                    <div class="doc-meta">Path: /bin/tcc • Version: 0.9.27</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>
+                        A self-hosting C compiler that runs natively on TwilightOS. It allows you to compile and execute
+                        C programs directly on the system without needing a cross-compiler on your host machine.
+                    </p>
+                </div>
+                <div class="doc-block">
+                    <h3>Usage</h3>
+                    <div class="code">
+                        $ tcc hello.c -o hello<br>
+                        $ ./hello<br>
+                        <br>
+                        # Or run directly from source<br>
+                        $ tcc -run hello.c
+                    </div>
+                </div>
+                <div class="doc-block">
+                    <h3>Implementation</h3>
+                    <p>
+                        Ported to link against the <code>musl</code> libc present in <code>/lib</code>. It finds headers
+                        in <code>/usr/include</code> and library files in <code>/usr/lib</code> provided by the
+                        initramfs.
+                    </p>
+                </div>
+            </article>
+
+            <!-- TPY -->
+            <article id="doc-tpy" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">TPY Interpreter</h1>
+                    <div class="doc-meta">Path: /bin/tpy • Type: Scripting</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>
+                        A lightweight, Python-syntax compatible interpreter designed for embedded scripting. It supports
+                        basic control flow (if/else, loops), functions, and string manipulation.
+                    </p>
+                </div>
+                <div class="doc-block">
+                    <h3>Usage</h3>
+                    <div class="code">
+                        $ tpy script.py<br>
+                        $ tpy -c "print('Hello from TPY')"
+                    </div>
+                </div>
+            </article>
+
+            <!-- MAKE -->
+            <article id="doc-make" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">Make</h1>
+                    <div class="doc-meta">Path: /bin/make • Type: Build Tool</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>
+                        A simplified version of GNU Make. It parses <code>Makefile</code>s to automate build processes,
+                        determining dependency graphs and executing recipes.
+                    </p>
+                </div>
+            </article>
+
+            <!-- Vi -->
+            <article id="doc-vi" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">Vi Text Editor</h1>
+                    <div class="doc-meta">Path: /bin/vi • Mode: TUI</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>
+                        A modal text editor implementing the core functionality of the classic Unix <code>vi</code>. It
+                        interacts directly with the kernel TTY driver for VT100 escape sequences.
+                    </p>
+                </div>
+                <div class="doc-block">
+                    <h3>Key Bindings</h3>
+                    <div class="grid" style="grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 20px;">
+                        <div class="card" style="padding: 15px;"><code>i</code> - Insert Mode</div>
+                        <div class="card" style="padding: 15px;"><code>Esc</code> - Command Mode</div>
+                        <div class="card" style="padding: 15px;"><code>:w</code> - Save</div>
+                        <div class="card" style="padding: 15px;"><code>:q</code> - Quit</div>
+                        <div class="card" style="padding: 15px;"><code>dd</code> - Delete Line</div>
+                        <div class="card" style="padding: 15px;"><code>x</code> - Delete Char</div>
+                    </div>
+                </div>
+            </article>
+
+            <!-- HTTPD -->
+            <article id="doc-httpd" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">HTTP Daemon</h1>
+                    <div class="doc-meta">Path: /bin/httpd • Port: 80</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>
+                        A non-blocking, single-threaded web server. It uses <code>poll()</code> to multiplex connections
+                        efficiently. It serves static files from <code>/var/www</code>.
+                    </p>
+                </div>
+                <div class="doc-block">
+                    <h3>Features</h3>
+                    <ul class="bullets">
+                        <li><b>MIME Types:</b> Auto-detects .html, .css, .js, .png, .jpg.</li>
+                        <li><b>Directory Index:</b> Automatically serves <code>index.html</code> for directory requests
+                            (e.g. <code>/userspace</code>).</li>
+                        <li><b>Non-blocking:</b> Handles multiple concurrent connections without threads.</li>
+                    </ul>
+                </div>
+            </article>
+
+            <!-- CURL -->
+            <article id="doc-curl" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">Curl</h1>
+                    <div class="doc-meta">Path: /bin/curl • Protocol: HTTP/1.1</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>
+                        A command-line tool for transferring data with URLs. It uses the kernel's TCP stack to resolve
+                        DNS and perform HTTP GET requests.
+                    </p>
+                </div>
+                <div class="doc-block">
+                    <h3>Usage</h3>
+                    <div class="code">
+                        $ curl http://example.com<br>
+                        $ curl -v http://google.com
+                    </div>
+                </div>
+            </article>
+
+            <!-- Twifetch -->
+            <article id="doc-twifetch" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">Twifetch</h1>
+                    <div class="doc-meta">Path: /bin/twifetch • Type: System Info</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>
+                        A system information fetching tool. It reads from <code>/proc/cpuinfo</code>,
+                        <code>/proc/meminfo</code>, and <code>/proc/uptime</code> to display system stats alongside
+                        ASCII art.
+                    </p>
+                </div>
+            </article>
+
+            <!-- LS -->
+            <article id="doc-ls" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">ls</h1>
+                    <div class="doc-meta">Path: /bin/ls</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>Lists directory contents using the <code>getdents64</code> syscall. Supports colored output for
+                        directories (blue) and character devices (yellow).</p>
+                </div>
+                <div class="doc-block">
+                    <h3>Flags</h3>
+                    <ul class="bullets">
+                        <li><code>-l</code> : Long format (permissions, size, owner).</li>
+                        <li><code>-a</code> : Show hidden files (starting with dot).</li>
+                    </ul>
+                </div>
+            </article>
+
+            <!-- CAT -->
+            <article id="doc-cat" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">cat</h1>
+                    <div class="doc-meta">Path: /bin/cat</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>Concatenates and prints files to standard output. Supports file creation via redirection syntax
+                        handled by the executable itself.</p>
+                </div>
+                <div class="doc-block">
+                    <h3>Usage</h3>
+                    <div class="code">
+                        $ cat file.txt<br>
+                        $ cat > newfile.txt "Hello World"
+                    </div>
+                </div>
+            </article>
+
+            <!-- GREP -->
+            <article id="doc-grep" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">grep</h1>
+                    <div class="doc-meta">Path: /bin/grep</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>Searches for patterns in files. Supports basic string matching.</p>
+                </div>
+            </article>
+
+            <!-- MKDIR -->
+            <article id="doc-mkdir" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">mkdir</h1>
+                    <div class="doc-meta">Path: /bin/mkdir</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>Creates directories. Supports creating parent directories as needed.</p>
+                </div>
+                <div class="doc-block">
+                    <h3>Flags</h3>
+                    <ul class="bullets">
+                        <li><code>-p</code> : Create intermediate directories (e.g., <code>mkdir -p a/b/c</code>).</li>
+                    </ul>
+                </div>
+            </article>
+
+            <!-- RM -->
+            <article id="doc-rm" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">rm</h1>
+                    <div class="doc-meta">Path: /bin/rm</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>Removes files using the <code>unlink</code> syscall.</p>
+                </div>
+            </article>
+
+            <!-- TOUCH -->
+            <article id="doc-touch" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">touch</h1>
+                    <div class="doc-meta">Path: /bin/touch</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>Updates the access and modification times of a file to the current time. Creates the file if it
+                        does not exist.</p>
+                </div>
+            </article>
+
+            <!-- HEAD/TAIL -->
+            <article id="doc-headtail" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">head / tail</h1>
+                    <div class="doc-meta">Path: /bin/head, /bin/tail</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>Outputs the first (head) or last (tail) part of a file.</p>
+                </div>
+                <div class="doc-block">
+                    <h3>Flags</h3>
+                    <ul class="bullets">
+                        <li><code>-n N</code> : Output N lines (default 10).</li>
+                    </ul>
+                </div>
+            </article>
+
+            <!-- DATE -->
+            <article id="doc-date" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">date</h1>
+                    <div class="doc-meta">Path: /bin/date</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>Displays the current system time. It reads from the kernel's real-time clock (RTC) and formats it
+                        according to the Indian Standard Time (IST, UTC+5:30).</p>
+                </div>
+            </article>
+
+            <!-- SLEEP -->
+            <article id="doc-sleep" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">sleep</h1>
+                    <div class="doc-meta">Path: /bin/sleep</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>Pauses execution for a specified number of seconds using the <code>nanosleep</code> syscall.</p>
+                </div>
+            </article>
+
+            <!-- CHIP8 -->
+            <article id="doc-chip8" class="doc-section">
+                <div class="doc-header">
+                    <h1 class="doc-title">CHIP-8 Emulator</h1>
+                    <div class="doc-meta">Path: /bin/chip8 • Type: Emulator</div>
+                </div>
+                <div class="doc-block">
+                    <h3>Overview</h3>
+                    <p>
+                        A fully functional emulator for the CHIP-8 virtual machine. It renders graphics using braille
+                        patterns or block characters in the terminal.
+                    </p>
+                </div>
+                <div class="doc-block">
+                    <h3>Usage</h3>
+                    <div class="code">
+                        $ chip8 pong.rom
+                    </div>
+                </div>
+            </article>
+
+        </main>
+    </div>
+
+    <script>
+        function showDoc(id, el) {
+            // Hide all sections
+            document.querySelectorAll('.doc-section').forEach(s => s.classList.remove('active'));
+            // Remove active class from menu items
+            document.querySelectorAll('.menu-item').forEach(m => m.classList.remove('active'));
+
+            // Show target
+            document.getElementById('doc-' + id).classList.add('active');
+            // Highlight menu
+            el.classList.add('active');
+        }
+    </script>
+</body>
+
+</html>

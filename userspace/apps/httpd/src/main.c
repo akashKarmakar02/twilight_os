@@ -208,8 +208,17 @@ static void handle_client(int cfd) {
 
   const char *ctype = content_type_for_path(fs_path);
   if (!ctype) {
-    try_send_404(cfd);
-    return;
+    // If no extension, try appending /index.html and retry
+    size_t len = strlen(fs_path);
+    if (len + 12 < sizeof(fs_path)) {
+       strncat(fs_path, "/index.html", sizeof(fs_path) - len - 1);
+       ctype = content_type_for_path(fs_path);
+    }
+    
+    if (!ctype) {
+        try_send_404(cfd);
+        return;
+    }
   }
 
   int test = open(fs_path, O_RDONLY);
