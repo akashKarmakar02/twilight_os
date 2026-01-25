@@ -18,6 +18,14 @@ static void write_all(int fd, const void *buf, size_t len) {
     if (n < 0) {
       if (errno == EINTR)
         continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        struct pollfd wfds;
+        wfds.fd = fd;
+        wfds.events = POLLOUT;
+        wfds.revents = 0;
+        (void)poll(&wfds, 1, 5000);
+        continue;
+      }
       break;
     }
     if (n == 0)
@@ -54,6 +62,16 @@ static const char *content_type_for_path(const char *path) {
     return "text/css; charset=utf-8";
   if (strcmp(dot, ".js") == 0)
     return "application/javascript; charset=utf-8";
+  if (strcmp(dot, ".png") == 0)
+    return "image/png";
+  if (strcmp(dot, ".jpg") == 0 || strcmp(dot, ".jpeg") == 0)
+    return "image/jpeg";
+  if (strcmp(dot, ".svg") == 0)
+    return "image/svg+xml; charset=utf-8";
+  if (strcmp(dot, ".ico") == 0)
+    return "image/x-icon";
+  if (strcmp(dot, ".txt") == 0)
+    return "text/plain; charset=utf-8";
   return NULL;
 }
 
@@ -92,26 +110,23 @@ static void build_fs_path(char *out, size_t out_cap, const char *url_path) {
   }
 }
 
-static void send_file(int cfd, const char *fs_path, const char *ctype) {
+// Stream a file to the client. Intentionally omits Content-Length because the
+// kernel's file offset/seek semantics can vary; closing the connection is the
+// end-of-body signal.
+static void send_file(int cfd, int code, const char *reason,
+                      const char *fs_path, const char *ctype) {
   int f = open(fs_path, O_RDONLY);
   if (f < 0) {
     return;
   }
-  off_t end = lseek(f, 0, 2);
-  if (end < 0) {
-    close(f);
-    return;
-  }
-  (void)lseek(f, 0, 0);
 
   char hdr[512];
   int hn = snprintf(hdr, sizeof(hdr),
-                    "HTTP/1.1 200 OK\r\n"
+                    "HTTP/1.1 %d %s\r\n"
                     "Connection: close\r\n"
                     "Content-Type: %s\r\n"
-                    "Content-Length: %ld\r\n"
                     "\r\n",
-                    ctype, (long)end);
+                    code, reason, ctype);
   if (hn > 0)
     write_all(cfd, hdr, (size_t)hn);
 
@@ -137,12 +152,13 @@ static void try_send_404(int cfd) {
   int f = open(p, O_RDONLY);
   if (f >= 0) {
     close(f);
-    send_file(cfd, p, ctype);
+    send_file(cfd, 404, "Not Found", p, ctype);
     return;
   }
 
-  send_simple(cfd, 404, "Not Found", ctype,
-              "<!doctype html><html><body><h1>404 Not Found</h1></body></html>\n");
+  send_simple(
+      cfd, 404, "Not Found", ctype,
+      "<!doctype html><html><body><h1>404 Not Found</h1></body></html>\n");
 }
 
 static void handle_client(int cfd) {
@@ -203,7 +219,7 @@ static void handle_client(int cfd) {
   }
   close(test);
 
-  send_file(cfd, fs_path, ctype);
+  send_file(cfd, 200, "OK", fs_path, ctype);
 }
 
 int main(void) {
@@ -220,7 +236,8 @@ int main(void) {
     (void)fcntl(s, F_SETFL, fl | O_NONBLOCK);
   }
 
-  // best-effort reuseaddr; kernel currently treats it as a no-op but returns success.
+  // best-effort reuseaddr; kernel currently treats it as a no-op but returns
+  // success.
   int one = 1;
   (void)setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
@@ -283,6 +300,14 @@ int main(void) {
           break;
         break;
       }
+
+      // Ensure client sockets are blocking; the listen socket is O_NONBLOCK so
+      // accept can be drained.
+      int cfl = fcntl(cfd, F_GETFL, 0);
+      if (cfl >= 0 && (cfl & O_NONBLOCK)) {
+        (void)fcntl(cfd, F_SETFL, cfl & ~O_NONBLOCK);
+      }
+
       handle_client(cfd);
       close(cfd);
     }
