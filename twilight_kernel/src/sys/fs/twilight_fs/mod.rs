@@ -439,7 +439,13 @@ impl TwilightFs {
 
     pub fn allocate_zone(&mut self) -> Result<u32, TfsError> {
         let bits_per_block = self.superblock.block_size as usize * 8;
-        let zmap_start = self.superblock.imap_blocks + 2;
+        // Layout: block 0 superblock, then imap, then zmap, then inode table.
+        // So zmap starts right after the imap.
+        let zmap_start = self.superblock.imap_blocks + 1;
+        let max_data_zones = self
+            .superblock
+            .zones
+            .saturating_sub(self.superblock.first_data_zone);
 
         let mut buf = [0u8; FS_BLOCK_SIZE];
         for i in 0..self.superblock.zmap_blocks {
@@ -451,6 +457,10 @@ impl TwilightFs {
                 if buf[byte_idx] != 0xFF {
                     for bit in 0..8 {
                         if buf[byte_idx] & (1 << bit) == 0 {
+                            let zone = i * bits_per_block as u32 + (byte_idx * 8 + bit) as u32;
+                            if zone >= max_data_zones {
+                                return Err(TfsError::NoSpaceLeft);
+                            }
                             buf[byte_idx] |= 1 << bit;
                             if write_tfs_block(self.device.lock().as_mut(), zmap_start + i, &buf)
                                 .is_err()
@@ -458,7 +468,6 @@ impl TwilightFs {
                                 return Err(TfsError::IoError);
                             }
 
-                            let zone = i * bits_per_block as u32 + (byte_idx * 8 + bit) as u32;
                             return Ok(zone + self.superblock.first_data_zone);
                         }
                     }
@@ -526,7 +535,8 @@ impl TwilightFs {
             return Err(TfsError::InvalidZone);
         }
 
-        let zmap_start = 2 + self.superblock.imap_blocks;
+        // Layout: block 0 superblock, then imap, then zmap.
+        let zmap_start = 1 + self.superblock.imap_blocks;
         let zmap_block = zmap_start + block_index as u32;
 
         let mut buf = [0u8; FS_BLOCK_SIZE];
@@ -582,7 +592,8 @@ impl TwilightFs {
         let block_size = self.superblock.block_size as usize;
         let inodes_per_block = block_size / inode_size;
 
-        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 2;
+        // Layout: block 0 superblock, then imap, then zmap, then inode table.
+        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 1;
         let block_offset = inode_index / inodes_per_block;
         let byte_offset = (inode_index % inodes_per_block) * inode_size;
         let block_num = inode_table_start + block_offset as u32;
@@ -615,7 +626,8 @@ impl TwilightFs {
         let block_size = self.superblock.block_size as usize;
         let inodes_per_block = block_size / inode_size;
 
-        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 2;
+        // Layout: block 0 superblock, then imap, then zmap, then inode table.
+        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 1;
         let block_offset = inode_index / inodes_per_block;
         let byte_offset = (inode_index % inodes_per_block) * inode_size;
         let block_num = inode_table_start + block_offset as u32;
