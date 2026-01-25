@@ -1,7 +1,8 @@
-use crate::sys::fs::twilight_fs::{read_tfs_block, write_tfs_block};
+use crate::sys::fs::twilight_fs::{read_tfs_block, write_tfs_block, TwilightFsShared};
 use crate::sys::fs::vfs::{BlockDev, FsCtx, VfsNodeOps};
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use spin::Mutex;
 use twilight_common::syscall::types::{EIO, EISDIR};
 
@@ -39,6 +40,7 @@ pub(crate) struct TFSVfsNode {
     pub inode: Inode,
     pub full_path: String,
     pub ctx: Arc<Mutex<dyn FsCtx>>,
+    pub shared: Arc<TwilightFsShared>,
 }
 
 unsafe impl Send for TFSVfsNode {}
@@ -56,6 +58,24 @@ impl VfsNodeOps for TFSVfsNode {
         }
 
         let max_to_read = core::cmp::min(file_size - lba, buf.len());
+
+        let should_cache = file_size > 0 && file_size <= super::FILE_CACHE_MAX_FILE_BYTES;
+
+        if should_cache {
+            if let Some(n) = self.shared.read_cached_file_slice(self.inode_no, lba, buf) {
+                return Ok(core::cmp::min(n, max_to_read));
+            }
+
+            if let Ok(data) = self.read_all_file(device) {
+                let n = core::cmp::min(max_to_read, data.len().saturating_sub(lba));
+                if n > 0 {
+                    buf[..n].copy_from_slice(&data[lba..lba + n]);
+                }
+                self.shared.insert_file_cache(self.inode_no, data);
+                return Ok(n);
+            }
+        }
+
         let mut remaining = max_to_read;
         let mut written = 0;
 
@@ -519,6 +539,7 @@ impl VfsNodeOps for TFSVfsNode {
             .write_inode_twilight(self.inode_no, self.inode)
             .unwrap();
 
+        self.shared.invalidate_all();
         Ok(())
     }
 
@@ -558,6 +579,7 @@ impl VfsNodeOps for TFSVfsNode {
                 .lock()
                 .write_inode_twilight(self.inode_no, self.inode)
                 .map_err(|_| -(EIO as i32))?;
+            self.shared.invalidate_all();
             return Ok(());
         }
 
@@ -574,5 +596,122 @@ impl VfsNodeOps for TFSVfsNode {
         }
 
         Ok(())
+    }
+}
+
+impl TFSVfsNode {
+    fn read_all_file(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()> {
+        let file_size = self.inode.size as usize;
+        let mut out = Vec::with_capacity(file_size);
+        let mut remaining = file_size;
+
+        if remaining == 0 {
+            return Ok(out);
+        }
+
+        let mut block_buf = [0u8; 2048];
+
+        let zones = self.inode.zones;
+        for &zone in zones.iter() {
+            if remaining == 0 {
+                break;
+            }
+            if zone == 0 {
+                break;
+            }
+            read_tfs_block(device.lock().as_mut(), zone, &mut block_buf).map_err(|_| ())?;
+            let n = core::cmp::min(remaining, block_buf.len());
+            out.extend_from_slice(&block_buf[..n]);
+            remaining -= n;
+        }
+
+        if remaining == 0 {
+            return Ok(out);
+        }
+
+        let indirect_zones = self.inode.indirect_zones;
+        if indirect_zones != 0 {
+            read_tfs_block(
+                device.lock().as_mut(),
+                indirect_zones,
+                &mut block_buf,
+            )
+            .map_err(|_| ())?;
+
+            let zone_entries = (block_buf.len() / 4) - 1;
+            for i in 0..zone_entries {
+                if remaining == 0 {
+                    break;
+                }
+                let zone_id = u32::from_le_bytes(
+                    block_buf[i * 4..(i + 1) * 4]
+                        .try_into()
+                        .map_err(|_| ())?,
+                );
+                if zone_id == 0 {
+                    break;
+                }
+                let mut data_buf = [0u8; 2048];
+                read_tfs_block(device.lock().as_mut(), zone_id, &mut data_buf).map_err(|_| ())?;
+                let n = core::cmp::min(remaining, data_buf.len());
+                out.extend_from_slice(&data_buf[..n]);
+                remaining -= n;
+            }
+        }
+
+        if remaining == 0 {
+            return Ok(out);
+        }
+
+        let double_indirect_zones = self.inode.double_indirect_zones;
+        if double_indirect_zones != 0 {
+            read_tfs_block(
+                device.lock().as_mut(),
+                double_indirect_zones,
+                &mut block_buf,
+            )
+            .map_err(|_| ())?;
+
+            let zone_entries = (block_buf.len() / 4) - 1;
+            for i in 0..zone_entries {
+                if remaining == 0 {
+                    break;
+                }
+                let indirect_zone = u32::from_le_bytes(
+                    block_buf[i * 4..(i + 1) * 4]
+                        .try_into()
+                        .map_err(|_| ())?,
+                );
+                if indirect_zone == 0 {
+                    break;
+                }
+
+                let mut indirect_buf = [0u8; 2048];
+                read_tfs_block(device.lock().as_mut(), indirect_zone, &mut indirect_buf)
+                    .map_err(|_| ())?;
+
+                for j in 0..zone_entries {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let zone_id = u32::from_le_bytes(
+                        indirect_buf[j * 4..(j + 1) * 4]
+                            .try_into()
+                            .map_err(|_| ())?,
+                    );
+                    if zone_id == 0 {
+                        break;
+                    }
+                    let mut data_buf = [0u8; 2048];
+                    read_tfs_block(device.lock().as_mut(), zone_id, &mut data_buf)
+                        .map_err(|_| ())?;
+                    let n = core::cmp::min(remaining, data_buf.len());
+                    out.extend_from_slice(&data_buf[..n]);
+                    remaining -= n;
+                }
+            }
+        }
+
+        Ok(out)
     }
 }
