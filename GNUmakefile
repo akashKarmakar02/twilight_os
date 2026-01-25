@@ -12,6 +12,16 @@ $(call USER_VARIABLE,KARCH,x86_64)
 # Default user QEMU flags. These are appended to the QEMU command calls.
 $(call USER_VARIABLE,QEMUFLAGS,-m 2G)
 
+# On musl-based hosts (e.g. Alpine), rustup may select the musl toolchain for the pinned nightly,
+# but that can fail to start if the system's libgcc_s/libc compatibility is mismatched.
+# If a glibc loader is available, prefer the GNU toolchain unless the user overrides it.
+ifneq ($(wildcard /lib/ld-musl-x86_64.so.1),)
+ifneq ($(wildcard /lib64/ld-linux-x86-64.so.2),)
+$(call USER_VARIABLE,RUSTUP_TOOLCHAIN,nightly-2025-06-01-x86_64-unknown-linux-gnu)
+endif
+endif
+export RUSTUP_TOOLCHAIN
+
 override IMAGE_NAME := twilight-os
 
 .PHONY: all

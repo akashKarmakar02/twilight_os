@@ -181,6 +181,31 @@ fn build_rust(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn selected_cc() -> String {
+    env::var("CC").unwrap_or_else(|_| "musl-gcc".to_string())
+}
+
+fn no_pie_enabled() -> bool {
+    // Alpine toolchains typically default to PIE; static userland binaries for Twilight OS should be non-PIE.
+    // Allow disabling this behavior: TWILIGHT_NO_PIE=0
+    env::var("TWILIGHT_NO_PIE").ok().as_deref() != Some("0")
+}
+
+fn cc_for_make(base_cc: &str) -> String {
+    // Don't break complex CC values that include args (e.g. "ccache gcc").
+    if !no_pie_enabled() {
+        return base_cc.to_string();
+    }
+    if base_cc.split_whitespace().count() != 1 {
+        return base_cc.to_string();
+    }
+    if base_cc == "musl-gcc" {
+        return base_cc.to_string();
+    }
+    // Fix "relocation ... can not be used when making a PIE object" on Alpine by disabling PIE.
+    format!("{} -fno-pie -no-pie", base_cc)
+}
+
 fn build_zig(path: &Path) -> io::Result<()> {
     println!("Detected Zig project. Running zig build for musl target (if available)");
     // Try a common zig build invocation that targets musl
@@ -197,9 +222,24 @@ fn build_zig(path: &Path) -> io::Result<()> {
 }
 
 fn build_make(path: &Path) -> io::Result<()> {
-    println!("Detected Makefile. Running make with CC=musl-gcc (if present)");
+    let cc = selected_cc();
+    let make_cc = cc_for_make(&cc);
+    if make_cc == cc {
+        println!("Detected Makefile. Running make with CC={} (default musl-gcc)", cc);
+    } else {
+        println!(
+            "Detected Makefile. Running make with CC={} (from CC={})",
+            make_cc, cc
+        );
+    }
+
+    // Some external repos (e.g. TinyCC) require a configure step to generate config.mak
+    // with the correct compiler/toolchain settings. Environment CC alone is not enough
+    // because Makefiles commonly override environment variables.
+    maybe_configure_before_make(path, &cc)?;
+
     let mut cmd = Command::new("make");
-    cmd.arg("-C").arg(path).env("CC", "musl-gcc");
+    cmd.arg("-C").arg(path).env("CC", &make_cc);
     apply_ccache_env(&mut cmd);
     let status = cmd.status()?;
     if !status.success() {
@@ -208,8 +248,63 @@ fn build_make(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn maybe_configure_before_make(path: &Path, cc: &str) -> io::Result<()> {
+    let app_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Currently only TinyCC needs this in-tree configure pass.
+    if app_name != "tcc" {
+        return Ok(());
+    }
+
+    let configure = path.join("configure");
+    if !configure.exists() {
+        return Ok(());
+    }
+
+    // Only run configure if config.mak is missing or isn't set up for the selected CC.
+    let config_mak = path.join("config.mak");
+    let needle = format!("CC={}", cc);
+    let needs_configure = match fs::read_to_string(&config_mak) {
+        Ok(s) => !s.lines().any(|l| l.trim() == needle.as_str()),
+        Err(_) => true,
+    };
+
+    if !needs_configure {
+        return Ok(());
+    }
+
+    // Ensure `./configure` is executable.
+    if let Ok(meta) = fs::metadata(&configure) {
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o111 == 0 {
+            perms.set_mode(perms.mode() | 0o111);
+            let _ = fs::set_permissions(&configure, perms);
+        }
+    }
+
+    println!("Detected tcc configure script. Running ./configure --cc={}", cc);
+    let mut cmd = Command::new("./configure");
+    cmd.arg(format!("--cc={}", cc))
+        .current_dir(path)
+        .env("CC", cc);
+    apply_ccache_env(&mut cmd);
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "configure failed"));
+    }
+    Ok(())
+}
+
 fn build_c_simple(path: &Path) -> io::Result<()> {
-    println!("No Makefile but found C sources. Compiling single-file apps with musl-gcc");
+    let cc = selected_cc();
+    println!(
+        "No Makefile but found C sources. Compiling single-file apps with {} (default musl-gcc)",
+        cc
+    );
+    let no_pie = no_pie_enabled();
     // Collect top-level .c files and compile each into app-named binary
     let mut c_files = Vec::new();
     for entry in fs::read_dir(path)? {
@@ -226,8 +321,12 @@ fn build_c_simple(path: &Path) -> io::Result<()> {
     // if there is exactly one C file, produce binary named after directory
     if c_files.len() == 1 {
         let out = path.join(path.file_name().unwrap());
-        let mut cmd = Command::new("musl-gcc");
-        cmd.arg("-static")
+        let mut cmd = Command::new(&cc);
+        cmd.arg("-static");
+        if no_pie {
+            cmd.arg("-fno-pie").arg("-no-pie");
+        }
+        cmd
             .arg(c_files[0].to_str().unwrap())
             .arg("-o")
             .arg(&out)
@@ -241,13 +340,17 @@ fn build_c_simple(path: &Path) -> io::Result<()> {
         // multiple C files: try to build with musl-gcc into a.out or a directory binary named after app
         let out = path.join(path.file_name().unwrap());
         let mut args = vec!["-static".to_string()];
+        if no_pie {
+            args.push("-fno-pie".to_string());
+            args.push("-no-pie".to_string());
+        }
         for f in &c_files {
             args.push(f.to_string_lossy().to_string());
         }
         args.push("-o".to_string());
         args.push(out.to_string_lossy().to_string());
 
-        let mut cmd = Command::new("musl-gcc");
+        let mut cmd = Command::new(&cc);
         cmd.args(&args).current_dir(path);
         apply_ccache_env(&mut cmd);
         let status = cmd.status()?;
