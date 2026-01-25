@@ -13,9 +13,10 @@ use alloc::vec;
 use bit_field::BitField;
 use smoltcp::iface::SocketHandle;
 use smoltcp::phy::Device;
+use smoltcp::socket::Socket;
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
-use smoltcp::wire::IpAddress;
+use smoltcp::wire::{IpAddress, IpEndpoint};
 
 fn tcp_socket_status(socket: &tcp::Socket) -> u8 {
     let mut status = 0;
@@ -29,9 +30,11 @@ fn tcp_socket_status(socket: &tcp::Socket) -> u8 {
     status
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TcpSocket {
     pub handle: SocketHandle,
+    pub bound_port: Option<u16>,
+    pub listen_port: Option<u16>,
 }
 
 impl TcpSocket {
@@ -54,7 +57,16 @@ impl TcpSocket {
         let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
         let handle = sockets.add(tcp_socket);
 
-        Self { handle }
+        Self {
+            handle,
+            bound_port: None,
+            listen_port: None,
+        }
+    }
+
+    pub fn bind(&mut self, port: u16) -> Result<(), ()> {
+        self.bound_port = Some(port);
+        Ok(())
     }
 
     pub fn connect(&mut self, addr: IpAddress, port: u16) -> Result<(), ()> {
@@ -82,7 +94,8 @@ impl TcpSocket {
                         }
                         let cx = iface.context();
                         let dest = (addr, port);
-                        if socket.connect(cx, dest, random_port()).is_err() {
+                        let local_port = self.bound_port.unwrap_or_else(random_port);
+                        if socket.connect(cx, dest, local_port).is_err() {
                             return Err(());
                         }
                         connecting = true;
@@ -120,6 +133,7 @@ impl TcpSocket {
             if socket.listen(port).is_err() {
                 return Err(());
             }
+            self.listen_port = Some(port);
 
             if let Some(_d) = iface.poll_delay(sys::net::time(), &sockets) {
                 sleep(0.004);
@@ -155,6 +169,130 @@ impl TcpSocket {
         } else {
             Err(())
         }
+    }
+
+    pub fn local_endpoint(&self) -> Option<IpEndpoint> {
+        let sockets = SOCKETS.lock();
+        let socket = sockets.get::<tcp::Socket>(self.handle);
+        socket.local_endpoint()
+    }
+
+    pub fn remote_endpoint(&self) -> Option<IpEndpoint> {
+        let sockets = SOCKETS.lock();
+        let socket = sockets.get::<tcp::Socket>(self.handle);
+        socket.remote_endpoint()
+    }
+
+    /// Accept an incoming connection and return a new socket handle for the established
+    /// connection while keeping this socket listening.
+    pub fn accept_new(&mut self) -> Result<(TcpSocket, IpEndpoint), ()> {
+        let listen_port = self.listen_port.ok_or(())?;
+
+        let timeout = 5.0;
+        let started = sys::clk::epoch_time();
+        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
+            loop {
+                if sys::clk::epoch_time() - started > timeout {
+                    return Err(());
+                }
+                let mut sockets = SOCKETS.lock();
+                iface.poll(sys::net::time(), device, &mut sockets);
+                let socket = sockets.get_mut::<tcp::Socket>(self.handle);
+
+                let Some(endpoint) = socket.remote_endpoint() else {
+                    if let Some(_d) = iface.poll_delay(sys::net::time(), &sockets) {
+                        sleep(0.004);
+                    }
+                    halt();
+                    continue;
+                };
+
+                // Move the established connection into a new socket.
+                let removed = sockets.remove(self.handle);
+                let Socket::Tcp(accepted) = removed else {
+                    return Err(());
+                };
+                let accepted_handle = sockets.add(accepted);
+
+                // Recreate the listener socket in-place.
+                let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
+                let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
+                let listener = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
+                let listener_handle = sockets.add(listener);
+                self.handle = listener_handle;
+                self.bound_port = Some(listen_port);
+                self.listen_port = Some(listen_port);
+
+                // Start listening again.
+                let listener_sock = sockets.get_mut::<tcp::Socket>(self.handle);
+                let _ = listener_sock.listen(listen_port);
+
+                return Ok((
+                    TcpSocket {
+                        handle: accepted_handle,
+                        bound_port: None,
+                        listen_port: None,
+                    },
+                    endpoint,
+                ));
+            }
+        }
+        Err(())
+    }
+
+    pub fn try_accept_new(&mut self) -> Result<Option<(TcpSocket, IpEndpoint)>, ()> {
+        let listen_port = self.listen_port.ok_or(())?;
+
+        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
+            let mut sockets = SOCKETS.lock();
+            iface.poll(sys::net::time(), device, &mut sockets);
+            let socket = sockets.get_mut::<tcp::Socket>(self.handle);
+
+            let Some(endpoint) = socket.remote_endpoint() else {
+                return Ok(None);
+            };
+
+            // Move the established connection into a new socket.
+            let removed = sockets.remove(self.handle);
+            let Socket::Tcp(accepted) = removed else {
+                return Err(());
+            };
+            let accepted_handle = sockets.add(accepted);
+
+            // Recreate the listener socket in-place.
+            let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
+            let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
+            let listener = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
+            let listener_handle = sockets.add(listener);
+            self.handle = listener_handle;
+            self.bound_port = Some(listen_port);
+            self.listen_port = Some(listen_port);
+
+            // Start listening again.
+            let listener_sock = sockets.get_mut::<tcp::Socket>(self.handle);
+            let _ = listener_sock.listen(listen_port);
+
+            return Ok(Some((
+                TcpSocket {
+                    handle: accepted_handle,
+                    bound_port: None,
+                    listen_port: None,
+                },
+                endpoint,
+            )));
+        }
+
+        Err(())
+    }
+
+}
+
+impl Drop for TcpSocket {
+    fn drop(&mut self) {
+        // Best-effort cleanup: when the last fd referencing this socket is dropped,
+        // remove it from the global SocketSet to reclaim buffers.
+        let mut sockets = SOCKETS.lock();
+        let _ = sockets.remove(self.handle);
     }
 }
 

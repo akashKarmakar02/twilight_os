@@ -262,10 +262,15 @@ impl ProcessTable {
     }
 }
 pub struct OpenFile {
-    pub node: Arc<Mutex<VfsNode>>,
+    pub kind: OpenFileKind,
     pub seek: usize,
     pub path: String,
     pub status_flags: i32,
+}
+
+pub enum OpenFileKind {
+    Vfs(Arc<Mutex<VfsNode>>),
+    Socket(crate::sys::net::socket::SocketFile),
 }
 
 #[derive(Clone)]

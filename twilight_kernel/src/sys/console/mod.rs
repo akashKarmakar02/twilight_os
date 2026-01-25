@@ -198,8 +198,6 @@ fn exec(cmd: &str, args: &[&str]) {
         "install" => crate::kernel_utils::install::main(),
         "dhcp" => crate::kernel_utils::dhcp::main(),
         "anirect" => crate::kernel_utils::anirect::main(),
-        "curl" => crate::kernel_utils::curl::main(args),
-        "serve" => crate::kernel_utils::serve::main(args),
         _ => {
             #[allow(static_mut_refs)]
             let fs = unsafe { VFS.get_mut() };

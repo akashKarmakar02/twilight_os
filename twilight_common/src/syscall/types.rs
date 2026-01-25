@@ -25,6 +25,22 @@ pub const EOPNOTSUPP: i32 = 95;
 pub const EPIPE: i32 = 32;
 pub const EMFILE: i32 = 24;
 pub const ENFILE: i32 = 23;
+pub const ENOTSOCK: i32 = 88;
+pub const EDESTADDRREQ: i32 = 89;
+pub const EMSGSIZE: i32 = 90;
+pub const EPROTONOSUPPORT: i32 = 93;
+pub const EADDRINUSE: i32 = 98;
+pub const EADDRNOTAVAIL: i32 = 99;
+pub const ENETUNREACH: i32 = 101;
+pub const ECONNRESET: i32 = 104;
+pub const EISCONN: i32 = 106;
+pub const ENOTCONN: i32 = 107;
+pub const ETIMEDOUT: i32 = 110;
+pub const ECONNREFUSED: i32 = 111;
+pub const EALREADY: i32 = 114;
+pub const EINPROGRESS: i32 = 115;
+pub const EAFNOSUPPORT: i32 = 97;
+pub const ENOPROTOOPT: i32 = 92;
 
 pub const O_RDONLY: i32 = 0;
 pub const O_WRONLY: i32 = 1;
@@ -62,6 +78,34 @@ pub const POLLOUT: i16 = 0x0004;
 pub const POLLERR: i16 = 0x0008;
 pub const POLLHUP: i16 = 0x0010;
 pub const POLLNVAL: i16 = 0x0020;
+
+// --- sockets (Linux ABI, x86_64) ---
+pub const AF_INET: u16 = 2;
+pub const SOCK_STREAM: i32 = 1;
+pub const SOCK_DGRAM: i32 = 2;
+
+pub const SOL_SOCKET: i32 = 1;
+pub const SO_REUSEADDR: i32 = 2;
+
+pub const MSG_DONTWAIT: i32 = 0x40;
+
+pub type SocklenT = u32;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SockAddr {
+    pub sa_family: u16,
+    pub sa_data: [u8; 14],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SockAddrIn {
+    pub sin_family: u16,
+    pub sin_port: u16, // network byte order
+    pub sin_addr: u32, // network byte order
+    pub sin_zero: [u8; 8],
+}
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default)]

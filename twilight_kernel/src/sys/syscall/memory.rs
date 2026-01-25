@@ -94,12 +94,15 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
 
         let file_ref = entry.file.clone();
         let file = file_ref.lock();
-        let mut node = file.node.lock();
-        if node.metadata.file_type == crate::sys::fs::vfs::FileType::Dir {
+        let mut node_guard = match &file.kind {
+            crate::sys::proc::OpenFileKind::Vfs(node_ref) => node_ref.lock(),
+            crate::sys::proc::OpenFileKind::Socket(_) => return EINVAL,
+        };
+        if node_guard.metadata.file_type == crate::sys::fs::vfs::FileType::Dir {
             return EINVAL;
         }
 
-        match node.mmap(process, va, len, prot, flags, offset as usize) {
+        match node_guard.mmap(process, va, len, prot, flags, offset as usize) {
             Ok(mapped) => {
                 process.proc_mm.track_mmap(mapped, len, MmapKind::Shared);
                 return mapped as i64;
@@ -115,7 +118,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
             return ENOMEM;
         }
 
-        let file_size = node.metadata.size;
+        let file_size = node_guard.metadata.size;
         let mut remaining = len;
         let mut pos = 0usize;
         let mut file_off = offset as usize;
@@ -124,7 +127,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         while remaining > 0 && file_off < file_size {
             let chunk = core::cmp::min(remaining, file_size - file_off);
             let dst = unsafe { core::slice::from_raw_parts_mut((va + pos) as *mut u8, chunk) };
-            match node.read(file_off, dst) {
+            match node_guard.read(file_off, dst) {
                 Ok(0) => break,
                 Ok(n) => {
                     pos += n;
