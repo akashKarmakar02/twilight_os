@@ -60,6 +60,7 @@ pub const SYS_TGKILL: usize = 234;
 pub const SYS_OPENAT: usize = 257;
 pub const SYS_MKDIRAT: usize = 258;
 pub const SYS_NEWFSTATAT: usize = 262;
+pub const SYS_READLINKAT: usize = 267;
 pub const SYS_PREADV: usize = 295;
 pub const SYS_PWRITEV: usize = 296;
 pub const SYS_SET_ROBUST_LIST: usize = 273;

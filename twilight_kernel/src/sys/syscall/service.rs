@@ -2782,3 +2782,38 @@ pub fn futex(uaddr: usize, op: i32, val: u32, _timeout: usize, _uaddr2: usize, _
         _ => -(ENOSYS as i64),
     }
 }
+
+pub fn readlinkat(dirfd: i32, path: usize, _buf_ptr: usize, _buf_len: usize) -> i64 {
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    let upath = UserPtr(path as *const u8);
+    let path_str = match copy_cstr_from_user(upath, 4096) {
+        Ok(s) => s,
+        _ => return -(EFAULT as i64),
+    };
+
+    let full_path = if path_str.starts_with('/') {
+        normalize_path(&path_str)
+    } else {
+        match base_for_dirfd(process, dirfd) {
+            Ok(base) => normalize_path(&join_paths(&base, &path_str)),
+            Err(e) => return e as i64,
+        }
+    };
+
+    #[allow(static_mut_refs)]
+    if unsafe { VFS.get_mut().metadata(&full_path).is_err() } {
+        return -(ENOENT as i64);
+    }
+
+    -(EINVAL as i64)
+}

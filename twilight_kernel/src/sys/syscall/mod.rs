@@ -208,6 +208,9 @@ pub extern "sysv64" fn syscall_handler(
         SYS_NEWFSTATAT => {
             service::newfstatat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as i32)
         }
+        SYS_READLINKAT => {
+            service::readlinkat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize)
+        }
         SYS_TGKILL => service::tgkill(arg1 as i32, arg2 as i32, arg3 as i32),
         SYS_UTIMENAT => service::utimenat(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize),
         SYS_PIPE2 => service::pipe2(arg1 as usize, arg2 as i32),
