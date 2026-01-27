@@ -295,7 +295,7 @@ endif
 
 $(IMAGE_NAME).hdd: limine/limine kernel userspace cpio
 	rm -f $(IMAGE_NAME).hdd
-	dd if=/dev/zero bs=1M count=0 seek=1024 of=$(IMAGE_NAME).hdd
+	dd if=/dev/zero bs=1M count=0 seek=512 of=$(IMAGE_NAME).hdd
 	PATH=$$PATH:/usr/sbin:/sbin sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00 -m 1
 	./limine/limine bios-install $(IMAGE_NAME).hdd
 ifeq ($(KARCH),x86_64)
@@ -323,7 +323,7 @@ endif
 
 .PHONY: clean
 clean:
-	$(MAKE) -C kernel clean
+	$(MAKE) -C twilight_kernel clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
 .PHONY: distclean

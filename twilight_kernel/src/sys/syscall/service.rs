@@ -1672,16 +1672,14 @@ pub fn lseek(fd: usize, offset: u64, whence: u8) -> i64 {
             file.seek as i64
         }
         1 => file.seek as i64,
-        2 => {
-            match &file.kind {
-                OpenFileKind::Vfs(node_ref) => {
-                    let size = node_ref.lock().metadata.size;
-                    file.seek = size;
-                    file.seek as i64
-                }
-                OpenFileKind::Socket(_) => -(ESPIPE as i64),
+        2 => match &file.kind {
+            OpenFileKind::Vfs(node_ref) => {
+                let size = node_ref.lock().metadata.size;
+                file.seek = size;
+                file.seek as i64
             }
-        }
+            OpenFileKind::Socket(_) => -(ESPIPE as i64),
+        },
         _ => -(EINVAL as i64),
     }
 }
@@ -1882,7 +1880,10 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
 
     let mut file = file_ref.lock();
     match &mut file.kind {
-        OpenFileKind::Vfs(node_ref) => node_ref.lock().ioctl(cmd as u64, arg).unwrap_or(-(ENOTTY as i64)),
+        OpenFileKind::Vfs(node_ref) => node_ref
+            .lock()
+            .ioctl(cmd as u64, arg)
+            .unwrap_or(-(ENOTTY as i64)),
         OpenFileKind::Socket(_) => -(ENOTTY as i64),
     }
 }
@@ -2255,7 +2256,11 @@ pub fn bind(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
         Err(e) => return -(e as i64),
     };
 
-    let port = if ep.port == 0 { random_ephemeral_port() } else { ep.port };
+    let port = if ep.port == 0 {
+        random_ephemeral_port()
+    } else {
+        ep.port
+    };
 
     #[allow(static_mut_refs)]
     let proc_opt = unsafe {
@@ -2538,13 +2543,7 @@ pub fn shutdown(fd: i32, _how: i32) -> i64 {
     0
 }
 
-pub fn setsockopt(
-    fd: i32,
-    level: i32,
-    optname: i32,
-    _optval: usize,
-    _optlen: usize,
-) -> i64 {
+pub fn setsockopt(fd: i32, level: i32, optname: i32, _optval: usize, _optlen: usize) -> i64 {
     if fd < 3 {
         return -(ENOTSOCK as i64);
     }
@@ -2572,13 +2571,7 @@ pub fn setsockopt(
     -(ENOPROTOOPT as i64)
 }
 
-pub fn getsockopt(
-    fd: i32,
-    _level: i32,
-    _optname: i32,
-    _optval: usize,
-    _optlen_ptr: usize,
-) -> i64 {
+pub fn getsockopt(fd: i32, _level: i32, _optname: i32, _optval: usize, _optlen_ptr: usize) -> i64 {
     if fd < 3 {
         return -(ENOTSOCK as i64);
     }
@@ -2628,7 +2621,10 @@ pub fn getsockname(fd: i32, addr_ptr: usize, addrlen_ptr: usize) -> i64 {
     };
 
     let ep = match sock {
-        SocketFile::Tcp(t) => t.local_endpoint().unwrap_or(IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), t.bound_port.unwrap_or(0))),
+        SocketFile::Tcp(t) => t.local_endpoint().unwrap_or(IpEndpoint::new(
+            IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
+            t.bound_port.unwrap_or(0),
+        )),
         SocketFile::Udp(u) => {
             let port = u.local_port().or(u.bound_port).unwrap_or(0);
             IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), port)
