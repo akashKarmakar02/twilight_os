@@ -8,7 +8,7 @@ use crate::sys::syscall::service::read;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user};
 use alloc::string::String;
 use twilight_common::syscall::numbers::*;
-use twilight_common::syscall::types::{EFAULT, ENOSYS, Rlimit64, Timespec};
+use twilight_common::syscall::types::{EFAULT, EINVAL, ENOSYS, Rlimit64, Timespec};
 use x86_64::structures::idt::InterruptStackFrame;
 
 #[allow(dead_code)]
@@ -160,7 +160,12 @@ pub extern "sysv64" fn syscall_handler(
 
                 // We don't implement interruption yet; if rem != NULL, return 0 remaining.
                 if !rem_timespec_ptr.is_null() {
-                    unsafe { *rem_timespec_ptr = Timespec { tv_sec: 0, tv_nsec: 0 } };
+                    unsafe {
+                        *rem_timespec_ptr = Timespec {
+                            tv_sec: 0,
+                            tv_nsec: 0,
+                        }
+                    };
                 }
 
                 match crate::driver::timer::pit::sleep_timespec(req) {
@@ -238,6 +243,30 @@ pub extern "sysv64" fn syscall_handler(
         SYS_SET_ROBUST_LIST => service::set_robust_list(arg1 as usize, arg2 as usize),
         SYS_GETRANDOM => service::getrandom(arg1 as usize, arg2 as usize, arg3 as u32),
         SYS_RSEQ => service::rseq(arg1 as usize, arg2 as u32, arg3 as u32, arg4 as u32),
+        SYS_REBOOT => {
+            // Linux reboot magic numbers
+            let magic1 = arg1 as u32;
+            let magic2 = arg2 as u32;
+            let cmd = arg3 as u32;
+
+            if magic1 == 0xfee1dead && magic2 == 672274793 {
+                match cmd {
+                    0x01234567 => {
+                        // LINUX_REBOOT_CMD_RESTART
+                        crate::arch::x86_64::power::restart();
+                        0
+                    }
+                    0x4321fedc => {
+                        // LINUX_REBOOT_CMD_POWER_OFF
+                        crate::arch::x86_64::power::poweroff();
+                        0
+                    }
+                    _ => -(EINVAL as i64),
+                }
+            } else {
+                -(EINVAL as i64)
+            }
+        }
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
             -(ENOSYS as i64)
