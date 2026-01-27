@@ -77,7 +77,7 @@ impl DeviceConfig {
         }
     }
 
-    pub fn enable_bus_mastering(&mut self) {
+    pub fn enable_bus_mastering(&self) {
         let mut register = ConfigRegister::new(
             self.bus, self.device, self.function, 0x04
         );

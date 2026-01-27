@@ -46,6 +46,9 @@ pub struct XhciDriver {
    PCI Device Driver Implementation
 ========================================================= */
 
+unsafe impl Send for XhciDriver {}
+unsafe impl Sync for XhciDriver {}
+
 impl PciDeviceDriver for XhciDriver {
     fn init_device(&mut self) -> bool {
         unsafe {
@@ -63,7 +66,12 @@ impl PciDeviceDriver for XhciDriver {
     }
 
     fn attach_device(&mut self, dev: Arc<DeviceConfig>, enable_bus_mastering: bool) {
-        todo!()
+        crate::log!("XHCI: Attaching device to driver");
+        if enable_bus_mastering {
+            dev.enable_bus_mastering();
+        }
+        // In a real implementation we would keep the reference to dev
+        // self.pci_dev = Some(dev);
     }
 }
 

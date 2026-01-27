@@ -6,6 +6,8 @@ use alloc::sync::Arc;
 use crate::sys::pci::DeviceConfig;
 use x86_64::instructions::interrupts::*;
 
+pub type IrqVector = u8;
+
 /* =========================================================
    PCI Device Driver Trait
 ========================================================= */
@@ -70,7 +72,7 @@ impl PciDeviceDriverState {
             dev.enable_bus_mastering();
         }
 
-        self.irq_vector = dev.allocate_irq();
+        self.irq_vector = Some(dev.interrupt_line);
         self.pci_dev = Some(dev);
     }
 }
