@@ -501,16 +501,42 @@ impl Process {
             unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
         // 2. Deep copy user memory
-        for (addr, size) in self.addr_size_vec.iter() {
+        let mut regions_to_copy = self.addr_size_vec.clone();
+
+        // Add Heap
+        if self.proc_mm.mapped_heap_end > self.proc_mm.heap_start {
+            regions_to_copy.push((
+                self.proc_mm.heap_start as u64,
+                self.proc_mm.mapped_heap_end - self.proc_mm.heap_start,
+            ));
+        }
+
+        // Add Mmaps
+        for region in &self.proc_mm.mmap_regions {
+            regions_to_copy.push((region.base as u64, region.len));
+        }
+
+        // We use a separate vec for the child's tracking to avoiding duplicates if addr_size_vec used to track everything
+        // But for cleanup we need them in child's addr_size_vec.
+        let mut child_addr_size_vec = self.addr_size_vec.clone();
+
+        for (addr, size) in regions_to_copy.iter() {
             let addr = *addr;
             let size = *size;
 
             // Allocate in child
+            // Note: We use true, true (RWX) for simplicity, though strict permissions would be better.
             if alloc_pages(&mut mapper, addr, size, true, true).is_err() {
-                // Cleanup would be needed here in a robust OS
-                // For now, panic or return error (leaking memory potentially)
                 println!("fork: failed to alloc pages");
                 return Err(());
+            }
+
+            // Track dynamic allocations in child so they are freed on exit
+            // (If already in addr_size_vec, we might duplicate, but cleanup handles that or we should check existence?)
+            // addr_size_vec usually has code/data. Heap/Mmap are new.
+            // A simple deduplication check:
+            if !child_addr_size_vec.contains(&(addr, size)) {
+                child_addr_size_vec.push((addr, size));
             }
 
             let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
@@ -600,7 +626,7 @@ impl Process {
                     mapper,
                     page_table_frame,
                     state: ProcessState::Running,
-                    addr_size_vec: self.addr_size_vec.clone(),
+                    addr_size_vec: child_addr_size_vec,
                     pwd: self.pwd.clone(),
                     fd_table: new_fd_table,
                     kernel_gs: kgs,
