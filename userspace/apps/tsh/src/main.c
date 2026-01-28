@@ -360,12 +360,6 @@ static int run_command_spawn(char *const argv[]) {
     return 0;
   }
 
-  // Twilight fallback: no fork (ENOSYS) -> execve behaves like spawn+wait and returns.
-  if (errno == ENOSYS) {
-    long rc = syscall(SYS_execve, path, argv, envp);
-    return (rc == -1) ? -1 : 0;
-  }
-
   return -1;
 }
 
