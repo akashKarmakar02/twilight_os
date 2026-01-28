@@ -70,3 +70,4 @@ pub const SYS_PR_LIMIT64: usize = 302;
 pub const SYS_GETRANDOM: usize = 318;
 pub const SYS_RSEQ: usize = 334;
 pub const SYS_ACCEPT4: usize = 288;
+pub const SYS_REBOOT: usize = 169;
