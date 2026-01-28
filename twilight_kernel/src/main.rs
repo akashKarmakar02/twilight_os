@@ -151,6 +151,7 @@ unsafe extern "C" fn kmain() -> ! {
     hcf()
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     serial_println!("[PANIC]: {}", info);
