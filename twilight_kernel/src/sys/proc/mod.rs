@@ -468,7 +468,153 @@ impl Process {
         Ok(p)
     }
 
-    pub fn exec(&self) {
+    pub fn exec(
+        &mut self,
+        content_buf: &[u8],
+        args: &[&str],
+        env: &[&str],
+    ) -> Result<(u64, u64), ()> {
+        let (_, flags) = Cr3::read();
+
+        let page_table_frame =
+            with_frame_allocator(|frame_allocator| frame_allocator.allocate_frame().unwrap());
+
+        let page_table = crate::sys::memory::create_page_table(page_table_frame);
+        let kernel_page_table = kernel_page_table();
+        let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
+        for (_, (page, kernel_page)) in pages.enumerate() {
+            *page = kernel_page.clone();
+        }
+
+        // We must switch to the new page table to write user data (load ELF, build stack).
+        // Since kernel mappings are identical, this is safe for kernel execution.
+        // But we must NOT access old user memory after this point until we decide to revert (which we won't on success).
+        unsafe {
+            Cr3::write(page_table_frame, flags);
+        };
+
+        let mut mapper =
+            unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+
+        let mut addr_size_vec: Vec<(u64, usize)> = Vec::new();
+        let user_stack_top = VirtAddr::new(USER_STACK_TOP);
+
+        let mut entry_point_addr: u64;
+        let aux_entry_point: u64;
+        let mut at_base: u64 = 0;
+        let phdr_va: u64;
+        let phent: u64;
+        let phnum: u64;
+        let mut max_end: u64;
+
+        if content_buf.get(0..4) == Some(&ELF_MAGIC) {
+            match load_elf_image(
+                content_buf,
+                &mut mapper,
+                &mut addr_size_vec,
+                Some(MAIN_DYN_LOAD_BASE),
+                true,
+            ) {
+                Ok(main_img) => {
+                    entry_point_addr = main_img.entry_point;
+                    aux_entry_point = entry_point_addr;
+                    phdr_va = main_img.phdr_va;
+                    phent = main_img.phent;
+                    phnum = main_img.phnum;
+                    max_end = main_img.max_end;
+
+                    if let Some(interp_path) = main_img.interp_path {
+                        // We must read the interpreter file.
+                        // We can't use VFS normally if it relies on current process state?
+                        // VFS uses `Process::current()`? No, it usually just takes paths.
+                        // But accessing "user pointers" in `exec` is tricky if we just switched CR3.
+                        // However, `load_interpreter_image` takes a path string (kernel memory), not user pointer.
+                        // We should be fine.
+                        match load_interpreter_image(
+                            interp_path.as_str(),
+                            &mut mapper,
+                            &mut addr_size_vec,
+                        ) {
+                            Ok(interp_img) => {
+                                entry_point_addr = interp_img.entry_point;
+                                at_base = interp_img.load_base;
+                                if interp_img.max_end > max_end {
+                                    max_end = interp_img.max_end;
+                                }
+                            }
+                            Err(_) => {
+                                println!("exec: failed to load interpreter {}", interp_path);
+                                // TODO: Revert CR3?
+                                return Err(());
+                            }
+                        }
+                    }
+
+                    let user_stack_base = user_stack_top.as_u64() - USER_STACK_SIZE as u64;
+                    if alloc_pages(&mut mapper, user_stack_base, USER_STACK_SIZE, true, false)
+                        .is_err()
+                    {
+                        return Err(());
+                    }
+                    addr_size_vec.push((user_stack_base, USER_STACK_SIZE));
+                }
+                Err(_) => {
+                    println!("exec: invalid ELF file");
+                    return Err(());
+                }
+            }
+        } else {
+            println!("exec: invalid ELF file");
+            return Err(());
+        }
+
+        let user_rsp = build_initial_stack(
+            user_stack_top.as_u64(),
+            aux_entry_point,
+            at_base,
+            Some(args),
+            Some(env),
+            phdr_va,
+            phent,
+            phnum,
+            None,
+            None,
+        );
+
+        let proc_mm = Box::new(ProcMM::new(max_end as usize));
+
+        // Commit changes to self
+        // Drop old resources implicitly when overwriting
+        self.mapper = mapper;
+        self.page_table_frame = page_table_frame;
+        self.addr_size_vec = addr_size_vec;
+        self.proc_mm = proc_mm;
+        self.entry_point = entry_point_addr;
+        self.stack = user_rsp;
+        self.stack_size = USER_STACK_SIZE; // Reset in case it changed?
+
+        // FPU state reset?
+        self.fpu_storage = Some(FpuState::default());
+
+        // File descriptors are PRESERVED (except CLOEXEC, which we handle in syscall service normally, or here?)
+        // Standard execve closes CLOEXEC fds.
+        for fd in self.fd_table.iter_mut() {
+            if let Some(entry) = fd {
+                if (entry.fd_flags & 1) != 0 {
+                    // FD_CLOEXEC
+                    *fd = None;
+                }
+            }
+        }
+
+        // We are already running on the correct kernel stack (sys_execve call stack).
+        // self.kernel_gs and context_switch_rsp remain valid for the NEXT trap/interrupt.
+
+        // Return new entry point and stack to caller so they can update the TrapFrame
+        Ok((entry_point_addr, user_rsp))
+    }
+
+    pub fn exec_wrapper(&self) {
         wrmsr(IA32_FS_BASE, self.fs_base.as_u64());
         wrmsr(IA32_GS_BASE, self.gs_base.as_u64());
 

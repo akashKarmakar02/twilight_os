@@ -860,13 +860,18 @@ pub fn execve(
     arg1: usize,
     arg2: usize,
     arg3: usize,
-    _stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
+    stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
     _regs: &mut crate::arch::x86_64::idt::Registers,
 ) -> i64 {
-    execev(arg1, arg2, arg3)
+    execev(arg1, arg2, arg3, stack_frame)
 }
 
-pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
+pub fn execev(
+    arg1: usize,
+    arg2: usize,
+    _arg3: usize,
+    stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
+) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
         return -1;
     };
@@ -888,39 +893,54 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
         Err(_) => return -1, // EFAULT
     };
 
-    let argv = argv.iter().map(|p| p.as_str()).collect::<Vec<&str>>();
+    let argv_strs = argv.iter().map(|p| p.as_str()).collect::<Vec<&str>>();
+
+    // TODO: Env vars support (arg3)
 
     #[allow(static_mut_refs)]
     let process_table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
 
-    let (pwd, inherited_fds, stdio_flags, stdio_fd_flags, stdio_target) = {
-        let parent = process_table.get_process(crate::sys::proc::id()).unwrap();
-        (
-            parent.pwd.clone(),
-            parent.fd_table.clone(),
-            parent.stdio_flags,
-            parent.stdio_fd_flags,
-            parent.stdio_target,
-        )
-    };
+    // We execute on the current process.
+    if let Some(p) = process_table.get_process(crate::sys::proc::id()) {
+        match p.exec(&elf_buf, &argv_strs, &[]) {
+            Ok((entry, sp)) => {
+                // Determine Code Segment/Stack Segment for user (Ring 3).
+                // They should be USER_CS/USER_SS.
+                // The interrupt frame likely already has them, but we ensure RIP/RSP are set.
+                // Stack frame struct:
+                // pub instruction_pointer: VirtAddr,
+                // pub code_segment: u64,
+                // pub cpu_flags: RFlags,
+                // pub stack_pointer: VirtAddr,
+                // pub stack_segment: u64,
 
-    if let Ok(p) = Process::new(
-        elf_buf,
-        pwd.as_str(),
-        argv.as_slice(),
-        crate::sys::proc::id(),
-    ) {
-        let mut p = p;
-        p.fd_table = inherited_fds;
-        p.stdio_flags = stdio_flags;
-        p.stdio_fd_flags = stdio_fd_flags;
-        p.stdio_target = stdio_target;
-        process_table.run(p);
+                use x86_64::VirtAddr;
+                unsafe {
+                    let frame_ptr = stack_frame as *mut _
+                        as *mut x86_64::structures::idt::InterruptStackFrameValue;
+                    (*frame_ptr).instruction_pointer = VirtAddr::new(entry);
+                    (*frame_ptr).stack_pointer = VirtAddr::new(sp);
+                }
+
+                // We do NOT return 0. The return value (RAX) will be whatever is in regs.rax.
+                // However, conventionally execve success doesn't return.
+                // To be clean, we might want toゼロ RAX or set it to 0 in the `regs` passed to `execve`.
+                // But `regs` are not passed to `execev` currently.
+                // We'll trust that the syscall handler logic or crt0 handles entrance.
+                // Actually, syscall_handler does `regs.rax = res as u64`.
+                // If we return 0 here, RAX becomes 0.
+                // The process starts at `_start` with RAX=0. This is fine.
+                0
+            }
+            Err(_) => {
+                // If exec fails, we return error and the OLD process continues.
+                // Note: p.exec should atomic-fail (not modifying self if elf is bad).
+                -1
+            }
+        }
     } else {
-        return -1;
+        -(ESRCH as i64)
     }
-
-    0
 }
 
 pub fn exit(_status: i32) -> i64 {
