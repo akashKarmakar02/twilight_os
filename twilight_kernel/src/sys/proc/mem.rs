@@ -14,6 +14,7 @@ pub fn align_dn(x: usize, a: usize) -> usize {
 const USER_LOWER: usize = 0x0000_0000_4000_0000; // pick what fits your layout
 const USER_UPPER: usize = 0x0000_7FFF_F000_0000; // below USER_STACK_TOP
 
+#[derive(Clone)]
 pub struct ProcMM {
     /// Start of the heap (page-aligned), typically align_up(max_end_of_loaded_segments).
     pub heap_start: usize,

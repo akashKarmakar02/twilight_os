@@ -145,7 +145,7 @@ fn write_sockaddr_in(addr_ptr: usize, addrlen_ptr: usize, ep: IpEndpoint) -> Res
 
     let (ip, port) = match ep.addr {
         IpAddress::Ipv4(a) => (a.octets(), ep.port),
-        _ => return Err(-(EAFNOSUPPORT as i64)),
+        // _ => return Err(-(EAFNOSUPPORT as i64)),
     };
 
     let out = unsafe { &mut *(addr_ptr as *mut SockAddrIn) };
@@ -924,22 +924,131 @@ pub fn execev(arg1: usize, arg2: usize, _arg3: usize) -> i64 {
 }
 
 pub fn exit(_status: i32) -> i64 {
-    unsafe { asm!("swapgs") };
-
-    crate::sys::proc::exit();
+    sys::proc::exit(_status);
 
     unreachable!()
 }
 
 pub fn fork(
-    _stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
-    _regs: &mut crate::arch::x86_64::idt::Registers,
+    stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
+    regs: &mut crate::arch::x86_64::idt::Registers,
 ) -> i64 {
+    serial_println!("Fork called");
+    use crate::sys::proc::{InterruptStack, IretRegisters, PreservedRegisters, ScratchRegisters};
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+
+    // We need to find the current process to call fork on it.
+    let current_pid = crate::sys::proc::id();
+    let process_opt = table.proc_list.iter_mut().find(|p| p.pid == current_pid);
+
+    if let Some(process) = process_opt {
+        // Construct the TrapFrame (InterruptStack) from the syscall context
+        let tf = InterruptStack {
+            preserved: PreservedRegisters {
+                r15: regs.r15,
+                r14: regs.r14,
+                r13: regs.r13,
+                r12: regs.r12,
+                rbp: regs.rbp,
+                rbx: regs.rbx,
+            },
+            scratch: ScratchRegisters {
+                r11: regs.r11,
+                r10: regs.r10,
+                r9: regs.r9,
+                r8: regs.r8,
+                rsi: regs.rsi,
+                rdi: regs.rdi,
+                rdx: regs.rdx,
+                rcx: regs.rcx,
+                rax: regs.rax,
+            },
+            iret: IretRegisters {
+                rip: stack_frame.instruction_pointer.as_u64(),
+                cs: stack_frame.code_segment.0 as u64,
+                rflags: stack_frame.cpu_flags.bits(),
+                rsp: stack_frame.stack_pointer.as_u64(),
+                ss: stack_frame.stack_segment.0 as u64,
+            },
+        };
+
+        if let Ok(child_pid) = process.fork(&tf) {
+            return child_pid as i64;
+        }
+    }
+
     -(ENOSYS as i64)
 }
 
-pub fn wait4(_pid: i32, _status_ptr: usize, _options: i32, _rusage_ptr: usize) -> i64 {
-    -(ENOSYS as i64)
+pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i64 {
+    let current_pid = crate::sys::proc::id();
+    let wnohang = 1;
+
+    loop {
+        let mut reaped_pid = None;
+        let mut exit_code = 0;
+        let mut has_children = false;
+
+        {
+            #[allow(static_mut_refs)]
+            let table = unsafe { crate::sys::proc::PROCESS_TABLE.get_mut().unwrap() };
+
+            // We need to iterate and find a child.
+            // Since we might remove it, we collect index first.
+            let mut remove_idx = None;
+
+            for (i, p) in table.proc_list.iter().enumerate() {
+                if p.parent_pid == current_pid {
+                    if pid == -1 || p.pid as i32 == pid {
+                        has_children = true;
+                        if matches!(p.state, crate::sys::proc::ProcessState::Dead) {
+                            remove_idx = Some(i);
+                            exit_code = p.exit_code;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if let Some(idx) = remove_idx {
+                if let Some(p) = table.proc_list.remove(idx) {
+                    reaped_pid = Some(p.pid);
+                    // Process resources should have been cleaned up in exit() mostly,
+                    // or we clean up here?
+                    // In exit(), we freed page table frame, so it's mostly gone.
+                    // The struct itself is dropped here.
+                }
+            } else if !has_children {
+                return -(crate::sys::syscall::SyscallError::ECHILD as i64);
+            }
+        }
+
+        if let Some(rpid) = reaped_pid {
+            if status_ptr != 0 {
+                let status_ref = unsafe { &mut *(status_ptr as *mut i32) };
+                // status format: (exit_code << 8) & 0xFF00
+                *status_ref = (exit_code << 8) & 0xFF00;
+            }
+            return rpid as i64;
+        }
+
+        if (options & wnohang) != 0 {
+            return 0;
+        }
+
+        // Wait (block)
+        {
+            #[allow(static_mut_refs)]
+            let table = unsafe { crate::sys::proc::PROCESS_TABLE.get_mut().unwrap() };
+            if let Some(me) = table.proc_list.iter_mut().find(|p| p.pid == current_pid) {
+                me.state = crate::sys::proc::ProcessState::Waiting;
+            }
+        }
+
+        crate::sys::proc::schedule_now(); // Yield
+    }
 }
 
 pub fn sched_yield() -> i64 {

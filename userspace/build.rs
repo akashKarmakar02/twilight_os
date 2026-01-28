@@ -86,10 +86,17 @@ fn main() -> io::Result<()> {
             }
 
             if let Some(src) = src_file {
-                let dst = fs::canonicalize(out_bin_dir).unwrap_or_else(|_| out_bin_dir.to_path_buf()).join(src.file_name().unwrap());
+                let dst = fs::canonicalize(out_bin_dir)
+                    .unwrap_or_else(|_| out_bin_dir.to_path_buf())
+                    .join(src.file_name().unwrap());
                 println!("Copying {} -> {}", src.display(), dst.display());
                 if let Err(e) = fs::copy(&src, &dst) {
-                    eprintln!("ERROR copying {} -> {} : {}", src.display(), dst.display(), e);
+                    eprintln!(
+                        "ERROR copying {} -> {} : {}",
+                        src.display(),
+                        dst.display(),
+                        e
+                    );
                 } else {
                     // set executable perms
                     if let Ok(mut perms) = fs::metadata(&dst).map(|m| m.permissions()) {
@@ -99,7 +106,10 @@ fn main() -> io::Result<()> {
                     }
                 }
             } else {
-                eprintln!("ERROR: no binary found for app {} after running make. Tried candidates: {:?}", app_name, candidates);
+                eprintln!(
+                    "ERROR: no binary found for app {} after running make. Tried candidates: {:?}",
+                    app_name, candidates
+                );
             }
         } else if has_c_sources(&path) {
             build_c_simple(&path)?;
@@ -225,7 +235,10 @@ fn build_make(path: &Path) -> io::Result<()> {
     let cc = selected_cc();
     let make_cc = cc_for_make(&cc);
     if make_cc == cc {
-        println!("Detected Makefile. Running make with CC={} (default musl-gcc)", cc);
+        println!(
+            "Detected Makefile. Running make with CC={} (default musl-gcc)",
+            cc
+        );
     } else {
         println!(
             "Detected Makefile. Running make with CC={} (from CC={})",
@@ -285,7 +298,10 @@ fn maybe_configure_before_make(path: &Path, cc: &str) -> io::Result<()> {
         }
     }
 
-    println!("Detected tcc configure script. Running ./configure --cc={}", cc);
+    println!(
+        "Detected tcc configure script. Running ./configure --cc={}",
+        cc
+    );
     let mut cmd = Command::new("./configure");
     cmd.arg(format!("--cc={}", cc))
         .current_dir(path)
@@ -326,10 +342,9 @@ fn build_c_simple(path: &Path) -> io::Result<()> {
         if no_pie {
             cmd.arg("-fno-pie").arg("-no-pie");
         }
-        cmd
-            .arg(c_files[0].to_str().unwrap())
+        cmd.arg(c_files[0].file_name().unwrap())
             .arg("-o")
-            .arg(&out)
+            .arg(out.file_name().unwrap())
             .current_dir(path);
         apply_ccache_env(&mut cmd);
         let status = cmd.status()?;
@@ -345,10 +360,10 @@ fn build_c_simple(path: &Path) -> io::Result<()> {
             args.push("-no-pie".to_string());
         }
         for f in &c_files {
-            args.push(f.to_string_lossy().to_string());
+            args.push(f.file_name().unwrap().to_string_lossy().to_string());
         }
         args.push("-o".to_string());
-        args.push(out.to_string_lossy().to_string());
+        args.push(out.file_name().unwrap().to_string_lossy().to_string());
 
         let mut cmd = Command::new(&cc);
         cmd.args(&args).current_dir(path);

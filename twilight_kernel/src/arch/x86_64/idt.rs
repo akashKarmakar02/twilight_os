@@ -6,10 +6,18 @@ use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use x86_64::VirtAddr;
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+pub use x86_64::structures::idt::{
+    InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode,
+};
 
 #[repr(C, align(8))]
 pub struct Registers {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbp: u64,
+    pub rbx: u64,
     pub r11: u64, // clobbered by SYSCALL
     pub r10: u64, // 4th arg (Linux ABI)
     pub r9: u64,  // 6th arg
@@ -74,7 +82,7 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
             crate::sys::proc::id(),
             stack_frame.instruction_pointer.as_u64()
         );
-        crate::sys::proc::exit();
+        crate::sys::proc::exit(1);
         unreachable!()
     }
     println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
@@ -87,7 +95,7 @@ extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame,
             crate::sys::proc::id(),
             stack_frame.instruction_pointer.as_u64()
         );
-        crate::sys::proc::exit();
+        crate::sys::proc::exit(1);
         unreachable!()
     }
     panic!(
@@ -224,7 +232,7 @@ extern "x86-interrupt" fn page_fault_handler(
             crate::sys::proc::id(),
             stack_frame.instruction_pointer.as_u64()
         );
-        crate::sys::proc::exit();
+        crate::sys::proc::exit(1);
         unreachable!()
     }
     panic!("page fault");

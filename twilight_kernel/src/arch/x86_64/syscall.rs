@@ -91,15 +91,27 @@ unsafe extern "C" fn x86_64_syscall_handler() {
     "push r9",
     "push r10",
     "push r11",
+    "push rbx",
+    "push rbp",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
 
     "mov rsi, rsp", // Arg #2: register list
     "mov rdi, rsp", // Arg #1: interupt frame
-    "add rdi, 9 * 8", // 9 registers * 8 bytes
+    "add rdi, 15 * 8", // 15 registers * 8 bytes
 
     "cld",
     "call {x86_64_do_syscall}",
     "cli",
 
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop rbp",
+    "pop rbx",
     "pop r11",
     "pop r10",
     "pop r9",

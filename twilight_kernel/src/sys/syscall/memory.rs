@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use crate::logger;
+
 use crate::sys::memory::{alloc_pages, dealloc_pages, unmap_user_pages};
 use crate::sys::proc::PROCESS_TABLE;
 use crate::sys::proc::mem::{MmapKind, PAGE, align_up};
@@ -159,7 +159,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     va as i64
 }
 
-pub fn mprotect(addr: u64, size: usize, prot: usize) -> i64 {
+pub fn mprotect(_addr: u64, size: usize, _prot: usize) -> i64 {
     if size == 0 {
         return EINVAL;
     }
