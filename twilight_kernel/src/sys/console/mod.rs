@@ -52,7 +52,7 @@ pub fn init_console() {
         #[allow(static_mut_refs)]
         let process_table = unsafe { PROCESS_TABLE.get_mut_unchecked() };
 
-        process_table.run(Process::new(buf, "/", &[], 1).unwrap());
+        process_table.run(Process::new(buf, "/", &[], 0).unwrap());
     }
 }
 
