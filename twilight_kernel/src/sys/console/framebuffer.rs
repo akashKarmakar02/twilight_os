@@ -1,5 +1,5 @@
 use crate::sys::{
-    console::font::PSF_FONTS,
+    console::font::get_glyph,
     framebuffer::{FRAMEBUFFER, convert_color, get_framebuffer},
 };
 
@@ -26,11 +26,14 @@ pub struct FramebufferTerminal {
     cursor_saved_x: usize,
     cursor_saved_y: usize,
     cursor_backup: [u32; CURSOR_BACKUP_LEN],
+    // UTF-8 decoding state
+    utf8_buf: [u8; 4],
+    utf8_len: usize,
 }
 
 #[derive(Clone, Copy)]
 pub struct ScreenChar {
-    pub char: u8,
+    pub char: char,
     pub color: u32,
 }
 
@@ -55,6 +58,8 @@ impl FramebufferTerminal {
             cursor_saved_x: 0,
             cursor_saved_y: 0,
             cursor_backup: [0; CURSOR_BACKUP_LEN],
+            utf8_buf: [0; 4],
+            utf8_len: 0,
         };
         term.clear();
         term.draw_cursor();
@@ -232,7 +237,7 @@ impl FramebufferTerminal {
                 x,
                 y,
                 ScreenChar {
-                    char: b' ',
+                    char: ' ',
                     color: self.color,
                 },
             );
@@ -255,21 +260,64 @@ impl FramebufferTerminal {
         self.draw_cursor();
     }
 
-    /// Write a single character at the current cursor position
-    pub fn put_char(&mut self, c: u8) {
+    /// Write a single byte to the terminal, decoding UTF-8 on the fly
+    pub fn put_byte(&mut self, byte: u8) {
+        // If we have no pending bytes, and this is a single-byte char (0xxxxxxx), print it immediately.
+        if self.utf8_len == 0 && (byte & 0x80) == 0 {
+            self.put_char_utf32(byte as char);
+            return;
+        }
+
+        // Otherwise, buffer it.
+        if self.utf8_len < self.utf8_buf.len() {
+            self.utf8_buf[self.utf8_len] = byte;
+            self.utf8_len += 1;
+        }
+
+        // Check if we have a valid UTF-8 sequence
+        if let Ok(s) = core::str::from_utf8(&self.utf8_buf[0..self.utf8_len]) {
+            // It's valid! (and complete, because form_utf8 checks for completeness if key is correct?
+            // Wait, from_utf8 might fail if incomplete.
+            // Actually, from_utf8 succeeds for complete chars.
+            // But if we have partial, it fails.
+            // We need to know if it's *valid so far* or *complete*.
+
+            // Simple approach: if from_utf8 succeeds, we emit just that char.
+            // Since we only buffer up to 4 bytes, and we process one by one.
+            if let Some(c) = s.chars().next() {
+                self.put_char_utf32(c);
+                self.utf8_len = 0;
+            }
+        } else if self.utf8_len >= 4 {
+            // Buffer full and invalid -> garbage. Drop buffer, print replacement?
+            // For now, just reset to avoid stuck state.
+            // Maybe print replacement char ''?
+            self.put_char_utf32('?');
+            self.utf8_len = 0;
+        } else {
+            // Incomplete or invalid, wait for more bytes (unless we determined it's definitely invalid,
+            // but std utf8 validation is complex to perform manually without std helper).
+            // However, `core::str::from_utf8` errors if incomplete.
+            // Example: [0xE2] -> error (part of 3-byte seq).
+            // We continue buffering.
+        }
+    }
+
+    /// Internal: Write a decoded Unicode character
+    fn put_char_utf32(&mut self, c: char) {
         self.erase_cursor();
         match c {
-            b'\n' => {
+            '\n' => {
                 self.new_line();
                 self.draw_cursor();
                 return;
             }
-            0x08 | 0x7F => {
+            '\u{08}' | '\u{7F}' => {
                 self.backspace();
                 self.draw_cursor();
                 return;
             }
-            b'\r' => {
+            '\r' => {
                 self.cursor_x = 0;
                 self.draw_cursor();
                 return;
@@ -280,8 +328,8 @@ impl FramebufferTerminal {
             self.new_line();
         }
 
-        // Keep controls invisible; everything else can use the expanded font table
-        let ch = if c.is_ascii_control() { b'?' } else { c };
+        // Keep controls invisible; everything else is rendered
+        let ch = if c.is_control() { '?' } else { c };
 
         let x = self.cursor_x * Self::CHAR_W;
         let y = self.cursor_y * Self::CHAR_H;
@@ -304,7 +352,7 @@ impl FramebufferTerminal {
     /// Writes a full string (no ANSI yet)
     pub fn write(&mut self, s: &str) {
         for &b in s.as_bytes() {
-            self.put_char(b);
+            self.put_byte(b);
         }
     }
 
@@ -350,10 +398,7 @@ impl FramebufferTerminal {
             )
         };
 
-        // Grab glyph from expanded font table; fall back to '?' if somehow missing
-        let glyph_opt = PSF_FONTS
-            .get(ascii as usize)
-            .or_else(|| PSF_FONTS.get(b'?' as usize));
+        let glyph_opt = get_glyph(ascii);
 
         if let Some(font_bitmap) = glyph_opt {
             #[allow(static_mut_refs)]

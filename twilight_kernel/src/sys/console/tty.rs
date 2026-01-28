@@ -226,14 +226,14 @@ impl Tty {
                 }
                 _ if Self::is_control_forced_flush(b) => {
                     self.flush_output();
-                    self.term.put_char(b);
+                    self.term.put_byte(b);
                 }
                 _ if Self::is_printable_ascii(b) => {
                     self.output_buffer.lock().push_back(b);
                 }
                 _ => {
                     self.flush_output();
-                    self.term.put_char(b);
+                    self.term.put_byte(b);
                 }
             },
             AnsiState::Esc => {
@@ -548,8 +548,8 @@ impl Tty {
             if i < tmp.len() {
                 let b = tmp[i];
                 match b {
-                    b'\n' | b'\r' | 0x08 | 0x7F => self.term.put_char(b),
-                    _ => self.term.put_char(b),
+                    b'\n' | b'\r' | 0x08 | 0x7F => self.term.put_byte(b),
+                    _ => self.term.put_byte(b),
                 }
                 i += 1;
             }
