@@ -52,9 +52,7 @@ run-x86_64: $(IMAGE_NAME).iso
 		-m 1024 \
 		-netdev user,id=net0,hostfwd=tcp::8080-:80 -device rtl8139,netdev=net0 \
 		-smp 4 \
-		-usb \
-		-device usb-mouse \
-		-device piix3-usb-uhci \
+		-device qemu-xhci \
 		-drive file=hdd.img,format=raw,if=ide \
 		-cdrom $(IMAGE_NAME).iso \
 		-serial stdio \
