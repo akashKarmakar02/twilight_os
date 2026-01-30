@@ -1,4 +1,5 @@
 mod full;
+mod disk;
 mod null;
 mod random;
 mod zero;
@@ -9,6 +10,7 @@ use crate::driver::mouse::MouseDev;
 use crate::fs::vfs::Metadata;
 use crate::sys::console::tty::TtyDev;
 use crate::sys::framebuffer::FramebufferDev;
+use crate::sys::fs::devfs::disk::{Disk0, disk_size_bytes};
 use crate::sys::fs::devfs::full::Full;
 use crate::sys::fs::devfs::null::Null;
 use crate::sys::fs::devfs::random::{RandomDev, URandomDev};
@@ -105,6 +107,12 @@ impl DevFs {
             ),
         ));
 
+        let disk0_meta = Metadata::blk(12, "disk0", disk_size_bytes().unwrap_or(0));
+        devices.push((
+            "disk0".to_string(),
+            VfsNode::new(dummy_blockdev(), disk0_meta, Arc::new(RwLock::new(Disk0))),
+        ));
+
         DevFs {
             file_structure: devices,
         }
@@ -165,7 +173,13 @@ impl FileSystem for DevFs {
             .iter()
             .find(|(p, _)| p.as_str() == rel)
         {
-            return Ok(node.clone());
+            let mut out = node.clone();
+            if rel == "disk0" {
+                if let Some(sz) = disk_size_bytes() {
+                    out.metadata.size = sz;
+                }
+            }
+            return Ok(out);
         }
 
         Err(())
@@ -217,7 +231,13 @@ impl FileSystem for DevFs {
             .iter()
             .find(|(p, _)| p.as_str() == rel)
         {
-            return Ok(node.metadata.clone());
+            let mut out = node.metadata.clone();
+            if rel == "disk0" {
+                if let Some(sz) = disk_size_bytes() {
+                    out.size = sz;
+                }
+            }
+            return Ok(out);
         }
 
         Err(())

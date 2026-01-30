@@ -1,14 +1,15 @@
-use crate::sys::memory::{phys_to_virt};
-use core::ptr::NonNull;
-use x86_64::structures::paging::FrameAllocator;
-use x86_64::PhysAddr;
 use crate::sys::memory::bitmap::with_frame_allocator;
+use crate::sys::memory::phys_to_virt;
+use core::ptr::NonNull;
+use x86_64::structures::paging::{FrameDeallocator, PhysFrame, Size4KiB};
+use x86_64::{PhysAddr, VirtAddr};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct PhysBuf {
     phys: PhysAddr,
     virt: NonNull<u8>,
     len: usize,
+    pages: usize,
 }
 
 unsafe impl Send for PhysBuf {}
@@ -20,29 +21,47 @@ impl PhysBuf {
         let aligned_len = (len + 0xFFF) & !0xFFF;
 
         let num_pages = aligned_len / 0x1000;
-        let mut first_frame = None;
-
-        with_frame_allocator(|frame_allocator| {
-            for i in 0..num_pages {
-                let frame = frame_allocator.allocate_frame().expect("Out of memory");
-                if i == 0 {
-                    first_frame = Some(frame);
-                }
-            }
+        let first_frame = with_frame_allocator(|frame_allocator| {
+            frame_allocator
+                .allocate_contiguous(num_pages)
+                .expect("Out of contiguous DMA memory")
         });
 
-        let phys = first_frame.unwrap().start_address();
+        let phys = first_frame.start_address();
         let virt = phys_to_virt(phys).as_mut_ptr();
+        // let page = Page::containing_address(virt);
+        // unsafe {
+        //     mapper().map_to(page, virt);
+        // }
 
         Self {
             phys,
             virt: NonNull::new(virt).expect("Failed to map phys addr"),
             len,
+            pages: num_pages,
         }
+    }
+
+    pub fn virt_addr(&self) -> VirtAddr {
+        phys_to_virt(self.phys)
     }
 
     pub fn addr(&self) -> u64 {
         self.phys.as_u64()
+    }
+}
+
+impl Drop for PhysBuf {
+    fn drop(&mut self) {
+        let start = self.phys.as_u64();
+        let pages = self.pages;
+        with_frame_allocator(|frame_allocator| {
+            for page_idx in 0..pages {
+                let addr = PhysAddr::new(start + (page_idx as u64) * 0x1000);
+                let frame: PhysFrame<Size4KiB> = PhysFrame::containing_address(addr);
+                unsafe { frame_allocator.deallocate_frame(frame) };
+            }
+        });
     }
 }
 

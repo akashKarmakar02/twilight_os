@@ -5,7 +5,7 @@ pub mod metadata;
 pub mod superblock;
 
 use crate::driver;
-use crate::driver::disk::BlockDeviceIO;
+use crate::driver::disk::{BlockDeviceIO, BLOCK_DEVICE};
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
 use crate::sys::fs::twilight_fs::FsError::{
@@ -14,6 +14,7 @@ use crate::sys::fs::twilight_fs::FsError::{
 use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -23,9 +24,15 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use spin::rwlock::RwLock;
+use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
+use crate::sys::fs::MFS;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
 static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);
+
+const PATH_LOOKUP_CACHE_CAPACITY: usize = 1024;
+const FILE_CACHE_MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+const FILE_CACHE_MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 
 #[inline]
 pub fn fs_block_offset_bytes() -> usize {
@@ -103,6 +110,22 @@ fn detect_twilight_partition(bus: u8, dsk: u8) -> Option<PartitionEntry> {
     partition::find_entry(&entries, TWILIGHT_PARTITION_TYPE)
 }
 
+fn detect_twilight_partition_blk_dev() -> Option<PartitionEntry> {
+    let mut sector = [0u8; 512];
+    #[allow(static_mut_refs)]
+    let dev = unsafe { BLOCK_DEVICE.as_mut().unwrap() };
+    if dev.read(0, &mut sector).is_err() {
+        return None;
+    }
+
+    if !partition::has_signature(&sector) {
+        return None;
+    }
+
+    let entries = partition::decode_entries(&sector);
+    partition::find_entry(&entries, TWILIGHT_PARTITION_TYPE)
+}
+
 pub fn format_superblock(
     block_device: &'static mut dyn BlockDeviceIO,
     partition_start_lba: u32,
@@ -116,6 +139,7 @@ pub fn format_superblock(
     Ok(TwilightFs {
         superblock: sb,
         device: device_arc,
+        shared: Arc::new(TwilightFsShared::new()),
     })
 }
 
@@ -144,9 +168,167 @@ pub enum TfsError {
     InvalidZone,
 }
 
+#[derive(Default)]
+struct PathLookupCache {
+    generation: usize,
+    map: BTreeMap<String, u32>,
+    order: VecDeque<String>,
+}
+
+impl PathLookupCache {
+    fn ensure_generation(&mut self, generation: usize) {
+        if self.generation != generation {
+            self.generation = generation;
+            self.map.clear();
+            self.order.clear();
+        }
+    }
+
+    fn get(&mut self, generation: usize, path: &str) -> Option<u32> {
+        self.ensure_generation(generation);
+        self.map.get(path).copied()
+    }
+
+    fn insert(&mut self, generation: usize, path: String, ino: u32) {
+        self.ensure_generation(generation);
+
+        if self.map.contains_key(path.as_str()) {
+            return;
+        }
+
+        self.map.insert(path.clone(), ino);
+        self.order.push_back(path);
+
+        while self.order.len() > PATH_LOOKUP_CACHE_CAPACITY {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(old.as_str());
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct FileContentCache {
+    generation: usize,
+    total_bytes: usize,
+    map: BTreeMap<u32, Vec<u8>>,
+    order: VecDeque<u32>,
+}
+
+impl FileContentCache {
+    fn ensure_generation(&mut self, generation: usize) {
+        if self.generation != generation {
+            self.generation = generation;
+            self.total_bytes = 0;
+            self.map.clear();
+            self.order.clear();
+        }
+    }
+
+    fn get_slice(
+        &mut self,
+        generation: usize,
+        inode_no: u32,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Option<usize> {
+        self.ensure_generation(generation);
+        let data = self.map.get(&inode_no)?;
+        if offset >= data.len() {
+            return Some(0);
+        }
+        let n = core::cmp::min(buf.len(), data.len() - offset);
+        buf[..n].copy_from_slice(&data[offset..offset + n]);
+        Some(n)
+    }
+
+    fn insert(&mut self, generation: usize, inode_no: u32, data: Vec<u8>) {
+        self.ensure_generation(generation);
+
+        let size = data.len();
+        if size == 0 || size > FILE_CACHE_MAX_FILE_BYTES || size > FILE_CACHE_MAX_TOTAL_BYTES {
+            return;
+        }
+
+        if self.map.contains_key(&inode_no) {
+            return;
+        }
+
+        while self.total_bytes + size > FILE_CACHE_MAX_TOTAL_BYTES {
+            let Some(evict) = self.order.pop_front() else { break };
+            if let Some(old) = self.map.remove(&evict) {
+                self.total_bytes = self.total_bytes.saturating_sub(old.len());
+            }
+        }
+
+        self.total_bytes += size;
+        self.map.insert(inode_no, data);
+        self.order.push_back(inode_no);
+    }
+}
+
+pub(crate) struct TwilightFsShared {
+    generation: AtomicUsize,
+    lookup_cache: Mutex<PathLookupCache>,
+    file_cache: Mutex<FileContentCache>,
+}
+
+impl TwilightFsShared {
+    fn new() -> Self {
+        Self {
+            generation: AtomicUsize::new(0),
+            lookup_cache: Mutex::new(PathLookupCache::default()),
+            file_cache: Mutex::new(FileContentCache::default()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn generation(&self) -> usize {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn invalidate_all(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[inline]
+    pub(crate) fn lookup_cached(&self, path: &str) -> Option<u32> {
+        let generation = self.generation();
+        self.lookup_cache.lock().get(generation, path)
+    }
+
+    #[inline]
+    pub(crate) fn insert_lookup(&self, path: String, ino: u32) {
+        let generation = self.generation();
+        self.lookup_cache.lock().insert(generation, path, ino);
+    }
+
+    #[inline]
+    pub(crate) fn read_cached_file_slice(
+        &self,
+        inode_no: u32,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Option<usize> {
+        let generation = self.generation();
+        self.file_cache
+            .lock()
+            .get_slice(generation, inode_no, offset, buf)
+    }
+
+    #[inline]
+    pub(crate) fn insert_file_cache(&self, inode_no: u32, data: Vec<u8>) {
+        let generation = self.generation();
+        self.file_cache.lock().insert(generation, inode_no, data);
+    }
+}
+
+#[derive(Clone)]
 pub struct TwilightFs {
     pub superblock: Superblock,
     pub device: BlockDev,
+    pub(crate) shared: Arc<TwilightFsShared>,
 }
 
 impl TwilightFs {
@@ -155,19 +337,45 @@ impl TwilightFs {
             return Err(FsError::InvalidPath);
         }
 
+        if path == "/" {
+            return Ok(1);
+        }
+
+        let mut canonical = String::new();
+        if !path.starts_with('/') {
+            canonical.push('/');
+        }
+        canonical.push_str(path);
+
+        if let Some(ino) = self.shared.lookup_cached(canonical.as_str()) {
+            return Ok(ino);
+        }
+
         // Start from root inode (assumed to be inode number 1)
         let mut current_inode = 1;
 
         // Skip empty and root path
-        let path_parts = path.split('/').filter(|s| !s.is_empty());
+        let path_parts = canonical.split('/').filter(|s| !s.is_empty());
+        let mut prefix = String::from("/");
 
         for part in path_parts {
-            match self.find_dir_entry(current_inode, part).unwrap() {
-                Some(inode) => current_inode = inode,
-                None => return Err(FileNotFound),
+            let next = self
+                .find_dir_entry(current_inode, part)
+                .map_err(|_| FsError::InvalidInode)?;
+
+            let Some(inode) = next else {
+                return Err(FileNotFound);
+            };
+
+            if prefix.len() > 1 {
+                prefix.push('/');
             }
+            prefix.push_str(part);
+            self.shared.insert_lookup(prefix.clone(), inode);
+            current_inode = inode;
         }
 
+        self.shared.insert_lookup(canonical, current_inode);
         Ok(current_inode)
     }
 
@@ -197,12 +405,47 @@ impl TwilightFs {
         Ok(TwilightFs {
             superblock: sb,
             device: device_arc,
+            shared: Arc::new(TwilightFsShared::new()),
+        })
+    }
+    pub fn check_virtio_blk() -> Result<Self, &'static str> {
+        if let Some(entry) = detect_twilight_partition_blk_dev() {
+            set_fs_block_offset_lba(entry.lba_start);
+        } else {
+            set_fs_block_offset_bytes(0);
+        }
+
+        let mut device = VirtioBlkHandle;
+        let mut buf = [0u8; FS_BLOCK_SIZE];
+        if read_tfs_block(&mut device, 0, &mut buf).is_err() {
+            return Err("Failed to read Twilight FS superblock");
+        }
+
+
+        let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
+        if !sb.is_valid() {
+            return Err("Invalid Twilight FS superblock magic");
+        }
+
+        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(VirtioBlkHandle);
+        let device_arc = Arc::new(Mutex::new(device_box));
+
+        Ok(TwilightFs {
+            superblock: sb,
+            device: device_arc,
+            shared: Arc::new(TwilightFsShared::new()),
         })
     }
 
     pub fn allocate_zone(&mut self) -> Result<u32, TfsError> {
         let bits_per_block = self.superblock.block_size as usize * 8;
-        let zmap_start = self.superblock.imap_blocks + 2;
+        // Layout: block 0 superblock, then imap, then zmap, then inode table.
+        // So zmap starts right after the imap.
+        let zmap_start = self.superblock.imap_blocks + 1;
+        let max_data_zones = self
+            .superblock
+            .zones
+            .saturating_sub(self.superblock.first_data_zone);
 
         let mut buf = [0u8; FS_BLOCK_SIZE];
         for i in 0..self.superblock.zmap_blocks {
@@ -214,6 +457,10 @@ impl TwilightFs {
                 if buf[byte_idx] != 0xFF {
                     for bit in 0..8 {
                         if buf[byte_idx] & (1 << bit) == 0 {
+                            let zone = i * bits_per_block as u32 + (byte_idx * 8 + bit) as u32;
+                            if zone >= max_data_zones {
+                                return Err(TfsError::NoSpaceLeft);
+                            }
                             buf[byte_idx] |= 1 << bit;
                             if write_tfs_block(self.device.lock().as_mut(), zmap_start + i, &buf)
                                 .is_err()
@@ -221,7 +468,6 @@ impl TwilightFs {
                                 return Err(TfsError::IoError);
                             }
 
-                            let zone = i * bits_per_block as u32 + (byte_idx * 8 + bit) as u32;
                             return Ok(zone + self.superblock.first_data_zone);
                         }
                     }
@@ -289,7 +535,8 @@ impl TwilightFs {
             return Err(TfsError::InvalidZone);
         }
 
-        let zmap_start = 2 + self.superblock.imap_blocks;
+        // Layout: block 0 superblock, then imap, then zmap.
+        let zmap_start = 1 + self.superblock.imap_blocks;
         let zmap_block = zmap_start + block_index as u32;
 
         let mut buf = [0u8; FS_BLOCK_SIZE];
@@ -345,7 +592,8 @@ impl TwilightFs {
         let block_size = self.superblock.block_size as usize;
         let inodes_per_block = block_size / inode_size;
 
-        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 2;
+        // Layout: block 0 superblock, then imap, then zmap, then inode table.
+        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 1;
         let block_offset = inode_index / inodes_per_block;
         let byte_offset = (inode_index % inodes_per_block) * inode_size;
         let block_num = inode_table_start + block_offset as u32;
@@ -378,7 +626,8 @@ impl TwilightFs {
         let block_size = self.superblock.block_size as usize;
         let inodes_per_block = block_size / inode_size;
 
-        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 2;
+        // Layout: block 0 superblock, then imap, then zmap, then inode table.
+        let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 1;
         let block_offset = inode_index / inodes_per_block;
         let byte_offset = (inode_index % inodes_per_block) * inode_size;
         let block_num = inode_table_start + block_offset as u32;
@@ -557,6 +806,7 @@ impl TwilightFs {
         self.create_dir_entry(parent_inode_num, name, new_inode_num)
             .unwrap();
 
+        self.shared.invalidate_all();
         Ok(new_inode_num)
     }
 
@@ -605,7 +855,7 @@ impl TwilightFs {
             }
 
             let mut indirect_block = [0u8; FS_BLOCK_SIZE];
-            write_tfs_block(
+            read_tfs_block(
                 self.device.lock().as_mut(),
                 inode.indirect_zones,
                 &mut indirect_block,
@@ -752,6 +1002,7 @@ impl TwilightFs {
         inode.size = bytes_written as u64;
         self.write_inode(inode_num, &inode).unwrap();
 
+        self.shared.invalidate_all();
         Ok(())
     }
 
@@ -880,6 +1131,7 @@ impl TwilightFs {
         self.create_dir_entry(new_inode_num, "..", parent_inode_num)
             .unwrap();
 
+        self.shared.invalidate_all();
         Ok(new_inode_num)
     }
 
@@ -1108,6 +1360,7 @@ impl TwilightFs {
                     }
                     self.write_inode(parent_inode_num, &parent_inode).unwrap();
 
+                    self.shared.invalidate_all();
                     return Ok(());
                 }
             }
@@ -1202,12 +1455,10 @@ impl FileSystem for TwilightFs {
                 },
                 Arc::new(RwLock::new(TFSVfsNode {
                     inode,
-                    ctx: Arc::new(Mutex::new(TwilightFs {
-                        device: self.device.clone(),
-                        superblock: self.superblock.clone(),
-                    })),
+                    ctx: Arc::new(Mutex::new(self.clone())),
                     full_path: path.to_string(),
                     inode_no,
+                    shared: self.shared.clone(),
                 })),
             );
             Ok(node)
@@ -1309,5 +1560,44 @@ impl FileSystem for TwilightFs {
         } else {
             Err(())
         }
+    }
+}
+
+pub struct TfsProxy;
+
+impl FileSystem for TfsProxy {
+    fn open(&mut self, path: &str) -> Result<VfsNode, ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.open(path)
+    }
+
+    fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.mkdir(parent_dir, path)
+    }
+
+    fn rmdir(&mut self, path: &str) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.rmdir(path)
+    }
+
+    fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.ls(path)
+    }
+
+    fn rm(&mut self, path: &str) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.rm(path)
+    }
+
+    fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.touch(parent_path, filename)
+    }
+
+    fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.metadata(path)
     }
 }

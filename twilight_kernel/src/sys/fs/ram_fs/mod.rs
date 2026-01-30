@@ -24,7 +24,9 @@ pub struct InitramfsFs {
 
 impl InitramfsFs {
     pub fn new() -> Self {
-        let mut initramfs = INITRAMFS.lock();
+        // Don't consume the global iterator; clone it so the initramfs can be iterated multiple times
+        // (e.g. once for mounting `/` and again for `install`).
+        let mut initramfs = INITRAMFS.lock().clone();
 
         let mut root_children: BTreeMap<String, Node> = BTreeMap::new();
 

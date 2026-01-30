@@ -12,6 +12,16 @@ $(call USER_VARIABLE,KARCH,x86_64)
 # Default user QEMU flags. These are appended to the QEMU command calls.
 $(call USER_VARIABLE,QEMUFLAGS,-m 2G)
 
+# On musl-based hosts (e.g. Alpine), rustup may select the musl toolchain for the pinned nightly,
+# but that can fail to start if the system's libgcc_s/libc compatibility is mismatched.
+# If a glibc loader is available, prefer the GNU toolchain unless the user overrides it.
+ifneq ($(wildcard /lib/ld-musl-x86_64.so.1),)
+ifneq ($(wildcard /lib64/ld-linux-x86-64.so.2),)
+$(call USER_VARIABLE,RUSTUP_TOOLCHAIN,nightly-2025-06-01-x86_64-unknown-linux-gnu)
+endif
+endif
+export RUSTUP_TOOLCHAIN
+
 override IMAGE_NAME := twilight-os
 
 .PHONY: all
@@ -75,6 +85,23 @@ run-hdd-x86_64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NA
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
 		-drive if=pflash,unit=1,format=raw,file=ovmf/ovmf-vars-$(KARCH).fd \
 		-hda $(IMAGE_NAME).hdd
+
+.PHONY: run-blk-bios
+run-blk-bios: $(IMAGE_NAME).iso
+	@if [ ! -f hdd.img ]; then \
+		echo "Creating hdd.img..."; \
+		qemu-img create -f raw hdd.img 1G; \
+	fi
+	qemu-system-$(KARCH) \
+		-m 1024 \
+		-smp 4 \
+		-boot d \
+  		-netdev user,id=net0,hostfwd=tcp::8080-:80 \
+  		-device rtl8139,netdev=net0 \
+		-cdrom $(IMAGE_NAME).iso \
+  		-drive file=hdd.img,if=none,format=raw,id=vd0 \
+  		-device virtio-blk-pci,drive=vd0 \
+		-serial stdio
 
 .PHONY: run-aarch64
 run-aarch64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
@@ -266,7 +293,7 @@ endif
 
 $(IMAGE_NAME).hdd: limine/limine kernel userspace cpio
 	rm -f $(IMAGE_NAME).hdd
-	dd if=/dev/zero bs=1M count=0 seek=1024 of=$(IMAGE_NAME).hdd
+	dd if=/dev/zero bs=1M count=0 seek=100 of=$(IMAGE_NAME).hdd
 	PATH=$$PATH:/usr/sbin:/sbin sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00 -m 1
 	./limine/limine bios-install $(IMAGE_NAME).hdd
 ifeq ($(KARCH),x86_64)
@@ -294,7 +321,7 @@ endif
 
 .PHONY: clean
 clean:
-	$(MAKE) -C kernel clean
+	$(MAKE) -C twilight_kernel clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
 .PHONY: distclean

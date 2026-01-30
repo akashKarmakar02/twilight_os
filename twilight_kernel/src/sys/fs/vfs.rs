@@ -73,6 +73,17 @@ impl Metadata {
             modified_time: 0,
         }
     }
+    pub(crate) fn blk(ino: u32, name: &str, size: usize) -> Self {
+        Metadata {
+            ino,
+            name: name.into(),
+            file_type: FileType::BlockDevice,
+            size,
+            access_time: 0,
+            created_time: 0,
+            modified_time: 0,
+        }
+    }
 }
 pub type BlockDev = Arc<Mutex<Box<dyn BlockDeviceIO + Send>>>;
 
@@ -138,6 +149,12 @@ impl VfsNode {
             .write()
             .mmap(&mut self.device, process, addr, len, prot, flags, offset)
     }
+
+    pub fn truncate(&mut self, len: usize) -> Result<(), i32> {
+        self.node.write().truncate(&mut self.device, len)?;
+        self.metadata.size = len;
+        Ok(())
+    }
 }
 
 impl Clone for VfsNode {
@@ -156,6 +173,9 @@ pub trait VfsNodeOps: Send + Sync + 'static {
     fn poll(&self, device: &mut BlockDev) -> Result<bool, ()>;
     fn ioctl(&mut self, device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()>;
     fn unlink(&mut self, device: &mut BlockDev) -> Result<i32, ()>;
+    fn truncate(&mut self, _device: &mut BlockDev, _len: usize) -> Result<(), i32> {
+        Err(-38)
+    }
     fn mmap(
         &mut self,
         _device: &mut BlockDev,

@@ -1,5 +1,3 @@
-const ASCII_PRINTABLE_START: usize = 32;
-
 #[rustfmt::skip]
 const BASE_PSF_FONTS: [[u16; 16]; 95] = [
     [
@@ -479,25 +477,140 @@ const BASE_PSF_FONTS: [[u16; 16]; 95] = [
     ],
 ];
 
-const fn build_full_font_table() -> [[u16; 16]; 256] {
-    // Default every slot to the '?' glyph so unknown characters render visibly.
-    let mut table = [[0u16; 16]; 256];
-    let fallback = BASE_PSF_FONTS[(b'?' as usize) - ASCII_PRINTABLE_START];
+pub fn get_glyph(c: char) -> Option<[u16; 16]> {
+    let codepoint = c as u32;
 
-    let mut i = 0;
-    while i < table.len() {
-        table[i] = fallback;
-        i += 1;
+    // ASCII range
+    if codepoint >= 32 && codepoint < 127 {
+        return Some(BASE_PSF_FONTS[(codepoint as usize) - 32]);
     }
 
-    // Overlay the printable ASCII range we have bitmaps for.
-    let mut printable_idx = 0;
-    while printable_idx < BASE_PSF_FONTS.len() {
-        table[ASCII_PRINTABLE_START + printable_idx] = BASE_PSF_FONTS[printable_idx];
-        printable_idx += 1;
+    // Block Elements (U+2580..U+259F)
+    if codepoint >= 0x2580 && codepoint <= 0x259F {
+        return Some(get_block_element_glyph(codepoint));
     }
 
-    table
+    // Box Drawing (Basic set needed for boxes)
+    if codepoint >= 0x2500 && codepoint <= 0x257F {
+        return Some(get_box_drawing_glyph(codepoint));
+    }
+
+    // Fallback/Control chars
+    if codepoint == '?' as u32 {
+        return Some(BASE_PSF_FONTS[(b'?' as usize) - 32]);
+    }
+
+    None
 }
 
-pub static PSF_FONTS: [[u16; 16]; 256] = build_full_font_table();
+fn get_block_element_glyph(codepoint: u32) -> [u16; 16] {
+    let mut bitmap = [0u16; 16];
+    match codepoint {
+        0x2580 => {
+            // Upper half block
+            for i in 0..8 {
+                bitmap[i] = 0xFF;
+            }
+        }
+        0x2584 => {
+            // Lower half block
+            for i in 8..16 {
+                bitmap[i] = 0xFF;
+            }
+        }
+        0x2588 => {
+            // Full block
+            for i in 0..16 {
+                bitmap[i] = 0xFF;
+            }
+        }
+        0x2591 => {
+            // Light shade
+            for i in 0..16 {
+                bitmap[i] = if i % 2 == 0 { 0x55 } else { 0xAA };
+            }
+        }
+        0x2592 => {
+            // Medium shade
+            for i in 0..16 {
+                bitmap[i] = if i % 2 == 0 { 0x33 } else { 0xCC };
+            }
+        }
+        0x2593 => {
+            // Dark shade
+            for i in 0..16 {
+                bitmap[i] = if i % 2 == 0 { 0x77 } else { 0xDD };
+            }
+        }
+        // Add more specific ones if needed, but these are the big ones.
+        // Defaults to full block for "unknown" block chars to be safe?
+        // Or specific logic.
+        _ => {
+            // Generic fallback for unhandled block chars: Full block (looks better than ?)
+            for i in 0..16 {
+                bitmap[i] = 0xFF;
+            }
+        }
+    }
+    bitmap
+}
+
+fn get_box_drawing_glyph(codepoint: u32) -> [u16; 16] {
+    // Simplified generative box drawing
+    let mut bitmap = [0u16; 16];
+
+    // Bits representing connections: Up, Right, Down, Left
+    // 0x1 = Up, 0x2 = Right, 0x4 = Down, 0x8 = Left
+    let mask = match codepoint {
+        0x2500 => 0xA, // ─  (Left + Right)
+        0x2502 => 0x5, // │  (Up + Down)
+        0x250C => 0x6, // ┌  (Right + Down)
+        0x2510 => 0xC, // ┐  (Left + Down)
+        0x2514 => 0x3, // └  (Right + Up)
+        0x2518 => 0x9, // ┘  (Left + Up)
+        0x251C => 0x7, // ├  (Up + Right + Down)
+        0x2524 => 0xD, // ┤  (Up + Left + Down)
+        0x252C => 0xE, // ┬  (Left + Right + Down)
+        0x2534 => 0xB, // ┴  (Left + Right + Up)
+        0x253C => 0xF, // ┼  (All)
+        _ => 0x0,
+    };
+
+    if mask == 0 {
+        return bitmap;
+    }
+
+    // Draw center
+    // Center is pixels (3,4) in x, (7,8) in y? 8x16 char.
+    // Let's say center is x=3,4. y=7,8.
+
+    // Vertical stroke (Up/Down) at x=3,4
+    if (mask & 0x1) != 0 {
+        // Up
+        for y in 0..8 {
+            bitmap[y] |= 0x18;
+        } // 00011000
+    }
+    if (mask & 0x4) != 0 {
+        // Down
+        for y in 8..16 {
+            bitmap[y] |= 0x18;
+        }
+    }
+
+    // Horizontal stroke (Left/Right) at y=7,8
+    // Left: x=0..4. Right: x=4..8
+    if (mask & 0x8) != 0 {
+        // Left
+        bitmap[7] |= 0xF0; // 11110000
+        bitmap[8] |= 0xF0;
+    }
+    if (mask & 0x2) != 0 {
+        // Right
+        bitmap[7] |= 0x0F; // 00001111
+        bitmap[8] |= 0x0F;
+    }
+
+    // Ensure center intersection is clean (already handled by overlapping bitwise ORs)
+    bitmap
+}

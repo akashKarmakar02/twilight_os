@@ -1,263 +1,138 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Twilight OS — Server</title>
-    <!-- Tailwind CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        bg: '#0b1020',
-                        fg: '#e6e9f2',
-                        muted: '#9aa3b2',
-                        accent: '#8ab4ff',
-                        accent2: '#c084fc',
-                        ok: '#22c55e',
-                        phosphor: {
-                            green: '#9aff9a',
-                            amber: '#ffd47a'
-                        }
-                    },
-                    fontFamily: {
-                        mono: ["ui-monospace","SFMono-Regular","Menlo","Monaco","Consolas","\"Liberation Mono\"","monospace"],
-                        sans: ["Inter","ui-sans-serif","system-ui","-apple-system","\"Segoe UI\"","Roboto","\"Helvetica Neue\"","Arial","\"Noto Sans\"","\"Apple Color Emoji\"","\"Segoe UI Emoji\"","\"Segoe UI Symbol\"","sans-serif"]
-                    },
-                    boxShadow: {
-                        inner1: 'inset 0 0 0 1px rgba(255,255,255,0.06)',
-                    },
-                    keyframes: {
-                        scan: { '0%,100%': { opacity: 0.15 }, '50%': { opacity: 0.3 } },
-                        pulseDot: { '0%': { boxShadow: '0 0 0 0 rgba(34,197,94,0.6)' }, '70%': { boxShadow: '0 0 0 14px rgba(34,197,94,0)' }, '100%': { boxShadow: '0 0 0 0 rgba(34,197,94,0)' } },
-                        blink: { '0%,49%': { opacity: 1 }, '50%,100%': { opacity: 0 } },
-                    },
-                    animation: {
-                        scan: 'scan 6s linear infinite',
-                        pulseDot: 'pulseDot 2s infinite',
-                        blink: 'blink 1s steps(1,end) infinite'
-                    }
-                }
-            }
-        }
-    </script>
-    <style>
-        /* Subtle CRT + dithering */
-        .crt:before {
-            content: "";
-            position: absolute; inset: 0;
-            background: repeating-linear-gradient(0deg, rgba(255,255,255,0.04), rgba(255,255,255,0.04) 1px, transparent 1px, transparent 2px);
-            pointer-events: none; mix-blend-mode: soft-light;
-        }
-        .noise:after{
-            content: ""; position: fixed; inset: -20%;
-            background-image: url('data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'140\' height=\'140\'><filter id=\'n\'><feTurbulence type=\'fractalNoise\' baseFrequency=\'0.8\' numOctaves=\'4\' stitchTiles=\'stitch\'/></filter><rect width=\'100%\' height=\'100%\' filter=\'url(%23n)\' opacity=\'.03 />');
-            background-size: 240px 240px; opacity:.6; pointer-events:none; mix-blend-mode: soft-light;
-            animation: moveNoise 6s linear infinite alternate;
-            }
-            @keyframes moveNoise { from{transform:translate3d(0,0,0)} to{transform:translate3d(-10%,5%,0)} }
-        .type-shadow { text-shadow: 0 0 8px rgba(154,255,154,0.25); }
-    </style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TwilightOS</title>
+  <link rel="stylesheet" href="/style.css" />
 </head>
-<body class="noise min-h-screen bg-bg text-fg selection:bg-accent/30 selection:text-fg">
-<!-- Glow backdrop -->
-<div class="pointer-events-none fixed inset-0 bg-[radial-gradient(60vw_60vh_at_20%_10%,rgba(138,180,255,0.15),transparent_60%),radial-gradient(70vw_60vh_at_80%_90%,rgba(192,132,252,0.15),transparent_60%)]"></div>
 
-<!-- Top bar (retro status) -->
-<header class="mx-auto w-full max-w-6xl px-4 pt-6">
-    <div class="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-4 py-2 shadow-inner1">
-        <div class="flex items-center gap-3">
-            <span class="inline-flex h-2.5 w-2.5 animate-pulseDot rounded-full bg-ok"></span>
-            <span class="text-xs tracking-wider text-muted">ONLINE</span>
-        </div>
-        <nav class="hidden gap-6 md:flex text-sm text-muted">
-            <a href="#about" class="hover:text-fg">About</a>
-            <a href="#status" class="hover:text-fg">Status</a>
-            <a href="#docs" class="hover:text-fg">Docs</a>
-            <a href="#contact" class="hover:text-fg">Contact</a>
-        </nav>
-        <div class="flex items-center gap-2">
-            <button id="themeToggle" class="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-muted hover:text-fg">Phosphor: <span id="phosMode">Green</span></button>
-            <span id="clock" class="ml-2 hidden text-xs text-muted sm:inline"></span>
-        </div>
+<body>
+  <header class="topbar">
+    <div class="container topbar__inner">
+      <a class="brand" href="/">
+        TwilightOS
+      </a>
+
+      <nav class="nav" aria-label="Primary">
+        <a href="#features">Features</a>
+        <a href="#kernel">Kernel</a>
+        <a href="/userspace/">Userspace</a>
+      </nav>
+
+      <a class="btn" href="#start">Get Started</a>
     </div>
-</header>
+  </header>
 
-<main class="mx-auto grid w-full max-w-5xl place-items-center gap-6 px-4 py-10">
-    <!-- Hero -->
-    <section class="text-center">
-        <h1 class="bg-gradient-to-r from-accent to-accent2 bg-clip-text text-transparent text-4xl font-extrabold tracking-tight md:text-6xl">
-            Twilight OS — Self‑Hosted Server
-        </h1>
-        <p class="mt-3 text-sm text-muted md:text-base">
-            Built with a custom kernel. Rust in the core. Unix in the soul.
+  <main>
+    <section class="hero">
+      <div class="container">
+        <span class="hero__eyebrow">Release v0.1.0</span>
+        <h1 class="hero__title">Embedded Power.<br>Desktop Feel.</h1>
+        <p class="hero__subtitle">
+          A self-hosting operating system with native C compilation, dynamic binary loading, and a custom robust network
+          stack.
         </p>
-        <div class="mt-4 flex flex-wrap items-center justify-center gap-2">
-            <span class="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-[11px] text-[#cfe1ff]">Self‑hosted</span>
-            <span class="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-[11px] text-[#cfe1ff]">Rust‑powered</span>
-            <span class="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-[11px] text-[#cfe1ff]">Zero‑downtime</span>
+
+        <div class="hero__cta">
+          <a class="btn" href="#features">Explore Features</a>
+          <a class="btn btn--ghost" href="#kernel" style="margin-left: 10px;">Kernel Specs</a>
         </div>
+
+        <div class="hero__visual">
+          <div class="glass-panel">
+            <div class="glass-row">
+              <span>Compiler</span>
+              <span>TCC (Self-Hosting)</span>
+            </div>
+            <div class="glass-row">
+              <span>Binaries</span>
+              <span>ELF Dynamic (.so)</span>
+            </div>
+            <div class="glass-row">
+              <span>Filesystem</span>
+              <span>TwilightFS + VFS</span>
+            </div>
+            <div class="glass-row">
+              <span>Networking</span>
+              <span>TCP/IP Stack</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <!-- Terminal Panel -->
-    <section id="status" class="relative w-full rounded-2xl border border-white/15 bg-black/50 p-4 shadow-2xl shadow-black/60">
-        <!-- window chrome -->
-        <div class="mb-3 flex items-center gap-2 text-xs text-muted">
-            <div class="flex gap-1.5">
-                <i class="inline-block h-2.5 w-2.5 rounded-full bg-white/30"></i>
-                <i class="inline-block h-2.5 w-2.5 rounded-full bg-white/30"></i>
-                <i class="inline-block h-2.5 w-2.5 rounded-full bg-white/30"></i>
-            </div>
-            <span class="ml-2">twilight@server — /</span>
-        </div>
+    <section id="features" class="section">
+      <div class="container">
+        <h2 style="text-align: center; margin-bottom: 40px;">Userspace Redefined.</h2>
 
-        <!-- CRT screen -->
-        <div class="crt relative overflow-hidden rounded-xl border border-white/10 bg-black/70 p-4 font-mono">
-            <img src="img.png">
+        <div class="grid">
+          <article class="card">
+            <h3>Native Development</h3>
+            <p>Compile C code directly on the OS using <code>tcc</code>. No cross-compiler needed for simple apps.</p>
+          </article>
+          <article class="card">
+            <h3>Scripting Ready</h3>
+            <p>Prototype fast with <code>tpy</code>, a built-in Python-like interpreter for system scripting.</p>
+          </article>
+          <article class="card">
+            <h3>Full Networking</h3>
+            <p>Browse with <code>curl</code>, host with <code>httpd</code>. Real TCP/UDP implementation.</p>
+          </article>
+          <article class="card">
+            <h3>Unix Utilities</h3>
+            <p>Feel at home with pipe-ready <code>grep</code>, <code>cat</code>, <code>ls</code>, and a modal
+              <code>vi</code> editor.
+            </p>
+          </article>
         </div>
-
-        <!-- Quick stats -->
-        <div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div class="rounded-xl border border-white/10 bg-white/5 p-3">
-                <div class="text-[10px] uppercase tracking-wide text-muted">Host</div>
-                <div class="mt-1 font-mono text-sm">twilight-os.local</div>
-            </div>
-            <div class="rounded-xl border border-white/10 bg-white/5 p-3">
-                <div class="text-[10px] uppercase tracking-wide text-muted">Kernel</div>
-                <div class="mt-1 font-mono text-sm">twilight 0.1.0 (x86_64)</div>
-            </div>
-            <div class="rounded-xl border border-white/10 bg-white/5 p-3">
-                <div class="text-[10px] uppercase tracking-wide text-muted">Release</div>
-                <div class="mt-1 font-mono text-sm" id="release">Oct 17 2025</div>
-            </div>
-        </div>
-
-        <div class="mt-4 inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-sm text-fg">
-            <span class="inline-block h-2.5 w-2.5 animate-pulseDot rounded-full bg-ok"></span>
-            Serving requests
-        </div>
+      </div>
     </section>
 
-    <!-- Cards -->
-    <section id="docs" class="grid w-full grid-cols-1 gap-4 md:grid-cols-3">
-        <article class="rounded-xl border border-white/10 bg-white/5 p-4">
-            <h3 class="text-sm font-semibold">/etc/motd</h3>
-            <p class="mt-2 text-sm text-muted">Welcome to <strong class="text-fg">Twilight OS</strong>. Type <span class="font-mono">help</span> to discover commands.</p>
-        </article>
-        <article class="rounded-xl border border-white/10 bg-white/5 p-4">
-            <h3 class="text-sm font-semibold">man twilight</h3>
-            <p class="mt-2 text-sm text-muted">Minimal userspace today. Public alpha soon. Single‑process kernel shell enabled.</p>
-        </article>
-        <article class="rounded-xl border border-white/10 bg-white/5 p-4">
-            <h3 class="text-sm font-semibold">Links</h3>
-            <ul class="mt-2 list-inside list-disc text-sm text-muted">
-                <li><a class="underline decoration-dotted hover:text-fg" href="#">Docs</a> &middot; <a class="underline decoration-dotted hover:text-fg" href="#">Repo</a></li>
-                <li>IRC: <span class="font-mono">#twilight-os</span></li>
-            </ul>
-        </article>
+    <section id="kernel" class="section" style="background: var(--bg-secondary);">
+      <div class="container">
+        <div style="text-align: center; margin-bottom: 40px;">
+          <h2>Kernel Architecture.</h2>
+          <p style="color: var(--text-secondary); margin-top: 10px; font-size: 19px;">
+            Built from scratch in Rust for safety and performance.
+          </p>
+        </div>
+
+        <div class="glass-panel" style="margin: 0 auto;">
+          <div class="glass-row">
+            <span>Init System</span>
+            <span>Work in progress</span>
+          </div>
+          <div class="glass-row">
+            <span>Drivers</span>
+            <span>ATA, VirtIO, RTL8139, PCNET</span>
+          </div>
+          <div class="glass-row">
+            <span>Memory</span>
+            <span>Paging, Heap, User/Kernel Split</span>
+          </div>
+          <div class="glass-row">
+            <span>Graphics</span>
+            <span>UEFI Framebuffer Compositor</span>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <footer id="contact" class="w-full pb-10 text-center text-xs text-muted">
-        © <span id="year"></span> Twilight OS • Built with love and a custom kernel.
-    </footer>
-</main>
+  </main>
 
-<script>
-    // --- helpers ---
-    const $ = (s, r=document)=>r.querySelector(s);
-
-    // dynamic year and clock
-    $('#year').textContent = new Date().getFullYear();
-    const clockEl = $('#clock');
-    function tick(){
-        const d = new Date();
-        clockEl.textContent = d.toLocaleString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    }
-    tick(); setInterval(tick, 1000);
-
-    // theme toggle (green/amber phosphor)
-    const termEl = $('#term');
-    const phosMode = $('#phosMode');
-    let amber = false;
-    $('#themeToggle').addEventListener('click', () => {
-        amber = !amber;
-        termEl.classList.toggle('text-phosphor-amber', amber);
-        termEl.classList.toggle('text-phosphor-green', !amber);
-        phosMode.textContent = amber ? 'Amber' : 'Green';
-    });
-
-    // fake terminal typewriter
-    const banner = [
-        ' _   _      _ _       _ _     _   ___  _____            ',
-        '| | | |_ __(_) | __ _| (_)___| | |_ _|/ _ \\\\
-        | |_ ___ _ __',
-        "| | | | '__| | |/ _` | | / __| |  | | | | | | | __/ _ \\
-        | __/ _ \\ '__|",
-    '| |_| | |  | | | (_| | | \\__ \\ |__| | | |_| | | ||  __/ | ||  __/ |   ',
-        ' \\\___/|_|  |_|_|\\\__,_|_|_|___/\\___/___|\\___/   \\\___\\\n  \\\\___|_|   ',
-        ''
-    ].join('\n');
-
-    const lines = [
-        banner,
-        '$ dhcp',
-        'NET DNS: 10.0.2.3',
-        'NET IP: 10.0.2.15/24',
-        'NET GW: 10.0.2.2',
-        '',
-        '$ uname -a',
-        'TwilightOS Twilight 0.1.0-testing-build.x86_64 #1 NON-SMP 12-10-2025 x86_64 Twilight/Next',
-        '',
-        '$ serve',
-        'HTTP Server listening on 0.0.0.0:80',
-        '',
-        '$ echo \"Welcome to Twilight Shell — type help\"',
-        'Welcome to Twilight Shell — type help',
-    ];
-
-    const cursor = '▌';
-    let i = 0; // line index
-
-    async function typeLine(text) {
-        const speed = 12 + Math.random()*10;
-        for (let j = 0; j <= text.length; j++) {
-            termEl.textContent = termEl.textContent.replace(new RegExp(cursor+'$'), '');
-            termEl.textContent += text.slice(j-1, j) ?? '';
-            termEl.textContent += cursor;
-            await new Promise(r=>setTimeout(r, speed));
-        }
-        termEl.textContent = termEl.textContent.replace(new RegExp(cursor+'$'), '');
-        termEl.textContent += '\n';
-    }
-
-    (async function run(){
-        termEl.textContent = '';
-        for (const line of lines) {
-            if (line.startsWith('$')) {
-                await typeLine(line);
-            } else {
-                termEl.textContent += line + '\n';
-                await new Promise(r=>setTimeout(r, 180));
-            }
-        }
-        // blinking cursor idle
-        const caret = document.createElement('span');
-        caret.className = 'animate-blink';
-        caret.textContent = cursor;
-        termEl.appendChild(caret);
-    })();
-
-    // keyboard shortcuts (feel like a 90s terminal)
-    //  - `h` for help, `c` clear, `g` toggle phosphor
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'c') { termEl.textContent = ''; }
-        if (e.key === 'h') {
-            termEl.textContent += '\nhelp:\n  - h: help\n  - c: clear\n  - g: phosphor toggle\n';
-        }
-        if (e.key === 'g') { $('#themeToggle').click(); }
-    });
-</script>
+  <footer class="footer">
+    <div class="container footer__inner">
+      <div>
+        Copyright © 2026 TwilightOS. All rights reserved.
+      </div>
+      <div class="footer-links">
+        <a href="#">Source Code</a>
+        <a href="#">Documentation</a>
+      </div>
+    </div>
+  </footer>
 </body>
+
 </html>

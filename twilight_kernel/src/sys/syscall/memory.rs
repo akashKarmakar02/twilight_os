@@ -1,8 +1,9 @@
 #![allow(dead_code)]
-use crate::logger;
+
 use crate::sys::memory::{alloc_pages, dealloc_pages, unmap_user_pages};
 use crate::sys::proc::PROCESS_TABLE;
 use crate::sys::proc::mem::{MmapKind, PAGE, align_up};
+use twilight_common::syscall::types::EIO;
 
 // minimal flag bits
 #[allow(dead_code)]
@@ -31,7 +32,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
             .unwrap()
             .get_process(crate::sys::proc::id())
     };
-    let mut process = match proc {
+    let process = match proc {
         Some(p) => p,
         None => return ESRCH,
     };
@@ -78,6 +79,10 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     }
 
     if is_file_backed {
+        // File-backed mapping:
+        // - First, give the underlying node a chance to provide a real mapping (e.g. /dev/fb0).
+        // - If it doesn't support mmap (ENOSYS), fall back to a generic "read file into pages"
+        //   implementation for regular files (needed by dynamic loaders).
         let fd_i32 = fd as i32;
         if fd_i32 < 0 || fd_i32 < 3 {
             return EBADF;
@@ -86,17 +91,54 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         let Some(entry) = process.fd_table.get(idx).and_then(|slot| slot.as_ref()) else {
             return EBADF;
         };
+
         let file_ref = entry.file.clone();
         let file = file_ref.lock();
-        let mut vfs_node = file.node.lock();
-        match vfs_node.mmap(&mut process, va, len, prot, flags, offset as usize) {
+        let mut node_guard = match &file.kind {
+            crate::sys::proc::OpenFileKind::Vfs(node_ref) => node_ref.lock(),
+            crate::sys::proc::OpenFileKind::Socket(_) => return EINVAL,
+        };
+        if node_guard.metadata.file_type == crate::sys::fs::vfs::FileType::Dir {
+            return EINVAL;
+        }
+
+        match node_guard.mmap(process, va, len, prot, flags, offset as usize) {
             Ok(mapped) => {
-                if mapped != va {
-                    return EINVAL;
-                }
+                process.proc_mm.track_mmap(mapped, len, MmapKind::Shared);
+                return mapped as i64;
+            }
+            Err(-38) => {
+                // ENOSYS: continue with generic mapping for regular files.
             }
             Err(code) => return code as i64,
         }
+
+        // Map writable while populating (we don't have full mprotect/flag updates yet).
+        if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, true, executable) {
+            return ENOMEM;
+        }
+
+        let file_size = node_guard.metadata.size;
+        let mut remaining = len;
+        let mut pos = 0usize;
+        let mut file_off = offset as usize;
+
+        // Copy file bytes into mapped memory; remaining bytes are already zeroed by alloc_pages.
+        while remaining > 0 && file_off < file_size {
+            let chunk = core::cmp::min(remaining, file_size - file_off);
+            let dst = unsafe { core::slice::from_raw_parts_mut((va + pos) as *mut u8, chunk) };
+            match node_guard.read(file_off, dst) {
+                Ok(0) => break,
+                Ok(n) => {
+                    pos += n;
+                    file_off += n;
+                    remaining = remaining.saturating_sub(n);
+                }
+                Err(_) => return -(EIO as i64),
+            }
+        }
+
+        // Track as "shared" (close enough for now).
         process.proc_mm.track_mmap(va, len, MmapKind::Shared);
     } else {
         if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, writable, executable) {
@@ -104,29 +146,29 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         }
         process.proc_mm.track_mmap(va, len, MmapKind::Owned);
     }
-    logger!(
-        "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
-        addr,
-        size,
-        prot,
-        flags,
-        fd,
-        offset,
-        va
-    );
+    // logger!(
+    //     "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
+    //     addr,
+    //     size,
+    //     prot,
+    //     flags,
+    //     fd,
+    //     offset,
+    //     va
+    // );
     va as i64
 }
 
-pub fn mprotect(addr: u64, size: usize, prot: usize) -> i64 {
+pub fn mprotect(_addr: u64, size: usize, _prot: usize) -> i64 {
     if size == 0 {
         return EINVAL;
     }
-    logger!(
-        "mprotect: addr=0x{:x}, size=0x{:x}, prot=0x{:x}",
-        addr,
-        size,
-        prot
-    );
+    // logger!(
+    //     "mprotect: addr=0x{:x}, size=0x{:x}, prot=0x{:x}",
+    //     addr,
+    //     size,
+    //     prot
+    // );
     0
 }
 
@@ -144,11 +186,11 @@ pub fn brk(addr: usize) -> i64 {
     };
 
     if addr == 0 {
-        logger!(
-            "brk:- addr: {:#X} => {:#X}",
-            addr,
-            process.proc_mm.curr_brk()
-        );
+        // logger!(
+        //     "brk:- addr: {:#X} => {:#X}",
+        //     addr,
+        //     process.proc_mm.curr_brk()
+        // );
         return process.proc_mm.curr_brk() as i64; // report current break
     }
     let res = match process.proc_mm.set_brk(&mut process.mapper, addr) {
@@ -156,7 +198,7 @@ pub fn brk(addr: usize) -> i64 {
         Err(_) => process.proc_mm.curr_brk() as i64, // failure: return current break
     };
 
-    logger!("brk:- addr: {:#X} => {:#X}", addr, res);
+    // logger!("brk:- addr: {:#X} => {:#X}", addr, res);
     res
 }
 

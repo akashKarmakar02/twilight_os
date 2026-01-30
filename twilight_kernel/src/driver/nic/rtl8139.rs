@@ -3,7 +3,7 @@ use crate::sys::memory::phys::PhysBuf;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicUsize, Ordering, fence};
+use core::sync::atomic::{Ordering, fence};
 use smoltcp::wire::EthernetAddress;
 use x86_64::instructions::port::Port;
 
@@ -65,7 +65,6 @@ const TCR_MXDMA2: u32 = 1 << 10;
 //const TAB: u32 = 1 << 30; // Transmit Abort
 //const OWC: u32 = 1 << 29; // Out of Window Collision
 //const CDH: u32 = 1 << 28; // CD Heart Beat
-const TOK: u32 = 1 << 15; // Transmit OK
 //const TUN: u32 = 1 << 14; // Transmit FIFO Underrun
 const OWN: u32 = 1 << 13; // DMA operation completed
 
@@ -134,7 +133,6 @@ impl Ports {
     }
 }
 
-#[derive(Clone)]
 pub struct Device {
     config: Arc<Config>,
     stats: Arc<Stats>,
@@ -143,7 +141,8 @@ pub struct Device {
     rx_buffer: PhysBuf,
     rx_offset: usize,
     tx_buffers: [PhysBuf; TX_BUFFERS_COUNT],
-    tx_id: Arc<AtomicUsize>,
+    tx_id: usize,
+    tx_inflight: [bool; TX_BUFFERS_COUNT],
 }
 
 impl Device {
@@ -162,9 +161,9 @@ impl Device {
             rx_offset: 0,
             tx_buffers: [(); TX_BUFFERS_COUNT].map(|_| PhysBuf::new(TX_BUFFER_LEN)),
 
-            // Before a transmission begin the id is incremented,
-            // so the first transimission will start at 0.
-            tx_id: Arc::new(AtomicUsize::new(TX_BUFFERS_COUNT - 1)),
+            // Index of the next TX buffer to use.
+            tx_id: 0,
+            tx_inflight: [false; TX_BUFFERS_COUNT],
         };
         device.init();
         device
@@ -231,42 +230,33 @@ impl EthernetDeviceIO for Device {
         if (cmd & CR_BUFE) == CR_BUFE {
             return None;
         }
+        let offset = self.rx_offset;
 
-        let cba = unsafe { self.ports.cba.read() };
-
-        // CAPR starts at 65520 and with the pad it overflows to 0
-        let capr = unsafe { self.ports.capr.read() };
-        let offset = ((capr as usize) + RX_BUFFER_PAD) % (1 << 16);
-
-        let header = u16::from_le_bytes(
-            self.rx_buffer[(offset + 0)..(offset + 2)]
-                .try_into()
-                .unwrap(),
-        );
+        let header = u16::from_le_bytes([self.rx_buffer[offset], self.rx_buffer[offset + 1]]);
 
         if header & ROK != ROK {
-            let capr = ((cba as usize) % RX_BUFFER_LEN) - RX_BUFFER_PAD;
+            let cba = unsafe { self.ports.cba.read() };
+            let next = (cba as usize) % RX_BUFFER_LEN;
+            let capr = next.wrapping_sub(RX_BUFFER_PAD);
             unsafe { self.ports.capr.write(capr as u16) }
+            self.rx_offset = next;
             return None;
         }
 
-        let n = u16::from_le_bytes(
-            self.rx_buffer[(offset + 2)..(offset + 4)]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let n = u16::from_le_bytes([self.rx_buffer[offset + 2], self.rx_buffer[offset + 3]])
+            as usize;
 
         // Update buffer read pointer
-        self.rx_offset = (offset + n + 4 + 3) & !3;
-        let capr = (self.rx_offset % RX_BUFFER_LEN) - RX_BUFFER_PAD;
+        let next = ((offset + n + 4 + 3) & !3) % RX_BUFFER_LEN;
+        self.rx_offset = next;
+        let capr = next.wrapping_sub(RX_BUFFER_PAD);
         unsafe { self.ports.capr.write(capr as u16) }
 
         Some(self.rx_buffer[(offset + 4)..(offset + n)].to_vec())
     }
 
     fn transmit_packet(&mut self, len: usize) {
-        let tx_id = self.tx_id.load(Ordering::SeqCst);
-        let mut cmd_port = self.ports.tx_cmds[tx_id].clone();
+        let tx_id = self.tx_id;
         unsafe {
             // RTL8139 will not transmit packets smaller than 64 bits
             let len = len.max(60); // 60 + 4 bits of CRC
@@ -278,25 +268,46 @@ impl EthernetDeviceIO for Device {
             // not exceed 1792 bytes), and a value of 0x000000 for the early
             // transmit threshold means 8 bytes. So we just write the size of
             // the packet.
-            cmd_port.write(0x1FFF & len as u32);
-            fence(Ordering::SeqCst);
-
-            let mut data = cmd_port.read();
-            while data & OWN != OWN {
-                spin_loop();
-                data = cmd_port.read();
-            }
-
-            while data & TOK != TOK {
-                spin_loop();
-                data = cmd_port.read();
-            }
+            self.ports.tx_cmds[tx_id].write(0x1FFF & len as u32);
+            fence(Ordering::Release);
         }
+
+        self.tx_inflight[tx_id] = true;
+        self.tx_id = (tx_id + 1) % TX_BUFFERS_COUNT;
     }
 
     fn next_tx_buffer(&mut self, len: usize) -> &mut [u8] {
-        let tx_id = (self.tx_id.load(Ordering::SeqCst) + 1) % TX_BUFFERS_COUNT;
-        self.tx_id.store(tx_id, Ordering::SeqCst);
-        &mut self.tx_buffers[tx_id][0..len]
+        // If the next buffer is still in-flight, search for any free one.
+        // Block only if all TX buffers are busy.
+        for _ in 0..TX_BUFFERS_COUNT {
+            if self.tx_inflight[self.tx_id] {
+                let tsd = unsafe { self.ports.tx_cmds[self.tx_id].read() };
+                if tsd & OWN != OWN {
+                    self.tx_id = (self.tx_id + 1) % TX_BUFFERS_COUNT;
+                    continue;
+                }
+                self.tx_inflight[self.tx_id] = false;
+            }
+
+            if !self.tx_inflight[self.tx_id] {
+                return &mut self.tx_buffers[self.tx_id][0..len];
+            }
+        }
+
+        loop {
+            if self.tx_inflight[self.tx_id] {
+                let tsd = unsafe { self.ports.tx_cmds[self.tx_id].read() };
+                if tsd & OWN == OWN {
+                    self.tx_inflight[self.tx_id] = false;
+                }
+            }
+
+            if !self.tx_inflight[self.tx_id] {
+                break;
+            }
+            spin_loop();
+        }
+
+        &mut self.tx_buffers[self.tx_id][0..len]
     }
 }

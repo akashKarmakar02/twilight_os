@@ -123,7 +123,6 @@ fn is_buffer_owner(des: &PhysBuf, i: usize) -> bool {
     !des[DE_LEN * i + 7].get_bit(DE_OWN)
 }
 
-#[derive(Clone)]
 pub struct Device {
     config: Arc<Config>,
     stats: Arc<Stats>,

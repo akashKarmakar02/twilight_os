@@ -1,0 +1,3 @@
+[submodule "userspace/apps/tcc"]
+	path = userspace/apps/tcc
+	url = https://github.com/akashKarmakar02/tinycc

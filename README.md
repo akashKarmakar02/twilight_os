@@ -2,148 +2,101 @@
 
 ## Overview
 
-Twilight OS is a lightweight operating system designed for general-purpose computing, embedded systems & learning purpose. It is written in Rust programming language.
-It currently supports x86_64 architecture. future plans include support for ARM/RISC-V architecture.
+Twilight OS is a lightweight, Unix-like operating system written in Rust, designed for general-purpose computing, embedded systems, and detailed OS dev learning. It bridges the gap between educational kernels and usable systems by implementing advanced features like dynamic binary loading, a self-hosting C compiler, and a custom filesystem.
 
-## Twilight OS running basic Unix shell utilities
+It currently supports x86_64 architecture, with future plans for ARM/RISC-V.
+
+## Screenshots
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/img1.png" alt="screenshot1" width="400"></td>
-    <td><img src="docs/screenshots/img2.png" alt="screenshot2" width="400"></td>
+    <td><img src="docs/screenshots/img1.png" alt="Basic Shell" width="400"></td>
+    <td><img src="docs/screenshots/img2.png" alt="Userspace Apps" width="400"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/img3.png" alt="Networking" width="400"></td>
+    <td><img src="docs/screenshots/img4.png" alt="Graphical Output" width="400"></td>
   </tr>
 </table>
 
-## Features
+## Key Features
 
-- Lightweight and efficient
-- Terminal support (kernel built-in)
-- RTC
-- ACPI - power off
-- VFS, Twilight FS
-- basic unix commands (kernel built-in)
-- asynchronous I/O
-- memory management
-- frame buffer (/dev/fb0)
-- ATA
-- basic shell with shell history
-- SMP detection (no multi-threading yet)
+### Userspace & Tooling
+- **Native C Compilation**: Includes `tcc` (Tiny C Compiler) to compile and run C programs directly within the OS.
+- **Dynamic Binaries**: Full ELF shared object (`.so`) and dynamic executable support.
+- **Scripting**: `tpy`, a Python-like interpreter for rapid scripting.
+- **Shell & Utilities**: `tsh` (shell) with pipes/redirection, `grep`, `cat`, `ls`, `curl`, `vi` (modal editor).
+- **Init System**: A modern `init` system capable of service management (`logind`, `httpd`).
 
-## Goal 0.1.0 Release
+### Kernel & Core
+- **Language**: Written in pure Rust (no standard library).
+- **Filesystem**: **TwilightFS** (TFS) - a custom, resilient filesystem with hot-file caching and efficient directory lookups. Also supports FAT16 (`/boot`) and VFS mount points.
+- **Networking**: Custom network stack (TCP/UDP, DHCP, DNS) with drivers for RTL8139 and PCNET. Use `curl` to fetch pages!
+- **Tasks**: Cooperative multitasking with an executor for async kernel tasks.
+- **Drivers**:
+    - **Storage**: ATA/IDE and VirtIO Block devices.
+    - **Input**: PS/2 Keyboard & Mouse (`/dev/input/mice`).
+    - **Display**: UEFI Framebuffer (`/dev/fb0`).
+    - **Time**: RTC and CMOS support.
 
-- [x] VFS & RamFS
-- [x] Better user friendly Terminal
-- [x] asynchronous I/O
-- [x] memory management
-- [x] PCI device detection
-- [x] TFS Filesystem (in heavy development)
-- [x] Network Stack
-- [x] Userspace utilities (work remains on frame deallocation and process)
-- [x] Basic shell
-- [x] RTC
-- [x] ATA
-- [ ] Kernel Level NES Emulator
-- [ ] DOOM (because why not?)
+## Roadmap & Status
+
+| Feature | Status | details |
+| :--- | :--- | :--- |
+| **Paging & Memory** | ✅ Done | Physical/Virtual allocation, User/Kernel separation |
+| **VFS & TwilightFS** | ✅ Done | Custom on-disk format, mount points `/dev`, `/proc` |
+| **Dynamic Linking** | ✅ Done | ELF loader, shared libraries support |
+| **Networking** | ✅ Done | TCP/UDP stack, `httpd` server, `curl` client |
+| **Userspace** | ✅ Done | `tcc`, `make` (partial), `vi`, `tpy` |
+| **Multitasking** | 🚧 Beta | Cooperative scheduler, SMP detection (init) |
+| **Graphics** | 🚧 Alpha | Framebuffer access, basic compositing |
+| **Doom** | ⏳ Planned | Porting doomgeneric |
 
 ## Build Instructions
 
 ### ✅ Requirements
 
-Twilight OS builds require:
+- **Rust** (nightly, via `rust-toolchain.toml`)
+- `llvm-tools-preview`
+- `nasm`, `ld` (binutils), `xorriso`
+- `qemu` (emulator)
+- `musl-gcc` (for userspace LibC)
+- `cpio` (initramfs)
 
-- **Rust** (nightly, with `x86_64-unknown-none` target)
-- `llvm-tools-preview` component
-- `cargo build` with build-std
-- `nasm` (for assembly boot code)
-- `ld` (GNU binutils linker)
-- `xorriso` (for ISO creation)
-- `qemu` (for virtualization)
-- `musl-gcc`
+### ✅ Quick Start
 
----
+1. **Install Dependencies** (Ubuntu/Debian example):
+   ```bash
+   sudo apt install build-essential nasm qemu-system-x86 xorriso gcc musl-tools cpio git curl
+   rustup target add x86_64-unknown-none
+   rustup component add llvm-tools-preview
+   ```
 
-### ✅ Installing dependencies
+2. **Build & Run**:
+   ```bash
+   make run
+   ```
+   *This downloads necessary bootloader files (Limine) and OVMF firmware automatically.*
 
-#### **Linux**
+3. **First Boot**:
+   Inside the OS shell, initialize the disk:
+   ```bash
+   install
+   ```
+   Then reboot to use the persistent TwilightFS.
 
-- _Debian / Ubuntu_
+## Userspace Highlights
 
-```bash
-sudo apt update
-sudo apt install build-essential nasm qemu-system-x86 xorriso gcc musl-tools
-rustup target add x86_64-unknown-none
-rustup component add llvm-tools-preview
-```
-
-- _Fedora_
-
-```bash
-sudo dnf install make nasm qemu-system-x86 xorriso musl-gcc
-rustup target add x86_64-unknown-none
-rustup component add llvm-tools-preview
-```
-
-- _Arch Linux_
-
-```bash
-sudo pacman -S base-devel nasm qemu xorriso musl
-rustup target add x86_64-unknown-none
-rustup component add llvm-tools-preview
-```
-
----
-
-#### **macOS**
-
-You can use **Homebrew**:
-
-```bash
-brew install nasm qemu xorriso
-rustup target add x86_64-unknown-none
-rustup component add llvm-tools-preview
-```
-
----
-
-#### **Windows**
-
-We recommend using **WSL2** with Ubuntu/Fedora:
-
-1. Install WSL2 following Microsoft’s guide
-2. Inside WSL, follow the same instructions as Linux above
-
----
-
-## ✅ Building & Run
-
-In the workspace directory, run:
-
-```bash
-make run
-```
-
----
-
----
-
-## ✅ First Boot
-
-On first boot, you **must** initialize the filesystem:
-
-```bash
-install
-```
-
-inside the VM shell to format your disk.
+The `userspace/` directory contains a full suite of applications:
+- **`apps/tcc`**: The compiler. Try `tcc -run hello.c`!
+- **`apps/httpd`**: A non-blocking HTTP server serving `/var/www`.
+- **`apps/vi`**: A functional clone of the classic editor.
+- **`apps/chip8`**: A CHIP-8 emulator running in the terminal.
 
 ## Documentation
 
-Twilight OS documentation is available at [https://twilight-os.vercel.app](https://twilight-os.vercel.app).
+View the documentation online at [https://twilight-os.vercel.app](https://twilight-os.vercel.app).
 
 ## License
 
 Twilight OS is licensed under the BSD-3 Clause License. See the [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions to Twilight OS are welcome!

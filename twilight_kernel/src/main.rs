@@ -151,6 +151,7 @@ unsafe extern "C" fn kmain() -> ! {
     hcf()
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
     serial_println!("[PANIC]: {}", info);
@@ -215,7 +216,7 @@ pub fn init(
     driver::nic::init();
     driver::usb::init();
     driver::cpu::init(mp_response);
-    driver::disk::ata::init();
+    driver::disk::init();
 
     let cpio_buf = unsafe {
         core::slice::from_raw_parts(cpio_file.addr() as *const u8, cpio_file.size() as usize)
@@ -234,6 +235,16 @@ pub fn init(
 
     x86_64::instructions::interrupts::enable();
     driver::timer::init();
+
+    // Switch to APIC timer
+    driver::apic::lapic::init();
+
+    // Mask PIT (IRQ0) to prevent double ticks
+    unsafe {
+        arch::x86_64::idt::PICS
+            .lock()
+            .write_masks(0b11111001, 0b00101111);
+    }
 
     kernel_utils::dhcp::main();
 }

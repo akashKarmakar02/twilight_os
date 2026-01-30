@@ -24,10 +24,11 @@ fn udp_socket_status(socket: &udp::Socket) -> u8 {
     status
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct UdpSocket {
     pub handle: SocketHandle,
     pub remote_endpoint: Option<IpEndpoint>,
+    pub bound_port: Option<u16>,
 }
 
 impl UdpSocket {
@@ -58,6 +59,24 @@ impl UdpSocket {
         Self {
             handle,
             remote_endpoint,
+            bound_port: None,
+        }
+    }
+
+    pub fn bind(&mut self, port: u16) -> Result<(), ()> {
+        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
+            let mut sockets = SOCKETS.lock();
+            iface.poll(sys::net::time(), device, &mut sockets);
+            let socket = sockets.get_mut::<udp::Socket>(self.handle);
+
+            if !socket.is_open() {
+                let local_endpoint = IpListenEndpoint::from(port);
+                socket.bind(local_endpoint).map_err(|_| ())?;
+            }
+            self.bound_port = Some(port);
+            Ok(())
+        } else {
+            Err(())
         }
     }
 
@@ -74,7 +93,8 @@ impl UdpSocket {
                 let socket = sockets.get_mut::<udp::Socket>(self.handle);
 
                 if !socket.is_open() {
-                    let local_endpoint = IpListenEndpoint::from(random_port());
+                    let local_endpoint =
+                        IpListenEndpoint::from(self.bound_port.unwrap_or_else(random_port));
                     socket.bind(local_endpoint).unwrap();
                     break;
                 }
@@ -89,12 +109,106 @@ impl UdpSocket {
         Ok(())
     }
 
+    pub fn send_to(&mut self, buf: &[u8], endpoint: IpEndpoint) -> Result<usize, ()> {
+        let mut cmos = CMOS::new();
+        let timeout = 5;
+        let started = cmos.unix_time();
+
+        let mut sent = false;
+        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
+            let mut sockets = SOCKETS.lock();
+            loop {
+                if cmos.unix_time() - started > timeout {
+                    return Err(());
+                }
+                let ms = (cmos.unix_time() * 1000000) as i64;
+                let time = Instant::from_micros(ms);
+                iface.poll(time, device, &mut sockets);
+                let socket = sockets.get_mut::<udp::Socket>(self.handle);
+
+                if sent {
+                    break;
+                }
+                if !socket.is_open() {
+                    let local_endpoint =
+                        IpListenEndpoint::from(self.bound_port.unwrap_or_else(random_port));
+                    socket.bind(local_endpoint).map_err(|_| ())?;
+                }
+                if socket.can_send() {
+                    socket.send_slice(buf, endpoint).map_err(|_| ())?;
+                    sent = true;
+                }
+
+                if let Some(d) = iface.poll_delay(sys::net::time(), &sockets) {
+                    wait(d);
+                }
+                halt();
+            }
+            Ok(buf.len())
+        } else {
+            Err(())
+        }
+    }
+
+    pub fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, IpEndpoint), ()> {
+        let mut cmos = CMOS::new();
+        let timeout = 5;
+        let started = cmos.unix_time();
+
+        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
+            let mut sockets = SOCKETS.lock();
+            loop {
+                if cmos.unix_time() - started > timeout {
+                    return Err(());
+                }
+                let ms = (cmos.unix_time() * 1000000) as i64;
+                let time = Instant::from_micros(ms);
+
+                iface.poll(time, device, &mut sockets);
+                let socket = sockets.get_mut::<udp::Socket>(self.handle);
+
+                if !socket.is_open() {
+                    let local_endpoint =
+                        IpListenEndpoint::from(self.bound_port.unwrap_or_else(random_port));
+                    socket.bind(local_endpoint).map_err(|_| ())?;
+                }
+
+                if socket.can_recv() {
+                    let (n, meta) = socket.recv_slice(buf).map_err(|_| ())?;
+                    return Ok((n, meta.endpoint));
+                }
+                let pd = sys::net::time();
+                if let Some(_d) = iface.poll_delay(pd.clone(), &sockets) {
+                    sleep(0.004);
+                }
+                halt();
+            }
+        } else {
+            Err(())
+        }
+    }
+
     pub fn listen(&mut self, _port: u16) -> Result<(), ()> {
         todo!()
     }
 
     pub fn accept(&mut self) -> Result<IpAddress, ()> {
         todo!()
+    }
+
+    pub fn local_port(&self) -> Option<u16> {
+        let sockets = SOCKETS.lock();
+        let socket = sockets.get::<udp::Socket>(self.handle);
+        let ep = socket.endpoint();
+        if ep.port == 0 {
+            None
+        } else {
+            Some(ep.port)
+        }
+    }
+
+    pub fn remote_endpoint(&self) -> Option<IpEndpoint> {
+        self.remote_endpoint
     }
 }
 
@@ -161,13 +275,8 @@ impl FileIO for UdpSocket {
                     break;
                 }
                 if socket.can_send() {
-                    if let Some(endpoint) = self.remote_endpoint {
-                        if socket.send_slice(buf.as_ref(), endpoint).is_err() {
-                            return Err(());
-                        }
-                    } else {
-                        return Err(());
-                    }
+                    let endpoint = self.remote_endpoint.ok_or(())?;
+                    socket.send_slice(buf.as_ref(), endpoint).map_err(|_| ())?;
                     sent = true; // Break after next poll
                 }
 
@@ -217,5 +326,12 @@ impl FileIO for UdpSocket {
         } else {
             false
         }
+    }
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        let mut sockets = SOCKETS.lock();
+        let _ = sockets.remove(self.handle);
     }
 }

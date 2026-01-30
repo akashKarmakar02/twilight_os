@@ -4,16 +4,19 @@ mod task;
 pub(crate) mod user;
 
 use crate::arch::x86_64::gdt::{SegmentSelector, USER_CS, USER_SS};
+use crate::arch::x86_64::io;
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
 use crate::kernel_utils::exec::jump_to_user;
-use crate::{println};
+use crate::println;
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::{VFS, VfsNode};
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
-use crate::sys::proc::switch::{read_cr3};
-use crate::sys::proc::task::{FpuState, Context, allocate_switch_stack, switch_tasks};
+use crate::sys::proc::switch::read_cr3;
+use crate::sys::proc::task::{
+    Context, FpuState, allocate_switch_stack, switch_tasks, xrstor, xsave,
+};
 use crate::sys::proc::user::USER_ENV;
 use crate::utils::StackHelper;
 use alloc::alloc::alloc_zeroed;
@@ -26,6 +29,7 @@ use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::arch::naked_asm;
 use core::mem::size_of;
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU16, Ordering};
 use object::{Object, ObjectSegment, SegmentFlags};
 use spin::Once;
@@ -33,7 +37,9 @@ use spin::mutex::Mutex;
 use twilight_common::syscall::types::{O_RDONLY, O_WRONLY};
 use x86_64::VirtAddr;
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, OffsetPageTable, PhysFrame};
+use x86_64::structures::paging::{
+    FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, PhysFrame, Size4KiB,
+};
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 
@@ -44,6 +50,7 @@ const MAIN_DYN_LOAD_BASE: u64 = 0x4000_0000;
 const INTERP_DYN_LOAD_BASE: u64 = 0x6000_0000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
+static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
@@ -211,26 +218,64 @@ impl ProcessTable {
         process.context_switch_rsp = VirtAddr::new(stack_ptr);
         process.context = context_ptr;
 
+        let current_pid = crate::sys::proc::id();
+
         PID.store(pid, Ordering::SeqCst);
 
         self.proc_list.push_back(process);
 
-        let len = self.proc_list.len();
-        let (prev_slice, next_slice) = self.proc_list.make_contiguous().split_at_mut(len - 1);
+        let slice = self.proc_list.make_contiguous();
+        let len = slice.len();
 
-        let prev_task = prev_slice.last_mut().unwrap();
-        let next_task = &mut next_slice[0];
+        let mut prev_idx = None;
+        for (i, p) in slice.iter().enumerate() {
+            if p.pid == current_pid {
+                prev_idx = Some(i);
+                break;
+            }
+        }
 
-        switch_tasks(prev_task, next_task);
+        // If we can't find the current process, something is very wrong, but fallback
+        // to previous behavior (second to last) might be saf-ish or just panic.
+        // For now, let's assume we found it.
+        let prev_idx = prev_idx.unwrap_or(len - 2);
+        let next_idx = len - 1;
+
+        if prev_idx == next_idx {
+            // Should not happen if we pushed a new process
+            return;
+        }
+
+        let ptr = slice.as_mut_ptr();
+        unsafe {
+            let prev_task = &mut *ptr.add(prev_idx);
+            let next_task = &mut *ptr.add(next_idx);
+
+            // This is a *kernel* context switch (e.g., exec/spawn). The previous task is now blocked
+            // in the kernel until the new process exits. Prevent the preemptive timer from resuming it
+            // from a stale user preempt frame.
+            prev_task.state = ProcessState::Waiting;
+            prev_task.preempt_frame = 0;
+            next_task.state = ProcessState::Running;
+            next_task.preempt_frame = 0;
+
+            switch_tasks(prev_task, next_task);
+        }
     }
 }
 pub struct OpenFile {
-    pub node: Arc<Mutex<VfsNode>>,
+    pub kind: OpenFileKind,
     pub seek: usize,
     pub path: String,
     pub status_flags: i32,
 }
 
+pub enum OpenFileKind {
+    Vfs(Arc<Mutex<VfsNode>>),
+    Socket(crate::sys::net::socket::SocketFile),
+}
+
+#[derive(Clone)]
 pub struct FdEntry {
     pub file: Arc<Mutex<OpenFile>>,
     pub fd_flags: i32,
@@ -258,7 +303,11 @@ pub struct Process {
     pub fd_table: Vec<Option<FdEntry>>,
     pub stdio_flags: [i32; 3],
     pub stdio_fd_flags: [i32; 3],
+    /// For fd 0/1/2 redirection: -1 means tty, otherwise points to an fd >= 3.
+    pub stdio_target: [i32; 3],
     pub proc_mm: Box<ProcMM>,
+    pub exit_code: i32,
+    pub preempt_frame: u64, // saved RSP to PreemptFrame on this task's kernel stack
 }
 
 impl Process {
@@ -381,17 +430,18 @@ impl Process {
 
         let stack_ptr = switch_stack as u64;
 
-
-        let mut kgs = Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 });
+        let mut kgs = Box::new(KernelGsData {
+            kernel_rsp: 0, // The top of the stack for syscall/interrupt entry
+            user_rsp: 0,
+        });
 
         kgs.kernel_rsp = stack_ptr;
 
         let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
 
-
         let p = Process {
-            context: core::ptr::null_mut(),
-            context_switch_rsp: VirtAddr::new(stack_ptr),
+            context: core::ptr::null_mut(), // Point to the constructed context
+            context_switch_rsp: VirtAddr::new(stack_ptr), // This field might be redundant if we use context, but keep it consistent
             fpu_storage: Some(FpuState::default()),
 
             stack: user_rsp,
@@ -411,11 +461,160 @@ impl Process {
             parent_pid,
             stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
             stdio_fd_flags: [0; 3],
+            stdio_target: [-1; 3],
+            exit_code: 0,
+            preempt_frame: 0,
         };
         Ok(p)
     }
 
-    pub fn exec(&self) {
+    pub fn exec(
+        &mut self,
+        content_buf: &[u8],
+        args: &[&str],
+        env: &[&str],
+    ) -> Result<(u64, u64), ()> {
+        let (_, flags) = Cr3::read();
+
+        let page_table_frame =
+            with_frame_allocator(|frame_allocator| frame_allocator.allocate_frame().unwrap());
+
+        let page_table = crate::sys::memory::create_page_table(page_table_frame);
+        let kernel_page_table = kernel_page_table();
+        let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
+        for (_, (page, kernel_page)) in pages.enumerate() {
+            *page = kernel_page.clone();
+        }
+
+        // We must switch to the new page table to write user data (load ELF, build stack).
+        // Since kernel mappings are identical, this is safe for kernel execution.
+        // But we must NOT access old user memory after this point until we decide to revert (which we won't on success).
+        unsafe {
+            Cr3::write(page_table_frame, flags);
+        };
+
+        let mut mapper =
+            unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+
+        let mut addr_size_vec: Vec<(u64, usize)> = Vec::new();
+        let user_stack_top = VirtAddr::new(USER_STACK_TOP);
+
+        let mut entry_point_addr: u64;
+        let aux_entry_point: u64;
+        let mut at_base: u64 = 0;
+        let phdr_va: u64;
+        let phent: u64;
+        let phnum: u64;
+        let mut max_end: u64;
+
+        if content_buf.get(0..4) == Some(&ELF_MAGIC) {
+            match load_elf_image(
+                content_buf,
+                &mut mapper,
+                &mut addr_size_vec,
+                Some(MAIN_DYN_LOAD_BASE),
+                true,
+            ) {
+                Ok(main_img) => {
+                    entry_point_addr = main_img.entry_point;
+                    aux_entry_point = entry_point_addr;
+                    phdr_va = main_img.phdr_va;
+                    phent = main_img.phent;
+                    phnum = main_img.phnum;
+                    max_end = main_img.max_end;
+
+                    if let Some(interp_path) = main_img.interp_path {
+                        // We must read the interpreter file.
+                        // We can't use VFS normally if it relies on current process state?
+                        // VFS uses `Process::current()`? No, it usually just takes paths.
+                        // But accessing "user pointers" in `exec` is tricky if we just switched CR3.
+                        // However, `load_interpreter_image` takes a path string (kernel memory), not user pointer.
+                        // We should be fine.
+                        match load_interpreter_image(
+                            interp_path.as_str(),
+                            &mut mapper,
+                            &mut addr_size_vec,
+                        ) {
+                            Ok(interp_img) => {
+                                entry_point_addr = interp_img.entry_point;
+                                at_base = interp_img.load_base;
+                                if interp_img.max_end > max_end {
+                                    max_end = interp_img.max_end;
+                                }
+                            }
+                            Err(_) => {
+                                println!("exec: failed to load interpreter {}", interp_path);
+                                // TODO: Revert CR3?
+                                return Err(());
+                            }
+                        }
+                    }
+
+                    let user_stack_base = user_stack_top.as_u64() - USER_STACK_SIZE as u64;
+                    if alloc_pages(&mut mapper, user_stack_base, USER_STACK_SIZE, true, false)
+                        .is_err()
+                    {
+                        return Err(());
+                    }
+                    addr_size_vec.push((user_stack_base, USER_STACK_SIZE));
+                }
+                Err(_) => {
+                    println!("exec: invalid ELF file");
+                    return Err(());
+                }
+            }
+        } else {
+            println!("exec: invalid ELF file");
+            return Err(());
+        }
+
+        let user_rsp = build_initial_stack(
+            user_stack_top.as_u64(),
+            aux_entry_point,
+            at_base,
+            Some(args),
+            Some(env),
+            phdr_va,
+            phent,
+            phnum,
+            None,
+            None,
+        );
+
+        let proc_mm = Box::new(ProcMM::new(max_end as usize));
+
+        // Commit changes to self
+        // Drop old resources implicitly when overwriting
+        self.mapper = mapper;
+        self.page_table_frame = page_table_frame;
+        self.addr_size_vec = addr_size_vec;
+        self.proc_mm = proc_mm;
+        self.entry_point = entry_point_addr;
+        self.stack = user_rsp;
+        self.stack_size = USER_STACK_SIZE; // Reset in case it changed?
+
+        // FPU state reset?
+        self.fpu_storage = Some(FpuState::default());
+
+        // File descriptors are PRESERVED (except CLOEXEC, which we handle in syscall service normally, or here?)
+        // Standard execve closes CLOEXEC fds.
+        for fd in self.fd_table.iter_mut() {
+            if let Some(entry) = fd {
+                if (entry.fd_flags & 1) != 0 {
+                    // FD_CLOEXEC
+                    *fd = None;
+                }
+            }
+        }
+
+        // We are already running on the correct kernel stack (sys_execve call stack).
+        // self.kernel_gs and context_switch_rsp remain valid for the NEXT trap/interrupt.
+
+        // Return new entry point and stack to caller so they can update the TrapFrame
+        Ok((entry_point_addr, user_rsp))
+    }
+
+    pub fn exec_wrapper(&self) {
         wrmsr(IA32_FS_BASE, self.fs_base.as_u64());
         wrmsr(IA32_GS_BASE, self.gs_base.as_u64());
 
@@ -425,6 +624,171 @@ impl Process {
             USER_CS.bits() as u64,
             USER_SS.bits() as u64,
         );
+    }
+
+    pub fn fork(&self, tf: &InterruptStack) -> Result<u16, ()> {
+        // 0. Allocate PID
+        let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+
+        // 1. Allocate new page table
+        let (_, flags) = Cr3::read();
+        let page_table_frame =
+            with_frame_allocator(|frame_allocator| frame_allocator.allocate_frame().unwrap());
+        let page_table = crate::sys::memory::create_page_table(page_table_frame);
+        let kernel_page_table = kernel_page_table();
+
+        // Copy kernel mappings
+        let pages = page_table.iter_mut().zip(kernel_page_table.iter_mut());
+        for (_, (page, kernel_page)) in pages.enumerate() {
+            *page = kernel_page.clone();
+        }
+
+        let mut mapper =
+            unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+
+        // 2. Deep copy user memory
+        let mut regions_to_copy = self.addr_size_vec.clone();
+
+        // Add Heap
+        if self.proc_mm.mapped_heap_end > self.proc_mm.heap_start {
+            regions_to_copy.push((
+                self.proc_mm.heap_start as u64,
+                self.proc_mm.mapped_heap_end - self.proc_mm.heap_start,
+            ));
+        }
+
+        // Add Mmaps
+        for region in &self.proc_mm.mmap_regions {
+            regions_to_copy.push((region.base as u64, region.len));
+        }
+
+        // We use a separate vec for the child's tracking to avoiding duplicates if addr_size_vec used to track everything
+        // But for cleanup we need them in child's addr_size_vec.
+        let mut child_addr_size_vec = self.addr_size_vec.clone();
+
+        for (addr, size) in regions_to_copy.iter() {
+            let addr = *addr;
+            let size = *size;
+
+            // Allocate in child
+            // Note: We use true, true (RWX) for simplicity, though strict permissions would be better.
+            if alloc_pages(&mut mapper, addr, size, true, true).is_err() {
+                println!("fork: failed to alloc pages");
+                return Err(());
+            }
+
+            // Track dynamic allocations in child so they are freed on exit
+            // (If already in addr_size_vec, we might duplicate, but cleanup handles that or we should check existence?)
+            // addr_size_vec usually has code/data. Heap/Mmap are new.
+            // A simple deduplication check:
+            if !child_addr_size_vec.contains(&(addr, size)) {
+                child_addr_size_vec.push((addr, size));
+            }
+
+            let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
+                VirtAddr::new(addr),
+            );
+            let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
+                VirtAddr::new(addr + (size as u64) - 1),
+            );
+
+            for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
+                // Get physical address in child's page table
+                let phys_opt = mapper.translate_page(page);
+
+                if let Ok(child_frame) = phys_opt {
+                    let child_phys = child_frame.start_address();
+                    let child_virt = VirtAddr::new(child_phys.as_u64() + phys_mem_offset());
+                    let parent_virt = page.start_address();
+
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            parent_virt.as_u64() as *const u8,
+                            child_virt.as_mut_ptr(),
+                            4096,
+                        );
+                    }
+                }
+            }
+        }
+
+        // 3. Clone File Descriptors
+        let mut new_fd_table = Vec::new();
+        for fd in self.fd_table.iter() {
+            if let Some(entry) = fd {
+                new_fd_table.push(Some(entry.clone()));
+            } else {
+                new_fd_table.push(None);
+            }
+        }
+
+        // 4. Setup Child Context
+        let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
+
+        // Stack grows down. Point to top.
+        let mut stack_ptr = switch_stack as u64;
+
+        let kgs = Box::new(KernelGsData {
+            kernel_rsp: stack_ptr,
+            user_rsp: 0,
+        });
+        let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
+
+        let mut stack = StackHelper::new(&mut stack_ptr);
+        // Allocate space for InterruptErrorStack
+        let kframe = stack.offset::<InterruptErrorStack>();
+
+        // Copy parent's trap frame
+        *kframe = InterruptErrorStack {
+            code: 0,
+            stack: *tf,
+        };
+
+        // Override RAX to 0 for child (fork returns 0)
+        kframe.stack.scratch.rax = 0;
+
+        let context = stack.offset::<Context>();
+        *context = Context::default();
+        context.rip = iretq_init as u64;
+        context.cr3 = page_table_frame.start_address().as_u64() | flags.bits();
+
+        let child_pid = pid;
+
+        #[allow(static_mut_refs)]
+        unsafe {
+            PROCESS_TABLE
+                .get_mut()
+                .unwrap()
+                .proc_list
+                .push_back(Process {
+                    context: context as *mut Context,
+                    context_switch_rsp: VirtAddr::new(stack_ptr),
+                    fpu_storage: self.fpu_storage, // Clone FPU state? Yes.
+
+                    stack: self.stack, // Copy user stack pointer (same VA)
+                    stack_size: self.stack_size,
+                    entry_point: self.entry_point,
+                    pid: child_pid,
+                    mapper,
+                    page_table_frame,
+                    state: ProcessState::Running,
+                    addr_size_vec: child_addr_size_vec,
+                    pwd: self.pwd.clone(),
+                    fd_table: new_fd_table,
+                    kernel_gs: kgs,
+                    gs_base: kgs_va,
+                    fs_base: self.fs_base,
+                    proc_mm: self.proc_mm.clone(), // Need to implement Clone for ProcMM or manually deep copy
+                    parent_pid: self.pid,
+                    stdio_flags: self.stdio_flags,
+                    stdio_fd_flags: self.stdio_fd_flags,
+                    stdio_target: self.stdio_target,
+                    exit_code: 0,
+                    preempt_frame: 0,
+                })
+        }
+
+        Ok(child_pid)
     }
 
     pub fn cleanup(&mut self, table_frame: PhysFrame) {
@@ -447,26 +811,331 @@ pub fn id() -> u16 {
     PID.load(Ordering::SeqCst)
 }
 
-pub fn exit() {
+pub fn exit(code: i32) {
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-    let mut process = table.proc_list.pop_back().unwrap();
+
+    let current_pid = id();
+    let mut idx = None;
+    for (i, p) in table.proc_list.iter().enumerate() {
+        if p.pid == current_pid {
+            idx = Some(i);
+            break;
+        }
+    }
+
+    // Don't remove, just get mutable reference
+    if let Some(i) = idx {
+        let process = &mut table.proc_list[i];
+        process.state = ProcessState::Dead;
+        process.exit_code = code;
+
+        let _parent_pid = process.parent_pid;
+        let _page_table_frame = process.page_table_frame;
+        let _addr_size_vec = core::mem::replace(&mut process.addr_size_vec, Vec::new());
+    }
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let current_pid = id();
+
+    // ... logic remains similar to original but takes code ...
+
+    let mut idx = None;
+    for (i, p) in table.proc_list.iter().enumerate() {
+        if p.pid == current_pid {
+            idx = Some(i);
+            break;
+        }
+    }
+
+    let mut process = if let Some(i) = idx {
+        table.proc_list.remove(i).unwrap()
+    } else {
+        // panic or return
+        return;
+    };
+    process.exit_code = code;
 
     if let Some(p_process) = table.get_process(process.parent_pid) {
+        p_process.state = ProcessState::Running;
+        p_process.preempt_frame = 0;
+
         let (pre_table_frame, flags) = Cr3::read();
         unsafe {
-            // Use the parent's page table while tearing down the exiting process.
             Cr3::write(p_process.page_table_frame, flags);
         }
         process.cleanup(pre_table_frame);
 
         PID.store(p_process.pid, Ordering::SeqCst);
         switch_tasks(&mut process, p_process);
+    } else {
+        loop {}
     }
 }
 
+pub fn on_timer_tick() {
+    NEED_RESCHED.store(true, Ordering::Relaxed);
+}
+
+pub fn maybe_schedule() {
+    // NOTE: Proper preemptive scheduling requires saving/restoring full user context.
+    // Keep this as a stub for now so timer ticks don't cause unsafe switches.
+    let _ = NEED_RESCHED.swap(false, Ordering::Relaxed);
+}
+
+pub fn schedule_now() {
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let cur_pid = id();
+
+    // Make a contiguous slice so we can index and take raw pointers.
+    let slice = table.proc_list.make_contiguous();
+    if slice.len() < 2 {
+        return;
+    }
+
+    let Some(cur_idx) = slice.iter().position(|p| p.pid == cur_pid) else {
+        return;
+    };
+
+    // Find next runnable process in round-robin order.
+    let mut next_idx = None;
+    for step in 1..=slice.len() {
+        let idx = (cur_idx + step) % slice.len();
+        if matches!(slice[idx].state, ProcessState::Running) {
+            next_idx = Some(idx);
+            break;
+        }
+    }
+    let Some(next_idx) = next_idx else {
+        return;
+    };
+    if next_idx == cur_idx {
+        return;
+    }
+
+    let cur_ptr: *mut Process = &mut slice[cur_idx];
+    let next_ptr: *mut Process = &mut slice[next_idx];
+
+    unsafe {
+        PID.store((*next_ptr).pid, Ordering::SeqCst);
+        switch_tasks(&mut *cur_ptr, &mut *next_ptr);
+    }
+}
+
+#[repr(C)]
+pub struct PreemptFrame {
+    pub cr3: u64,
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rbp: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
+    crate::driver::timer::pit::pit_tick_isr();
+
+    // EOI for IRQ0 (PIC timer)
+    unsafe {
+        crate::arch::x86_64::idt::PICS
+            .lock()
+            .notify_end_of_interrupt(crate::arch::x86_64::idt::PIC_1_OFFSET);
+    }
+
+    if from_user == 0 {
+        return frame;
+    }
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let cur_pid = id();
+
+    let slice = table.proc_list.make_contiguous();
+    if slice.len() < 2 {
+        // Still remember the latest frame.
+        if let Some(p) = slice.iter_mut().find(|p| p.pid == cur_pid) {
+            p.preempt_frame = frame as u64;
+        }
+        return frame;
+    }
+
+    let Some(cur_idx) = slice.iter().position(|p| p.pid == cur_pid) else {
+        return frame;
+    };
+
+    // Save the current user's FS/GS bases and the latest preempt frame.
+    {
+        let cur = &mut slice[cur_idx];
+        cur.preempt_frame = frame as u64;
+        cur.fs_base = io::get_fsbase()();
+        cur.gs_base = io::get_inactive_gsbase()(); // inactive = user GS because we swapgs in ISR
+        if let Some(fpu) = cur.fpu_storage.as_mut() {
+            xsave(fpu);
+        }
+    }
+
+    // Find next runnable task (round robin), requiring that it has a saved frame.
+    let mut next_idx = None;
+    for step in 1..=slice.len() {
+        let idx = (cur_idx + step) % slice.len();
+        if !matches!(slice[idx].state, ProcessState::Running) {
+            continue;
+        }
+        if slice[idx].preempt_frame == 0 {
+            continue;
+        }
+        next_idx = Some(idx);
+        break;
+    }
+    let Some(next_idx) = next_idx else {
+        return frame;
+    };
+    if next_idx == cur_idx {
+        return frame;
+    }
+
+    let next_pid = slice[next_idx].pid;
+    PID.store(next_pid, Ordering::SeqCst);
+
+    // Restore FS/GS + FPU for next task; update kernel stack top for next ring3->ring0 entry.
+    {
+        let next = &mut slice[next_idx];
+        io::set_fsbase()(next.fs_base);
+        io::set_inactive_gsbase()(next.gs_base);
+
+        if let Some(fpu) = next.fpu_storage.as_mut() {
+            xrstor(fpu);
+        }
+
+        let kstack_top = next.kernel_gs.kernel_rsp;
+        #[allow(static_mut_refs)]
+        unsafe {
+            crate::arch::x86_64::gdt::TSS.rsp[0] = kstack_top;
+        }
+        io::wrmsr(io::IA32_SYSENTER_ESP, kstack_top);
+    }
+
+    slice[next_idx].preempt_frame as *mut PreemptFrame
+}
+
+pub extern "C" fn apic_timer_preempt(
+    frame: *mut PreemptFrame,
+    from_user: u64,
+) -> *mut PreemptFrame {
+    crate::driver::timer::pit::pit_tick_isr();
+
+    // EOI for Local APIC
+    crate::driver::apic::lapic::end_of_interrupt();
+
+    if from_user == 0 {
+        return frame;
+    }
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let cur_pid = id();
+
+    let slice = table.proc_list.make_contiguous();
+    let len = slice.len();
+
+    // Find index of current process
+    // We can't rely on valid pointers if we don't find it, so be careful.
+    let mut cur_idx_opt = None;
+    for (i, p) in slice.iter().enumerate() {
+        if p.pid == cur_pid {
+            cur_idx_opt = Some(i);
+            break;
+        }
+    }
+
+    // Still remember the latest frame.
+    if let Some(cur_idx) = cur_idx_opt {
+        slice[cur_idx].preempt_frame = frame as u64;
+    } else {
+        return frame;
+    }
+
+    // Create copy of slice length to avoid borrow issues if we need it
+    if len < 2 {
+        return frame;
+    }
+
+    let cur_idx = cur_idx_opt.unwrap();
+
+    // Save the current user's FS/GS bases and the latest preempt frame.
+    {
+        let cur = &mut slice[cur_idx];
+        cur.preempt_frame = frame as u64;
+        cur.fs_base = io::get_fsbase()();
+        cur.gs_base = io::get_inactive_gsbase()(); // inactive = user GS because we swapgs in ISR
+        if let Some(fpu) = cur.fpu_storage.as_mut() {
+            xsave(fpu);
+        }
+    }
+
+    // Find next runnable task (round robin)
+    let mut next_idx = None;
+    for step in 1..=len {
+        let idx = (cur_idx + step) % len;
+        if !matches!(slice[idx].state, ProcessState::Running) {
+            continue;
+        }
+        if slice[idx].preempt_frame == 0 {
+            continue;
+        }
+        next_idx = Some(idx);
+        break;
+    }
+    let Some(next_idx) = next_idx else {
+        return frame;
+    };
+    if next_idx == cur_idx {
+        return frame;
+    }
+
+    let next_pid = slice[next_idx].pid;
+    PID.store(next_pid, Ordering::SeqCst);
+
+    // Restore FS/GS + FPU for next task; update kernel stack top for next ring3->ring0 entry.
+    {
+        let next = &mut slice[next_idx];
+        io::set_fsbase()(next.fs_base);
+        io::set_inactive_gsbase()(next.gs_base);
+
+        if let Some(fpu) = next.fpu_storage.as_mut() {
+            xrstor(fpu);
+        }
+
+        let kstack_top = next.kernel_gs.kernel_rsp;
+        #[allow(static_mut_refs)]
+        unsafe {
+            crate::arch::x86_64::gdt::TSS.rsp[0] = kstack_top;
+        }
+        io::wrmsr(io::IA32_SYSENTER_ESP, kstack_top);
+    }
+
+    slice[next_idx].preempt_frame as *mut PreemptFrame
+}
+
 #[unsafe(naked)]
-unsafe extern "C" fn iretq_init() {
+pub unsafe extern "C" fn iretq_init() {
     naked_asm!(
         "cli",
         // pop the error code
@@ -478,7 +1147,7 @@ unsafe extern "C" fn iretq_init() {
 }
 
 #[repr(C)]
-struct KernelGsData {
+pub struct KernelGsData {
     kernel_rsp: u64, // offset 0
     user_rsp: u64,   // offset 8
 }
@@ -503,8 +1172,10 @@ pub fn init() {
 
     let mut stack_ptr = switch_stack as u64;
 
-
-    let mut kgs = Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 });
+    let mut kgs = Box::new(KernelGsData {
+        kernel_rsp: 0,
+        user_rsp: 0,
+    });
 
     kgs.kernel_rsp = stack_ptr;
 
@@ -561,6 +1232,9 @@ pub fn init() {
                 parent_pid: 1,
                 stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
                 stdio_fd_flags: [0; 3],
+                stdio_target: [-1; 3],
+                exit_code: 0,
+                preempt_frame: 0,
             })
     }
 
@@ -571,7 +1245,10 @@ pub fn init() {
     let mut idle_task = Process {
         context: core::ptr::null_mut(),
         stack: 0,
-        kernel_gs: Box::new(KernelGsData { kernel_rsp: 0, user_rsp: 0 }),
+        kernel_gs: Box::new(KernelGsData {
+            kernel_rsp: 0,
+            user_rsp: 0,
+        }),
         fs_base: VirtAddr::zero(),
         gs_base: VirtAddr::zero(),
         proc_mm: Box::new(ProcMM::new(0)),
@@ -589,6 +1266,9 @@ pub fn init() {
         stack_size: 0,
         stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
         stdio_fd_flags: [0; 3],
+        stdio_target: [-1; 3],
+        exit_code: 0,
+        preempt_frame: 0,
     };
 
     idle_task.gs_base = VirtAddr::new(&*idle_task.kernel_gs as *const _ as u64);
@@ -667,7 +1347,6 @@ fn build_initial_stack(
         .or_else(|| argv_ptrs.get(0).copied())
         .unwrap_or(0);
 
-    // ---- write auxv (topmost among these tables) ----
     let aux_vec: Vec<AuxvEntry> = vec![
         AuxvEntry {
             key: 3,
@@ -712,31 +1391,41 @@ fn build_initial_stack(
         AuxvEntry { key: 0, value: 0 },  // AT_NULL
     ];
 
-    rsp -= (size_of::<AuxvEntry>() * aux_vec.len()) as u64;
+    // ---- compute padding so final %rsp follows SysV (16-byte aligned on entry) ----
+    let aux_bytes = (size_of::<AuxvEntry>() * aux_vec.len()) as u64;
+    let env_bytes = ((envp_ptrs.len() + 1) * size_of::<u64>()) as u64; // +NULL
+    let argv_bytes = ((argv_ptrs.len() + 1) * size_of::<u64>()) as u64; // +NULL
+    let total_bytes = aux_bytes + env_bytes + argv_bytes + size_of::<u64>() as u64; // +argc
+    let pad = rsp.wrapping_sub(total_bytes) & 0xF; // ensure (final_rsp % 16) == 0
+    if pad != 0 {
+        rsp -= pad;
+        unsafe { core::ptr::write_bytes(rsp as *mut u8, 0, pad as usize) };
+    }
+
+    // ---- write auxv (topmost among these tables) ----
+
+    rsp -= aux_bytes;
     unsafe {
         core::ptr::copy_nonoverlapping(aux_vec.as_ptr(), rsp as *mut AuxvEntry, aux_vec.len());
     }
 
+    // ---- envp NULL then envp pointers (envp[0] ends closest to argv) ----
     rsp -= 8;
     unsafe {
         *(rsp as *mut u64) = 0;
     }
-
-    // ---- envp pointers then NULL ----
-    for &p in &envp_ptrs {
+    for &p in envp_ptrs.iter() {
         rsp -= 8;
         unsafe {
             *(rsp as *mut u64) = p;
         }
     }
 
-    // envp termintor
+    // ---- argv NULL then argv pointers (argv[0] ends closest to argc) ----
     rsp -= 8;
     unsafe {
         *(rsp as *mut u64) = 0;
     }
-
-    // ---- argv pointers then NULL ----
     for &p in &argv_ptrs {
         rsp -= 8;
         unsafe {
@@ -744,12 +1433,7 @@ fn build_initial_stack(
         }
     }
 
-    // ---- padding BEFORE argc to ensure final %rsp == 8 ----
-    // We want (rsp_after_argc % 16 == 8). After we push argc (8 bytes),
-    // rsp will be (current_rsp - 8). So we need (current_rsp % 16 == 0).
-    // If it's 8, push a padding 0 to flip it to 0.
-
-    // ---- argc ----
+    // ---- argc (alignment handled above) ----
     rsp -= 8;
     unsafe {
         *(rsp as *mut u64) = argv_ptrs.len() as u64;

@@ -470,10 +470,26 @@ impl VfsNodeOps for TwilightFrameBuffer {
     fn read(
         &self,
         _device: &mut BlockDev,
-        _offset: usize,
-        _buffer: &mut [u8],
+        offset: usize,
+        buffer: &mut [u8],
     ) -> Result<usize, ()> {
-        Err(())
+        if buffer.len() % 4 != 0 {
+            return Err(());
+        }
+
+        // `offset` is provided in pixel units by console + /dev/fb0 users.
+        let start = offset;
+        let words = buffer.len() / 4;
+        let end = start + words;
+        if end > self.video_buf.len() {
+            return Err(());
+        }
+
+        let src = &self.video_buf[start..end];
+        let dst = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u32, words) };
+        dst.copy_from_slice(src);
+
+        Ok(buffer.len())
     }
 
     fn write(&mut self, _device: &mut BlockDev, offset: usize, buffer: &[u8]) -> Result<(), ()> {

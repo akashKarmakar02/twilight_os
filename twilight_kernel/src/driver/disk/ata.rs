@@ -365,12 +365,17 @@ lazy_static! {
     pub static ref BUSES: Mutex<Vec<Bus>> = Mutex::new(Vec::new());
 }
 
-pub fn init() {
-    {
-        let mut buses = BUSES.lock();
-        buses.push(Bus::new(0, 0x1F0, 0x3F6, 14));
-        buses.push(Bus::new(1, 0x170, 0x376, 15));
+fn ensure_buses() {
+    let mut buses = BUSES.lock();
+    if !buses.is_empty() {
+        return;
     }
+    buses.push(Bus::new(0, 0x1F0, 0x3F6, 14));
+    buses.push(Bus::new(1, 0x170, 0x376, 15));
+}
+
+pub fn init() {
+    ensure_buses();
 
     let time = crate::driver::timer::pit::uptime();
     let drives = list();
@@ -400,6 +405,7 @@ impl Drive {
     }
 
     pub fn open(bus: u8, dsk: u8) -> Option<Self> {
+        ensure_buses();
         let mut buses = BUSES.lock();
         let res = buses[bus as usize].identify_drive(dsk);
 
@@ -505,11 +511,19 @@ pub fn list() -> Vec<Drive> {
 }
 
 pub fn read(bus: u8, drive: u8, block: u32, buf: &mut [u8]) -> Result<(), ()> {
+    ensure_buses();
     let mut buses = BUSES.lock();
-    buses[bus as usize].read(drive, block, buf)
+    let Some(b) = buses.get_mut(bus as usize) else {
+        return Err(());
+    };
+    b.read(drive, block, buf)
 }
 
 pub fn write(bus: u8, drive: u8, block: u32, buf: &[u8]) -> Result<(), ()> {
+    ensure_buses();
     let mut buses = BUSES.lock();
-    buses[bus as usize].write(drive, block, buf)
+    let Some(b) = buses.get_mut(bus as usize) else {
+        return Err(());
+    };
+    b.write(drive, block, buf)
 }

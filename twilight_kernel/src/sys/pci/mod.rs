@@ -209,8 +209,7 @@ pub fn lookup_device_name(vendor: u16, device: u16) -> &'static str {
         (0x8086, 0x293A) => "82801I (ICH9 Family) USB2 EHCI Controller #1",
         (0x1AF4, 0x1003) => "Virtio console",
         (0x1AF4, 0x1002) => "Virtio memory balloon",
-        
-
+        (0x1AF4, 0x1001) => "Virtio Block Device",
 
         // Unknown
         _ => "Unknown device",
