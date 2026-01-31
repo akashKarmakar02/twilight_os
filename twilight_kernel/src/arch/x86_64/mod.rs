@@ -12,6 +12,9 @@ pub fn halt() {
     let disabled = !interrupts::are_enabled();
     interrupts::enable();
     crate::driver::usb::poll_all_drivers();
+    unsafe {
+        core::arch::asm!("hlt");
+    }
     if disabled {
         interrupts::disable();
     }

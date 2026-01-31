@@ -534,8 +534,8 @@ impl XhciDriver {
         }
 
         unsafe {
-            // Start + enable interrupts (we still poll event ring)
-            let cmd = USBCMD_RUN_STOP | USBCMD_INTE;
+            // Start (we poll, so disable interrupts)
+            let cmd = USBCMD_RUN_STOP;
             write_volatile(&mut (*self.op_regs.as_ptr()).usbcmd, cmd);
         }
 

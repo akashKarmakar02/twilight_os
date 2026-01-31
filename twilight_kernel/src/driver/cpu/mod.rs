@@ -1,5 +1,5 @@
 use crate::arch::x86_64::syscall::{IA32_EFER, rdmsr, wrmsr};
-use crate::{driver, hcf, println};
+use crate::{driver, println};
 use alloc::string::String;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use limine::response::MpResponse;
@@ -14,7 +14,11 @@ unsafe extern "C" fn ap_main(cpu: &limine::mp::Cpu) -> ! {
 
     x86_64::instructions::interrupts::enable();
     loop {
-        hcf();
+        loop {
+            unsafe {
+                core::arch::asm!("hlt");
+            }
+        }
     }
 }
 
