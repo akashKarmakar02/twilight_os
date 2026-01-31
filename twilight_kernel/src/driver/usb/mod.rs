@@ -1,7 +1,6 @@
 use crate::driver::usb::uhci::UHci;
 use crate::driver::usb::xhci::XhciDriver;
 use crate::log;
-use crate::sys::memory::phys_mem_offset;
 use crate::sys::pci::{lookup_device_name, PCI_DEVICES};
 use alloc::vec::Vec;
 use lazy_static::lazy_static;

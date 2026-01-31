@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::driver::timer::wait;
 use crate::driver::usb::interfaces::{
     HostController, InterruptTransfer, UsbDevice, UsbDeviceKind, UsbDriver, UsbError,

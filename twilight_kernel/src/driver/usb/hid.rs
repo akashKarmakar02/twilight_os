@@ -5,7 +5,6 @@ use crate::driver::usb::interfaces::{
 use crate::sys::memory::phys::PhysBuf;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::log;
 
 static MOUSE_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -96,13 +95,13 @@ impl UsbDriver for MouseDriver {
                     let b2 = buf.get(2).copied().unwrap_or(0);
                     let active = b0 != 0 || b1 != 0 || b2 != 0;
                     if n < 16 || active {
-                        log!(
-                            "USB Mouse report: [{:02x} {:02x} {:02x} ...] (len={})",
-                            b0,
-                            b1,
-                            b2,
-                            buf.len()
-                        );
+                        // log!(
+                        //     "USB Mouse report: [{:02x} {:02x} {:02x} ...] (len={})",
+                        //     b0,
+                        //     b1,
+                        //     b2,
+                        //     buf.len()
+                        // );
                     }
 
                     // Boot Protocol Report:

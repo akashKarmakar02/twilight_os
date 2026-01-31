@@ -20,6 +20,7 @@ const XHCI_MMIO_MAP_BYTES: usize = 0x1000;
 const XHCI_PORT_REG_BASE_OFFSET: usize = 0x400;
 const XHCI_PORT_REG_STRIDE: usize = 0x10;
 
+#[allow(dead_code)]
 pub struct XhciDriver {
     /* MMIO base */
     xhc_base: usize,
@@ -322,6 +323,7 @@ impl XhciDriver {
         }
     }
 
+    #[allow(dead_code)]
     fn log_capability_registers(&self) {
         /* Kernel log implementation goes here */
     }

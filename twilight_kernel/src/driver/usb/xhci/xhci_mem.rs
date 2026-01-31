@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
@@ -75,8 +76,8 @@ pub const XHCI_SCRATCHPAD_BUFFERS_ALIGNMENT: usize        = PAGE_SIZE;
 /// - `pci_bar_address` must be a valid physical MMIO address
 /// - Caller must ensure mapping is unique and uncached
 pub unsafe fn xhci_map_mmio(
-    pci_bar_address: u64,
-    bar_size: u32,
+    _pci_bar_address: u64,
+    _bar_size: u32,
 ) -> usize {
     // IMPLEMENTATION PROVIDED ELSEWHERE
     // This is intentionally just a declaration layer
@@ -92,15 +93,15 @@ pub unsafe fn xhci_map_mmio(
 /// # Safety
 /// - Returned memory must be freed using `free_xhci_memory`
 pub unsafe fn alloc_xhci_memory(
-    size: usize,
-    alignment: usize,
-    boundary: usize,
+    _size: usize,
+    _alignment: usize,
+    _boundary: usize,
 ) -> NonNull<c_void> {
     unimplemented!()
 }
 
 /// Free memory allocated via `alloc_xhci_memory`
-pub unsafe fn free_xhci_memory(ptr: NonNull<c_void>) {
+pub unsafe fn free_xhci_memory(_ptr: NonNull<c_void>) {
     unimplemented!()
 }
 
@@ -112,6 +113,6 @@ pub unsafe fn free_xhci_memory(ptr: NonNull<c_void>) {
 ///
 /// # Safety
 /// - `vaddr` must be mapped and valid
-pub unsafe fn xhci_get_physical_addr(vaddr: *const c_void) -> usize {
+pub unsafe fn xhci_get_physical_addr(_vaddr: *const c_void) -> usize {
     unimplemented!()
 }
