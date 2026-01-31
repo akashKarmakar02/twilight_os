@@ -29,7 +29,7 @@ use limine::framebuffer::Framebuffer;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, StackSizeRequest,
 };
-use limine::response::{HhdmResponse, MemoryMapResponse};
+use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -72,6 +72,7 @@ unsafe extern "C" fn kmain() -> ! {
     let mut framebuffer: Option<Framebuffer> = None;
     let mut hhdm_response: Option<&HhdmResponse> = None;
     let mut cpio_response: Option<&&limine::file::File> = None;
+    let mut mp_response: Option<&MpResponse> = None;
 
     if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
         if let Some(fb) = framebuffer_response.framebuffers().next() {
@@ -98,10 +99,15 @@ unsafe extern "C" fn kmain() -> ! {
         }
     }
 
+    if let Some(mpr) = MP.get_response() {
+        mp_response = Some(mpr);
+    }
+
     init(
         &framebuffer.unwrap(),
         hhdm_response.unwrap(),
         memory_map_response,
+        mp_response.unwrap(),
         cpio_response.unwrap(),
     );
 
@@ -154,6 +160,7 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 
 fn hcf() -> ! {
     loop {
+        crate::driver::usb::poll_all_drivers();
         unsafe {
             #[cfg(target_arch = "x86_64")]
             asm!("hlt");
@@ -177,6 +184,7 @@ pub fn init(
     fb: &Framebuffer,
     hhdm_response: &HhdmResponse,
     memory_map_response: &'static mut MemoryMapResponse,
+    mp_response: &'static MpResponse,
     cpio_file: &&limine::file::File,
 ) {
     driver::uart::init();
@@ -208,7 +216,7 @@ pub fn init(
     // depends on pci initialization
     driver::nic::init();
     driver::usb::init();
-    driver::cpu::init();
+    driver::cpu::init(mp_response);
     driver::disk::init();
 
     let cpio_buf = unsafe {

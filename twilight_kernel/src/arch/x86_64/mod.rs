@@ -10,7 +10,8 @@ pub mod syscall;
 
 pub fn halt() {
     let disabled = !interrupts::are_enabled();
-    interrupts::enable_and_hlt();
+    interrupts::enable();
+    crate::driver::usb::poll_all_drivers();
     if disabled {
         interrupts::disable();
     }

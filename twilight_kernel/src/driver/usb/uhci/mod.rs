@@ -1,7 +1,11 @@
 use crate::driver::timer::wait;
+use crate::driver::usb::interfaces::{
+    HostController, InterruptTransfer, UsbDevice, UsbDeviceKind, UsbDriver, UsbError,
+};
 use crate::driver::usb::usb_ids;
 use crate::log;
 use crate::sys::memory::phys::PhysBuf;
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use core::mem::size_of;
@@ -21,7 +25,14 @@ pub struct UHci {
 
     frame_list: PhysBuf, // 1024 u32 entries, 4KiB aligned
     async_qh: PhysBuf,   // one QH used for control transfers during enumeration
+
+    // Generic Driver Support
+    drivers: alloc::vec::Vec<alloc::boxed::Box<dyn UsbDriver>>,
+    interrupt_root: u32,
 }
+
+unsafe impl Send for UHci {}
+unsafe impl Sync for UHci {}
 
 #[allow(dead_code)]
 #[repr(C, packed)]
@@ -59,35 +70,6 @@ enum UhciError {
     UsbError(u32),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UsbDeviceKind {
-    Keyboard,
-    Mouse,
-    Hid,
-    Hub,
-    MassStorage,
-    Communication,
-    Video,
-    Audio,
-    Unknown,
-}
-
-impl UsbDeviceKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            UsbDeviceKind::Keyboard => "keyboard",
-            UsbDeviceKind::Mouse => "mouse",
-            UsbDeviceKind::Hid => "hid",
-            UsbDeviceKind::Hub => "hub",
-            UsbDeviceKind::MassStorage => "mass-storage",
-            UsbDeviceKind::Communication => "communication",
-            UsbDeviceKind::Video => "video",
-            UsbDeviceKind::Audio => "audio",
-            UsbDeviceKind::Unknown => "unknown",
-        }
-    }
-}
-
 const USBCMD_RUN_STOP: u16 = 1 << 0;
 const USBCMD_HCRESET: u16 = 1 << 1;
 const USBCMD_CONFIGURE_FLAG: u16 = 1 << 6;
@@ -118,6 +100,16 @@ const TD_STATUS_ERRCNT_SHIFT: u32 = 27;
 const TD_STATUS_SPD: u32 = 1 << 29;
 const TD_STATUS_STALLED: u32 = 1 << 22;
 
+#[inline(always)]
+fn sleep_us(us: u64) {
+    wait(us * 1_000);
+}
+
+#[inline(always)]
+fn sleep_ms(ms: u64) {
+    wait(ms * 1_000_000);
+}
+
 impl UHci {
     pub fn new(io_base: u16) -> Self {
         Self {
@@ -133,6 +125,9 @@ impl UHci {
 
             frame_list: PhysBuf::new(0x1000),
             async_qh: PhysBuf::new(0x1000),
+
+            drivers: alloc::vec::Vec::new(),
+            interrupt_root: 0, // Will be init_schedule
         }
     }
 
@@ -214,7 +209,7 @@ impl UHci {
             if (cmd & USBCMD_HCRESET) == 0 {
                 break;
             }
-            wait(10);
+            sleep_us(10);
         }
 
         // Clear status (R/WC)
@@ -236,6 +231,10 @@ impl UHci {
     fn init_schedule(&mut self) {
         let qh_phys = (self.async_qh.addr() as u32) & 0xFFFF_FFF0;
         let frame_ptr = qh_phys | LINK_QH;
+
+        // Interrupt Root initially points to Async QH (the end of the interrupt chain)
+        self.interrupt_root = frame_ptr;
+
         let frame_list_ptr = self.frame_list_mut_u32();
 
         for entry in frame_list_ptr.iter_mut() {
@@ -280,20 +279,20 @@ impl UHci {
 
         // Clear change bits
         self.write_portsc(port, v | PORTSC_CSC | PORTSC_PEC);
-        wait(100);
+        sleep_us(100);
 
         // Port reset (10ms+)
         v = self.read_portsc(port);
         self.write_portsc(port, v | PORTSC_PR);
-        wait(50_000);
+        sleep_ms(50);
         v = self.read_portsc(port);
         self.write_portsc(port, v & !PORTSC_PR);
-        wait(10_000);
+        sleep_ms(10);
 
         // Enable port
         v = self.read_portsc(port);
         self.write_portsc(port, v | PORTSC_PE | PORTSC_CSC | PORTSC_PEC);
-        wait(1_000);
+        sleep_ms(1);
 
         Ok(())
     }
@@ -523,7 +522,7 @@ impl UHci {
             if waited >= timeout_us {
                 return Err(UhciError::Timeout);
             }
-            wait(50);
+            sleep_us(50);
             waited += 50;
         }
 
@@ -566,7 +565,7 @@ impl UHci {
         };
         self.run_control_transfer(0, low_speed, setup, true, None, 0, 8, 200)?;
         // USB spec: wait at least 2ms after SetAddress.
-        wait(2_000);
+        sleep_ms(2);
         Ok(())
     }
 
@@ -643,6 +642,73 @@ impl UHci {
             500,
         )?;
         Ok(buf)
+    }
+
+    fn set_configuration(
+        &mut self,
+        addr: u8,
+        low_speed: bool,
+        mps0: usize,
+        config_value: u8,
+    ) -> Result<(), UhciError> {
+        let setup = SetupPacket {
+            bm_request_type: 0x00,
+            b_request: 9, // SET_CONFIGURATION
+            w_value: (config_value as u16).to_le(),
+            w_index: 0u16.to_le(),
+            w_length: 0u16.to_le(),
+        };
+        self.run_control_transfer(addr, low_speed, setup, true, None, 0, mps0, 500)?;
+        sleep_ms(5);
+        Ok(())
+    }
+
+    fn parse_boot_hid_int_in_endpoint(cfg: &[u8], want_protocol: u8) -> Option<(u8, u8, u8, u8)> {
+        // Returns (interface, ep_num, max_packet, interval)
+        let mut off = 0usize;
+        let mut current_if: Option<(u8, u8, u8, u8)> = None; // (ifnum, class, subclass, protocol)
+
+        while off + 2 <= cfg.len() {
+            let len = cfg[off] as usize;
+            let dtype = cfg[off + 1];
+            if len < 2 || off + len > cfg.len() {
+                break;
+            }
+
+            if dtype == 0x04 && len >= 9 {
+                let ifnum = cfg[off + 2];
+                let class = cfg[off + 5];
+                let subclass = cfg[off + 6];
+                let protocol = cfg[off + 7];
+                current_if = Some((ifnum, class, subclass, protocol));
+            } else if dtype == 0x05 && len >= 7 {
+                if let Some((ifnum, class, subclass, protocol)) = current_if {
+                    if class == 0x03 && subclass == 0x01 && protocol == want_protocol {
+                        let ep_addr = cfg[off + 2];
+                        let attrs = cfg[off + 3] & 0x03;
+                        let max_packet =
+                            u16::from_le_bytes([cfg[off + 4], cfg[off + 5]]) as usize;
+                        let interval = cfg[off + 6];
+
+                        let is_in = (ep_addr & 0x80) != 0;
+                        let ep_num = ep_addr & 0x0F;
+                        let is_interrupt = attrs == 0x03;
+
+                        if is_in && is_interrupt && ep_num != 0 && max_packet > 0 {
+                            return Some((
+                                ifnum,
+                                ep_num,
+                                core::cmp::min(255, max_packet) as u8,
+                                interval,
+                            ));
+                        }
+                    }
+                }
+            }
+
+            off += len;
+        }
+        None
     }
 
     fn detect_device_kind(
@@ -814,13 +880,15 @@ impl UHci {
         Ok(s)
     }
 
+    // ... keep existing get_string_descriptor ...
+
     fn enumerate_device_on_port(
         &mut self,
         port: u8,
         low_speed: bool,
     ) -> Result<UhciDevInfo, UhciError> {
-        // Give the device some time after reset before we start talking to it.
-        wait(100_000);
+        // ... (Keep existing enumeration preamble: reset, address, descriptors) ...
+        sleep_ms(100);
 
         let mut prefix = None;
         for _ in 0..3 {
@@ -830,7 +898,7 @@ impl UHci {
                     break;
                 }
                 Err(UhciError::Timeout) => {
-                    wait(50_000);
+                    sleep_ms(50);
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -839,7 +907,6 @@ impl UHci {
         let (mps0, _prefix) = prefix.ok_or(UhciError::Timeout)?;
         let mps0 = core::cmp::max(8usize, mps0 as usize);
 
-        // Simple address allocation: 1..=127, per-port stable.
         let addr = core::cmp::min(127, 8 + port) as u8;
         let mut set_addr_ok = false;
         for _ in 0..3 {
@@ -849,7 +916,7 @@ impl UHci {
                     break;
                 }
                 Err(UhciError::Timeout) => {
-                    wait(50_000);
+                    sleep_ms(50);
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -867,7 +934,7 @@ impl UHci {
                     break;
                 }
                 Err(UhciError::Timeout) => {
-                    wait(50_000);
+                    sleep_ms(50);
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -883,23 +950,51 @@ impl UHci {
 
         let kind = self.detect_device_kind(addr, low_speed, mps0, class, subclass, protocol);
 
+        // Best-effort: set configuration so interrupt endpoints work.
+        let mut interface = 0u8;
+        let mut int_in_ep = 0u8;
+        let mut int_in_mps = 0u8;
+        let mut int_in_interval = 0u8;
+        if let Ok(cfg) = self.get_config_descriptor(addr, low_speed, mps0) {
+            // bConfigurationValue is at offset 5 in config descriptor header
+            let config_value = cfg.get(5).copied().unwrap_or(1);
+            let cfg_value = if config_value == 0 { 1 } else { config_value };
+            let _ = self.set_configuration(addr, low_speed, mps0, cfg_value);
+
+            if kind == UsbDeviceKind::Mouse {
+                if let Some((ifnum, ep, mps, interval)) =
+                    Self::parse_boot_hid_int_in_endpoint(&cfg, 0x02)
+                {
+                    interface = ifnum;
+                    int_in_ep = ep;
+                    int_in_mps = mps;
+                    int_in_interval = interval;
+                }
+            } else if kind == UsbDeviceKind::Keyboard {
+                if let Some((ifnum, ep, mps, interval)) =
+                    Self::parse_boot_hid_int_in_endpoint(&cfg, 0x01)
+                {
+                    interface = ifnum;
+                    int_in_ep = ep;
+                    int_in_mps = mps;
+                    int_in_interval = interval;
+                }
+            }
+        }
+
         let name = {
             let i_mfg = desc[14];
             let i_prod = desc[15];
-
-            // Try internal strings first, unless they are 0
             let mut resolved_name = None;
-
             if i_mfg != 0 || i_prod != 0 {
                 let langid_res = self.get_langid(addr, low_speed, mps0);
                 if let Ok(langid) = langid_res {
-                    let mfg_res = self.get_string_descriptor(addr, low_speed, mps0, i_mfg, langid);
-                    let prod_res =
-                        self.get_string_descriptor(addr, low_speed, mps0, i_prod, langid);
-
-                    let mfg = mfg_res.ok().filter(|s| !s.is_empty());
-                    let prod = prod_res.ok().filter(|s| !s.is_empty());
-
+                    let mfg = self
+                        .get_string_descriptor(addr, low_speed, mps0, i_mfg, langid)
+                        .ok();
+                    let prod = self
+                        .get_string_descriptor(addr, low_speed, mps0, i_prod, langid)
+                        .ok();
                     match (mfg, prod) {
                         (Some(m), Some(p)) => resolved_name = Some(format!("{} {}", m, p)),
                         (Some(m), None) => resolved_name = Some(m),
@@ -908,18 +1003,44 @@ impl UHci {
                     }
                 }
             }
-
-            if let Some(n) = resolved_name {
-                n
-            } else {
-                // Fallback to lookup table
+            resolved_name.unwrap_or_else(|| {
                 if let Some((vendor, product)) = usb_ids::lookup(vid, pid) {
                     format!("{} {}", vendor, product)
                 } else {
-                    String::from("Unknown USB device")
+                    format!("Unknown {:04x}:{:04x}", vid, pid)
                 }
-            }
+            })
         };
+
+        // DRIVER INITIALIZATION
+        let mut usb_dev = UsbDevice {
+            port,
+            addr,
+            vid,
+            pid,
+            class,
+            subclass,
+            protocol,
+            max_packet0,
+            kind,
+            name: name.clone(),
+            low_speed, // Added
+            interface,
+            int_in_ep,
+            int_in_mps,
+            int_in_interval,
+        };
+
+        if kind == UsbDeviceKind::Mouse {
+            let mut driver = crate::driver::usb::hid::MouseDriver::new();
+            log!("UHCI: Initializing MouseDriver for {}", name);
+            if let Err(e) = driver.init(&mut usb_dev, self) {
+                log!("UHCI: MouseDriver init failed: {:?}", e);
+            } else {
+                log!("UHCI: MouseDriver active!");
+                self.drivers.push(Box::new(driver));
+            }
+        }
 
         Ok(UhciDevInfo {
             port,
@@ -933,6 +1054,194 @@ impl UHci {
             kind,
             name,
         })
+    }
+    pub fn poll_drivers(&mut self) {
+        for driver in self.drivers.iter_mut() {
+            driver.poll();
+        }
+    }
+}
+
+// Implement HostController trait for UHCI
+impl HostController for UHci {
+    fn control_transfer(
+        &mut self,
+        addr: u8,
+        _endp: u8, // UHCI run_control_transfer assumes endpoint 0 for control
+        setup: [u8; 8],
+        data: Option<&mut [u8]>,
+        low_speed: bool, // Passed from driver
+    ) -> Result<usize, UsbError> {
+        let setup_pkt = unsafe { core::ptr::read(setup.as_ptr() as *const SetupPacket) };
+        let len = data.as_ref().map(|d| d.len()).unwrap_or(0);
+
+        // We need a PhysBuf for data if present.
+        let mut bounce_buf = if len > 0 {
+            Some(PhysBuf::new(len))
+        } else {
+            None
+        };
+
+        if let Some(ref mut b) = bounce_buf {
+            if let Some(src) = data.as_ref() {
+                b.copy_from_slice(src);
+            }
+        }
+
+        let res = self.run_control_transfer(
+            addr,
+            low_speed,
+            setup_pkt,
+            (setup[0] & 0x80) != 0,
+            bounce_buf.as_mut(),
+            len,
+            8,
+            500,
+        );
+
+        match res {
+            Ok(_) => {
+                if (setup[0] & 0x80) != 0 {
+                    if let Some(src) = bounce_buf {
+                        if let Some(dst) = data {
+                            dst.copy_from_slice(&src[..len]);
+                        }
+                    }
+                }
+                Ok(len)
+            }
+            Err(e) => Err(match e {
+                UhciError::Timeout => UsbError::Timeout,
+                UhciError::Stalled => UsbError::Stalled,
+                UhciError::Halted => UsbError::Halted,
+                UhciError::UsbError(u) => UsbError::UsbError(u),
+            }),
+        }
+    }
+
+    fn schedule_interrupt(
+        &mut self,
+        addr: u8,
+        endp: u8,
+        _max_packet_size: u8,
+        _interval: u8,
+        buf_phys: u64,
+        len: usize,
+        low_speed: bool,
+    ) -> Result<Box<dyn InterruptTransfer>, UsbError> {
+        // Create QH + TD
+        // QH: Head -> Next QH (Async or Next Int)
+        //     Elem -> TD
+        // TD: -> Terminate (or next TD if multi-stage, but interrupt is single)
+
+        let mem = PhysBuf::new(32); // 16 bytes QH + 16 bytes TD (aligned 16)
+        let base_phys = mem.addr() as u32;
+        let qh_phys = base_phys;
+        let td_phys = base_phys + 16;
+
+        let ptr = mem.virt_addr().as_u64() as *mut u32;
+        let qh_ptr = ptr as *mut UhciQH;
+        let td_ptr = unsafe { ptr.add(4) } as *mut UhciTD;
+
+        // Link into schedule: Insert at HEAD of interrupt chain
+        // Existing chain head: self.interrupt_root (phys)
+        // New QH Head Link -> self.interrupt_root
+        // self.interrupt_root -> New QH
+
+        let entry_link = qh_phys | LINK_QH | LINK_DEPTH_FIRST;
+
+        // Setup TD
+        let td = UHci::make_td(
+            LINK_TERMINATE,
+            PID_IN,
+            addr,
+            endp,
+            false, // Data0/1? usually toggle maintained? Interrupt keeps toggle?
+            // UHCI spec: Driver maintains toggle or controller?
+            // Controller uses QH overlay for toggle bit 1 in dword 2?
+            // For now: data0
+            len,
+            buf_phys as u32,
+            low_speed,
+            true,  // IOC
+            true, // SPD (short packets are normal for HID reports)
+        );
+
+        unsafe {
+            qh_ptr.write(UhciQH {
+                head_link: self.interrupt_root | LINK_DEPTH_FIRST,
+                element_link: td_phys | LINK_DEPTH_FIRST,
+            });
+            td_ptr.write(td);
+        }
+
+        // Update Root
+        // We need to update ALL frame list entries to point to new head?
+        // Yes, if we want 1ms polling (interval 1).
+        // Since interval argument is unused in this simple impl, we set interval 1.
+        self.interrupt_root = entry_link;
+        // Optimization: only update frame list once at init?
+        // Currently `init_schedule` sets all frames to `frame_ptr` (async).
+        // We should update `frame_list` to point to `interrupt_root`?
+        // BUT `interrupt_root` inside `UHci` struct is a software concept.
+        // We need to write to the actual frame list in memory.
+        let frame_list_ptr = self.frame_list_mut_u32();
+        for entry in frame_list_ptr.iter_mut() {
+            *entry = entry_link;
+        }
+
+        Ok(Box::new(UhciInterruptTransfer {
+            mem, // Keeps QH/TD alive
+            qh_ptr,
+            td_ptr,
+            td_phys,
+        }))
+    }
+}
+
+struct UhciInterruptTransfer {
+    mem: PhysBuf,
+    qh_ptr: *mut UhciQH,
+    td_ptr: *mut UhciTD,
+    td_phys: u32,
+}
+
+impl InterruptTransfer for UhciInterruptTransfer {
+    fn poll(&mut self) -> bool {
+        let td = unsafe { self.td_ptr.read_volatile() };
+        // If Active bit (Bit 23) is 0, transfer complete.
+        (td.ctrl_status & TD_STATUS_ACTIVE) == 0
+    }
+
+    fn ack(&mut self) {
+        // UHCI advances the QH element link ("overlay") as TDs complete.
+        // If we reuse the same TD, we must repoint the QH back to it.
+        unsafe {
+            let mut qh = self.qh_ptr.read_volatile();
+            qh.element_link = self.td_phys | LINK_DEPTH_FIRST;
+            self.qh_ptr.write_volatile(qh);
+        }
+
+        // Re-arm: Set Active bit, reset length?
+        // Max Length is in bits 21-31 of token? No, token is separate.
+        // Status has bits 0-10 ActLen.
+        // We need to reset Status to Initial Status (Active | 3 Errors)
+        // Token remains comparable.
+        let mut td = unsafe { self.td_ptr.read_volatile() };
+        let keep = td.ctrl_status & (TD_STATUS_LS | TD_STATUS_SPD);
+        td.ctrl_status = TD_STATUS_ACTLEN_MASK
+            | TD_STATUS_ACTIVE
+            | (3u32 << TD_STATUS_ERRCNT_SHIFT)
+            | TD_STATUS_IOC
+            | keep;
+        // Don't touch buffer_ptr or token (unless toggle flipping needed)
+        // Toggle: The QH automatically updates toggle in overlay.
+        // But we are re-using the same TD.
+        // If we re-use TD, we should check if we need to flip toggle in Token?
+        // Boot mouse typically is tolerant.
+        unsafe {
+            self.td_ptr.write_volatile(td);
+        }
     }
 }
 

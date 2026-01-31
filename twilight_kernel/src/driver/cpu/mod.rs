@@ -1,5 +1,5 @@
 use crate::arch::x86_64::syscall::{IA32_EFER, rdmsr, wrmsr};
-use crate::{driver, println};
+use crate::{driver, hcf, println};
 use alloc::string::String;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use limine::response::MpResponse;
@@ -10,13 +10,11 @@ use x86_64::registers::xcontrol::{XCr0, XCr0Flags};
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 
 unsafe extern "C" fn ap_main(cpu: &limine::mp::Cpu) -> ! {
-    use x86_64::instructions::hlt;
-
     crate::arch::x86_64::cpu_local::init(cpu.id as usize);
 
     x86_64::instructions::interrupts::enable();
     loop {
-        hlt();
+        hcf();
     }
 }
 
@@ -50,7 +48,7 @@ pub fn init_smp(mp_response: &'static MpResponse) {
 pub const IA32_GS_BASE: u32 = 0xc0000101;
 pub const IA32_KERNEL_GS_BASE: u32 = 0xc0000102;
 
-pub fn init() {
+pub fn init(mp_response: &'static MpResponse) {
     let cpuid = CpuId::new();
     let time = driver::timer::pit::uptime();
 
@@ -83,7 +81,7 @@ pub fn init() {
         name
     );
     // hlt();
-    // init_smp(mp_response);
+    init_smp(mp_response);
 }
 
 pub fn cpu_count() -> usize {
