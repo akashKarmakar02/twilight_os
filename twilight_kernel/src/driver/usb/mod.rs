@@ -96,5 +96,9 @@ pub fn poll_all_drivers() {
         hc.poll_drivers();
     }
 
-    // Future: XHCI poll
+    let mut xhci = XHCI_DEVICES.lock();
+    for hc in xhci.iter_mut() {
+        hc.poll_ports();
+        hc.poll_drivers();
+    }
 }

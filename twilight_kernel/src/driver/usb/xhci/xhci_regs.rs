@@ -23,6 +23,38 @@ pub struct XhciCapabilityRegisters {
 const _: () = assert!(size_of::<XhciCapabilityRegisters>() == 32);
 
 /* =========================================================
+   xHCI Runtime Registers (subset)
+========================================================= */
+
+#[repr(C)]
+pub struct XhciInterrupterRegisters {
+    pub iman: u32,    // Interrupter Management
+    pub imod: u32,    // Interrupter Moderation
+    pub erstsz: u32,  // Event Ring Segment Table Size
+    pub reserved: u32,
+    pub erstba: u64,  // Event Ring Segment Table Base Address
+    pub erdp: u64,    // Event Ring Dequeue Pointer
+}
+
+const _: () = assert!(size_of::<XhciInterrupterRegisters>() == 32);
+
+#[repr(C)]
+pub struct XhciRuntimeRegisters {
+    pub mfindex: u32,
+    pub reserved: [u32; 7],
+    pub ir: [XhciInterrupterRegisters; 1], // we only use interrupter 0 for now
+}
+
+/* =========================================================
+   Doorbells
+========================================================= */
+
+#[repr(C)]
+pub struct XhciDoorbellRegisters {
+    pub db: [u32; 256], // enough for xHCI doorbells
+}
+
+/* =========================================================
    xHCI Operational Registers
    (Read/write, MMIO mapped)
 ========================================================= */
