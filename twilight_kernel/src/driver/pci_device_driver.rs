@@ -1,10 +1,7 @@
-#![no_std]
-
 use alloc::string::String;
 use alloc::sync::Arc;
 
 use crate::sys::pci::DeviceConfig;
-use x86_64::instructions::interrupts::*;
 
 pub type IrqVector = u8;
 
@@ -25,11 +22,7 @@ pub trait PciDeviceDriver {
        Device attachment
     ----------------------------------------------------- */
 
-    fn attach_device(
-        &mut self,
-        dev: Arc<DeviceConfig>,
-        enable_bus_mastering: bool,
-    );
+    fn attach_device(&mut self, dev: Arc<DeviceConfig>, enable_bus_mastering: bool);
 }
 
 /* =========================================================
@@ -63,11 +56,7 @@ impl PciDeviceDriverState {
         self.irq_vector
     }
 
-    pub fn attach_device(
-        &mut self,
-        mut dev: Arc<DeviceConfig>,
-        enable_bus_mastering: bool,
-    ) {
+    pub fn attach_device(&mut self, dev: Arc<DeviceConfig>, enable_bus_mastering: bool) {
         if enable_bus_mastering {
             dev.enable_bus_mastering();
         }

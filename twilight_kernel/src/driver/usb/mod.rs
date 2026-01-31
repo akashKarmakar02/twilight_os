@@ -1,13 +1,14 @@
 use crate::driver::usb::uhci::UHci;
 use crate::driver::usb::xhci::XhciDriver;
 use crate::log;
-use crate::sys::pci::{find_device, PCI_DEVICES};
-use crate::driver::pci_device_driver::PciDeviceDriver;
+use crate::sys::memory::phys_mem_offset;
+use crate::sys::pci::PCI_DEVICES;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
 mod uhci;
+pub mod usb_ids;
 mod xhci;
 
 lazy_static! {
@@ -16,46 +17,65 @@ lazy_static! {
 }
 
 pub fn init() {
-    // UHCI Initialization (existing)
-    if let Some(mut dev) = find_device(0x8086, 0x7020) {
-        dev.enable_bus_mastering();
-        let bar0 = dev.base_addresses[0];
-        let _ = (bar0 & 0xFFFC) as u16;
-        let mut io_base = 0;
+    // UHCI Initialization
+    {
+        let devices = PCI_DEVICES.lock();
+        for dev in devices.iter() {
+            if dev.class == 0x0C && dev.subclass == 0x03 && dev.prog == 0x00 {
+                let io_base = dev
+                    .base_addresses
+                    .iter()
+                    .copied()
+                    .find(|bar| (bar & 0x1) == 0x1 && (bar & 0xFFFC) != 0)
+                    .map(|bar| (bar & 0xFFFC) as u16)
+                    .unwrap_or(0);
 
-        for addr in dev.base_addresses {
-            if addr & 0xFFF0 != 0 {
-                io_base = (addr as u16) & 0xFFF0;
+                if io_base == 0 {
+                    log!(
+                        "UHCI Controller found {:04x}:{:04x} but no IO BAR",
+                        dev.vendor_id,
+                        dev.device_id
+                    );
+                    continue;
+                }
+
+                dev.enable_bus_mastering();
+                log!(
+                    "UHCI Controller found: {:04x}:{:04x} IO={:#x}",
+                    dev.vendor_id,
+                    dev.device_id,
+                    io_base
+                );
+
+                let mut uhci = UHci::new(io_base);
+                uhci.list();
+                UCHI_DEVICES.lock().push(uhci);
             }
         }
-
-        let mut uhci = UHci::new(io_base);
-        uhci.list();
-        {
-            UCHI_DEVICES.lock().push(uhci);
-        }
-
-        log!("UHCI Dev IO Base: {:#x}", io_base);
     }
 
     // XHCI Initialization
     let devices = PCI_DEVICES.lock();
     for dev in devices.iter() {
         if dev.class == 0x0C && dev.subclass == 0x03 && dev.prog == 0x30 {
-            log!("XHCI Controller found: {:04x}:{:04x}", dev.vendor_id, dev.device_id);
-            
+            log!(
+                "XHCI Controller found: {:04x}:{:04x}",
+                dev.vendor_id,
+                dev.device_id
+            );
+
             // Get MMIO Base Address (BAR0)
             let base_addr = dev.mem_base().as_u64() as usize;
             log!("XHCI MMIO Base: {:#x}", base_addr);
 
-            let mut xhci = XhciDriver::new(base_addr);
+            let mut xhci = XhciDriver::new(base_addr + phys_mem_offset() as usize);
             // We need to clone the device config because attach_device takes ownership of an Arc
             // But we are iterating a locked Vec. Ideally we'd clone the Arc.
-             // For now, let's just initialize it. attach_device in this codebase seems to be a mix of logic.
-            
-             // Note: In a real implementation we would call xhci.init_device(), start_device(), etc.
-             // For now, let's store it.
-             XHCI_DEVICES.lock().push(xhci);
+            // For now, let's just initialize it. attach_device in this codebase seems to be a mix of logic.
+
+            // Note: In a real implementation we would call xhci.init_device(), start_device(), etc.
+            // For now, let's store it.
+            // XHCI_DEVICES.lock().push(xhci);
         }
     }
 }

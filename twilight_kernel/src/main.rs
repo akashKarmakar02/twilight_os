@@ -29,7 +29,7 @@ use limine::framebuffer::Framebuffer;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, ModuleRequest, MpRequest, StackSizeRequest,
 };
-use limine::response::{HhdmResponse, MemoryMapResponse, MpResponse};
+use limine::response::{HhdmResponse, MemoryMapResponse};
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -71,7 +71,6 @@ unsafe extern "C" fn kmain() -> ! {
 
     let mut framebuffer: Option<Framebuffer> = None;
     let mut hhdm_response: Option<&HhdmResponse> = None;
-    let mut mp_response: Option<&MpResponse> = None;
     let mut cpio_response: Option<&&limine::file::File> = None;
 
     if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
@@ -88,10 +87,6 @@ unsafe extern "C" fn kmain() -> ! {
     let memory_map_response: &mut MemoryMapResponse =
         unsafe { &mut *MEMMAP.get() }.get_response_mut().unwrap();
 
-    if let Some(mpr) = MP.get_response() {
-        mp_response = Some(mpr);
-    }
-
     if let Some(module_response) = MODULE_REQUEST.get_response() {
         for module in module_response.modules() {
             if module.path().to_str().unwrap() == "/boot/rootfs.cpio" {
@@ -107,7 +102,6 @@ unsafe extern "C" fn kmain() -> ! {
         &framebuffer.unwrap(),
         hhdm_response.unwrap(),
         memory_map_response,
-        mp_response.unwrap(),
         cpio_response.unwrap(),
     );
 
@@ -183,7 +177,6 @@ pub fn init(
     fb: &Framebuffer,
     hhdm_response: &HhdmResponse,
     memory_map_response: &'static mut MemoryMapResponse,
-    mp_response: &'static MpResponse,
     cpio_file: &&limine::file::File,
 ) {
     driver::uart::init();
@@ -215,7 +208,7 @@ pub fn init(
     // depends on pci initialization
     driver::nic::init();
     driver::usb::init();
-    driver::cpu::init(mp_response);
+    driver::cpu::init();
     driver::disk::init();
 
     let cpio_buf = unsafe {

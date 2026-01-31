@@ -243,7 +243,7 @@ impl Stats {
 
 #[allow(dead_code)]
 fn find_device(device_id: u16, vendor_id: u16) -> Option<DeviceConfig> {
-    if let Some(mut dev) = sys::pci::find_device(device_id, vendor_id) {
+    if let Some(dev) = sys::pci::find_device(device_id, vendor_id) {
         dev.enable_bus_mastering();
         return Some(dev);
     }

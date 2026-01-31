@@ -315,7 +315,7 @@ impl VirtioBlkDev {
     const VIRTIO_BLK_CFG_WRITEBACK_OFF: u16 = 0x20; // struct virtio_blk_config::writeback
 
     fn probe_and_init() -> Option<Self> {
-        let mut dev = crate::sys::pci::find_device(0x1AF4, 0x1001)?;
+        let dev = crate::sys::pci::find_device(0x1AF4, 0x1001)?;
         dev.enable_bus_mastering();
         let io = dev.io_base();
 

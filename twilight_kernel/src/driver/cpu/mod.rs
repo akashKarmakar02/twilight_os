@@ -1,11 +1,11 @@
 use crate::arch::x86_64::syscall::{IA32_EFER, rdmsr, wrmsr};
 use crate::{driver, println};
 use alloc::string::String;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use limine::response::MpResponse;
 use raw_cpuid::CpuId;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::xcontrol::{XCr0, XCr0Flags};
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 
@@ -50,7 +50,7 @@ pub fn init_smp(mp_response: &'static MpResponse) {
 pub const IA32_GS_BASE: u32 = 0xc0000101;
 pub const IA32_KERNEL_GS_BASE: u32 = 0xc0000102;
 
-pub fn init(mp_response: &'static MpResponse) {
+pub fn init() {
     let cpuid = CpuId::new();
     let time = driver::timer::pit::uptime();
 

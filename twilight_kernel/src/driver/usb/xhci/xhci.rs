@@ -1,11 +1,8 @@
+use crate::driver::pci_device_driver::PciDeviceDriver;
+use crate::driver::usb::xhci::xhci_regs::{XhciCapabilityRegisters, XhciOperationalRegisters};
+use crate::sys::pci::DeviceConfig;
 use alloc::sync::Arc;
 use core::ptr::NonNull;
-use crate::driver::pci_device_driver::PciDeviceDriver;
-use crate::sys::pci::DeviceConfig;
-use crate::driver::usb::xhci::xhci_regs::{
-    XhciCapabilityRegisters,
-    XhciOperationalRegisters,
-};
 
 /* =========================================================
    xHCI Driver
@@ -17,7 +14,7 @@ pub struct XhciDriver {
 
     /* Register blocks */
     cap_regs: NonNull<XhciCapabilityRegisters>,
-    op_regs:  NonNull<XhciOperationalRegisters>,
+    op_regs: NonNull<XhciOperationalRegisters>,
 
     /* CAPLENGTH */
     capability_regs_length: u8,
@@ -81,16 +78,12 @@ impl PciDeviceDriver for XhciDriver {
 
 impl XhciDriver {
     pub fn new(xhc_base: usize) -> Self {
-        let cap_regs = unsafe {
-            NonNull::new_unchecked(xhc_base as *mut XhciCapabilityRegisters)
-        };
+        let cap_regs = unsafe { NonNull::new(xhc_base as *mut XhciCapabilityRegisters).unwrap() };
 
         let caplength = unsafe { cap_regs.as_ref().caplength };
 
         let op_regs = unsafe {
-            NonNull::new_unchecked(
-                (xhc_base + caplength as usize) as *mut XhciOperationalRegisters
-            )
+            NonNull::new((xhc_base + caplength as usize) as *mut XhciOperationalRegisters).unwrap()
         };
 
         Self {
@@ -127,9 +120,9 @@ impl XhciDriver {
 
         /* HCSPARAMS1 */
         let hcs1 = cap.hcsparams1;
-        self.max_device_slots  = (hcs1 & 0xFF) as u8;
-        self.max_interrupters  = ((hcs1 >> 8) & 0x7FF) as u8;
-        self.max_ports         = ((hcs1 >> 24) & 0xFF) as u8;
+        self.max_device_slots = (hcs1 & 0xFF) as u8;
+        self.max_interrupters = ((hcs1 >> 8) & 0x7FF) as u8;
+        self.max_ports = ((hcs1 >> 24) & 0xFF) as u8;
 
         /* HCSPARAMS2 */
         let hcs2 = cap.hcsparams2;
@@ -139,13 +132,13 @@ impl XhciDriver {
 
         /* HCCPARAMS1 */
         let hcc1 = cap.hccparams1;
-        self.addr_64bit_capable             = (hcc1 & (1 << 0)) != 0;
-        self.bandwidth_negotiation_capable  = (hcc1 & (1 << 1)) != 0;
-        self.context_64byte                 = (hcc1 & (1 << 2)) != 0;
-        self.port_power_control             = (hcc1 & (1 << 3)) != 0;
-        self.port_indicators                = (hcc1 & (1 << 4)) != 0;
-        self.light_reset_capable             = (hcc1 & (1 << 5)) != 0;
-        self.extended_capabilities_offset   = ((hcc1 >> 16) & 0xFFFF) << 2;
+        self.addr_64bit_capable = (hcc1 & (1 << 0)) != 0;
+        self.bandwidth_negotiation_capable = (hcc1 & (1 << 1)) != 0;
+        self.context_64byte = (hcc1 & (1 << 2)) != 0;
+        self.port_power_control = (hcc1 & (1 << 3)) != 0;
+        self.port_indicators = (hcc1 & (1 << 4)) != 0;
+        self.light_reset_capable = (hcc1 & (1 << 5)) != 0;
+        self.extended_capabilities_offset = ((hcc1 >> 16) & 0xFFFF) << 2;
     }
 
     fn log_capability_registers(&self) {

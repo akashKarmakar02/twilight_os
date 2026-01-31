@@ -1,6 +1,5 @@
-use core::ffi::c_void;
-use core::ffi::c_int;
 use core::ffi::c_char;
+use core::ffi::c_int;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
@@ -66,9 +65,7 @@ pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> c_int
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bcmp(s1: *const u8, s2: *const u8, n: usize) -> c_int {
-    unsafe {
-        memcmp(s1, s2, n)
-    }
+    unsafe { memcmp(s1, s2, n) }
 }
 
 #[unsafe(no_mangle)]
