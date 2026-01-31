@@ -200,7 +200,7 @@ run-hdd-bios: $(IMAGE_NAME).hdd
 		-m 1024 \
 		-usb \
 		-device usb-mouse \
-		-device piix3-usb-uhci \
+		-device qemu-xhci \
 		-netdev user,id=net0,hostfwd=tcp::8080-:80 -device rtl8139,netdev=net0 \
 		-smp 4 \
 		-hda $(IMAGE_NAME).hdd \
