@@ -1,14 +1,15 @@
+use crate::driver::pci_device_driver::PciDeviceDriver;
 use crate::driver::usb::uhci::UHci;
 use crate::driver::usb::xhci::XhciDriver;
 use crate::log;
-use crate::sys::pci::{lookup_device_name, PCI_DEVICES};
+use crate::sys::pci::{PCI_DEVICES, lookup_device_name};
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use spin::Mutex;
-use crate::driver::pci_device_driver::PciDeviceDriver;
 
 pub mod hid;
 pub mod interfaces;
+pub mod manager;
 mod uhci;
 pub mod usb_ids;
 mod xhci;
@@ -69,7 +70,7 @@ pub fn init() {
                 dev.device,
                 dev.function
             );
-            
+
             // Get MMIO Base Address (BAR0)
             let base_addr = dev.mem_base().as_u64();
             log!("XHCI MMIO Base: {:#x}", base_addr);
@@ -81,11 +82,11 @@ pub fn init() {
             }
             // We need to clone the device config because attach_device takes ownership of an Arc
             // But we are iterating a locked Vec. Ideally we'd clone the Arc.
-             // For now, let's just initialize it. attach_device in this codebase seems to be a mix of logic.
-            
-             // Note: In a real implementation we would call xhci.init_device(), start_device(), etc.
-             // For now, let's store it.
-             XHCI_DEVICES.lock().push(xhci);
+            // For now, let's just initialize it. attach_device in this codebase seems to be a mix of logic.
+
+            // Note: In a real implementation we would call xhci.init_device(), start_device(), etc.
+            // For now, let's store it.
+            XHCI_DEVICES.lock().push(xhci);
         }
     }
 }

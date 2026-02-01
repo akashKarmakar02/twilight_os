@@ -687,8 +687,7 @@ impl UHci {
                     if class == 0x03 && subclass == 0x01 && protocol == want_protocol {
                         let ep_addr = cfg[off + 2];
                         let attrs = cfg[off + 3] & 0x03;
-                        let max_packet =
-                            u16::from_le_bytes([cfg[off + 4], cfg[off + 5]]) as usize;
+                        let max_packet = u16::from_le_bytes([cfg[off + 4], cfg[off + 5]]) as usize;
                         let interval = cfg[off + 6];
 
                         let is_in = (ep_addr & 0x80) != 0;
@@ -951,38 +950,6 @@ impl UHci {
 
         let kind = self.detect_device_kind(addr, low_speed, mps0, class, subclass, protocol);
 
-        // Best-effort: set configuration so interrupt endpoints work.
-        let mut interface = 0u8;
-        let mut int_in_ep = 0u8;
-        let mut int_in_mps = 0u8;
-        let mut int_in_interval = 0u8;
-        if let Ok(cfg) = self.get_config_descriptor(addr, low_speed, mps0) {
-            // bConfigurationValue is at offset 5 in config descriptor header
-            let config_value = cfg.get(5).copied().unwrap_or(1);
-            let cfg_value = if config_value == 0 { 1 } else { config_value };
-            let _ = self.set_configuration(addr, low_speed, mps0, cfg_value);
-
-            if kind == UsbDeviceKind::Mouse {
-                if let Some((ifnum, ep, mps, interval)) =
-                    Self::parse_boot_hid_int_in_endpoint(&cfg, 0x02)
-                {
-                    interface = ifnum;
-                    int_in_ep = ep;
-                    int_in_mps = mps;
-                    int_in_interval = interval;
-                }
-            } else if kind == UsbDeviceKind::Keyboard {
-                if let Some((ifnum, ep, mps, interval)) =
-                    Self::parse_boot_hid_int_in_endpoint(&cfg, 0x01)
-                {
-                    interface = ifnum;
-                    int_in_ep = ep;
-                    int_in_mps = mps;
-                    int_in_interval = interval;
-                }
-            }
-        }
-
         let name = {
             let i_mfg = desc[14];
             let i_prod = desc[15];
@@ -1025,22 +992,24 @@ impl UHci {
             max_packet0,
             kind,
             name: name.clone(),
-            low_speed, // Added
-            interface,
-            int_in_ep,
-            int_in_mps,
-            int_in_interval,
+            low_speed,
+            // Optional fields removed or set to dummy values since driver handles them
+            interface: 0,
+            int_in_ep: 0,
+            int_in_mps: 0,
+            int_in_interval: 0,
         };
 
-        if kind == UsbDeviceKind::Mouse {
-            let mut driver = crate::driver::usb::hid::MouseDriver::new();
-            log!("UHCI: Initializing MouseDriver for {}", name);
+        if let Some(mut driver) = crate::driver::usb::manager::get_driver(&usb_dev) {
+            log!("UHCI: Initializing driver for {}", name);
             if let Err(e) = driver.init(&mut usb_dev, self) {
-                log!("UHCI: MouseDriver init failed: {:?}", e);
+                log!("UHCI: Driver init failed: {:?}", e);
             } else {
-                log!("UHCI: MouseDriver active!");
-                self.drivers.push(Box::new(driver));
+                log!("UHCI: Driver active!");
+                self.drivers.push(driver);
             }
+        } else {
+            log!("UHCI: No driver found for {}", name);
         }
 
         Ok(UhciDevInfo {
@@ -1164,7 +1133,7 @@ impl HostController for UHci {
             len,
             buf_phys as u32,
             low_speed,
-            true,  // IOC
+            true, // IOC
             true, // SPD (short packets are normal for HID reports)
         );
 

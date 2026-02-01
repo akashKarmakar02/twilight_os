@@ -929,7 +929,6 @@ impl XhciDriver {
         sleep_ms(5);
         Ok(())
     }
-
     fn configure_interrupt_in_endpoint(
         &mut self,
         slot_id: u8,
@@ -999,7 +998,7 @@ impl XhciDriver {
         Err(UsbError::Timeout)
     }
 
-    fn try_attach_boot_mouse(&mut self, slot_id: u8, port_index: usize) {
+    fn try_attach_device(&mut self, slot_id: u8, port_index: usize) {
         let Some(Some(st)) = self.slots.get(slot_id as usize) else {
             return;
         };
@@ -1018,36 +1017,62 @@ impl XhciDriver {
         };
         let vid = u16::from_le_bytes([dev_desc[8], dev_desc[9]]);
         let pid = u16::from_le_bytes([dev_desc[10], dev_desc[11]]);
+        let class = dev_desc[4];
+        let subclass = dev_desc[5];
+        let protocol = dev_desc[6];
+        let max_packet0 = dev_desc[7];
 
         // Give the device a moment to breathe before next control transfer
         sleep_ms(10);
 
-        let cfg = match self.get_config_descriptor(slot_id) {
-            Ok(c) => c,
-            Err(e) => {
-                log!(
-                    "XHCI: slot {} get_config_descriptor failed: {:?}",
-                    slot_id,
-                    e
-                );
-                return;
+        // We can optionally fetch config descriptor here if we want to determine "kind" more accurately,
+        // but for now let's rely on Device Class/Subclass/Protocol if possible, OR
+        // let the manager handle it if we pass enough info?
+        // Wait, UsbDeviceKind needs to be set. UHCI does `detect_device_kind` which fetches Config Desc.
+        // XHCI didn't previously do deep detection, it just assumed Boot Mouse if config parsing succeeded.
+        // To support generic drivers, we should probably attempt to determine kind.
+        // For simplicity in this refactor, let's just create UsbDevice with Unknown kind if we can't tell easily,
+        // OR duplicate the detect logic.
+        // Better: let's match what we have.
+
+        let mut kind = UsbDeviceKind::Unknown;
+        if class == 0x03 && subclass == 0x01 && protocol == 0x02 {
+            kind = UsbDeviceKind::Mouse;
+        } else if class == 0x03 && subclass == 0x01 && protocol == 0x01 {
+            kind = UsbDeviceKind::Keyboard;
+        } else if class == 0x00 {
+            // Device Class is 0, so Look in Interface Descriptors
+            // We need to fetch the config descriptor to check interfaces.
+            if let Ok(cfg) = self.get_config_descriptor(slot_id) {
+                // Iterate interfaces to find Mouse/Keyboard
+                // Logic similar to parse_boot_hid_int_in_endpoint but just for Kind detection
+                let mut off = 0usize;
+                while off + 2 <= cfg.len() {
+                    let len = cfg[off] as usize;
+                    let dtype = cfg[off + 1];
+                    if len < 2 || off + len > cfg.len() {
+                        break;
+                    }
+
+                    if dtype == 0x04 && len >= 9 {
+                        // Interface Descriptor
+                        let if_class = cfg[off + 5];
+                        let if_subclass = cfg[off + 6];
+                        let if_protocol = cfg[off + 7];
+
+                        if if_class == 0x03 && if_subclass == 0x01 {
+                            if if_protocol == 0x02 {
+                                kind = UsbDeviceKind::Mouse;
+                                break;
+                            } else if if_protocol == 0x01 {
+                                kind = UsbDeviceKind::Keyboard;
+                                break;
+                            }
+                        }
+                    }
+                    off += len;
+                }
             }
-        };
-
-        let Some((cfg_value, interface, ep_num, ep_mps, ep_interval)) =
-            parse_boot_hid_int_in_endpoint(&cfg, 0x02)
-        else {
-            log!(
-                "XHCI: slot {} not a boot mouse (no int-in endpoint)",
-                slot_id
-            );
-            return;
-        };
-
-        if let Err(e) = self.set_configuration(slot_id, if cfg_value == 0 { 1 } else { cfg_value })
-        {
-            log!("XHCI: slot {} set_configuration failed: {:?}", slot_id, e);
-            return;
         }
 
         let name = usb_ids::lookup(vid, pid)
@@ -1059,27 +1084,30 @@ impl XhciDriver {
             addr: slot_id, // xHCI slot id
             vid,
             pid,
-            class: dev_desc[4],
-            subclass: dev_desc[5],
-            protocol: dev_desc[6],
-            max_packet0: dev_desc[7],
-            kind: UsbDeviceKind::Mouse,
+            class,
+            subclass,
+            protocol,
+            max_packet0,
+            kind,
             name: name.clone(),
             low_speed,
-            interface,
-            int_in_ep: ep_num,
-            int_in_mps: ep_mps,
-            int_in_interval: ep_interval,
+            interface: 0,
+            int_in_ep: 0,
+            int_in_mps: 0,
+            int_in_interval: 0,
         };
 
-        let mut driver = crate::driver::usb::hid::MouseDriver::new();
-        log!("XHCI: Initializing MouseDriver for {}", name);
-        if let Err(e) = driver.init(&mut dev, self) {
-            log!("XHCI: MouseDriver init failed: {:?}", e);
-            return;
+        if let Some(mut driver) = crate::driver::usb::manager::get_driver(&dev) {
+            log!("XHCI: Initializing driver for {}", name);
+            if let Err(e) = driver.init(&mut dev, self) {
+                log!("XHCI: Driver init failed: {:?}", e);
+            } else {
+                log!("XHCI: Driver active!");
+                self.drivers.push(driver);
+            }
+        } else {
+            log!("XHCI: No driver found for {}", name);
         }
-        log!("XHCI: MouseDriver active!");
-        self.drivers.push(Box::new(driver));
     }
 
     fn address_device(&mut self, slot_id: u8, port_index: usize) -> bool {
@@ -1248,7 +1276,7 @@ impl XhciDriver {
                             self.last_cmd_cc
                         );
                         if ok {
-                            self.try_attach_boot_mouse(slot_id, port_index);
+                            self.try_attach_device(slot_id, port_index);
                         }
                     }
                 } else {

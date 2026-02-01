@@ -21,6 +21,62 @@ impl MouseDriver {
             interrupt_handle: None,
         }
     }
+
+    fn parse_boot_hid_int_in_endpoint(
+        cfg: &[u8],
+        want_protocol: u8,
+    ) -> Option<(u8, u8, u8, u8, u8)> {
+        if cfg.len() < 9 {
+            return None;
+        }
+        let config_value = cfg[5];
+
+        let mut off = 0usize;
+        let mut current_if: Option<(u8, u8, u8, u8)> = None; // (ifnum, class, subclass, protocol)
+
+        while off + 2 <= cfg.len() {
+            let len = cfg[off] as usize;
+            let dtype = cfg[off + 1];
+            if len < 2 || off + len > cfg.len() {
+                break;
+            }
+
+            if dtype == 0x04 && len >= 9 {
+                let ifnum = cfg[off + 2];
+                let class = cfg[off + 5];
+                let subclass = cfg[off + 6];
+                let protocol = cfg[off + 7];
+                current_if = Some((ifnum, class, subclass, protocol));
+            } else if dtype == 0x05 && len >= 7 {
+                if let Some((ifnum, class, subclass, protocol)) = current_if {
+                    // Check logic: We want HID (3), Boot (1), Protocol (want_protocol)
+                    // Wait, XHCI code checked class/subclass/protocol.
+                    if class == 0x03 && subclass == 0x01 && protocol == want_protocol {
+                        let ep_addr = cfg[off + 2];
+                        let attrs = cfg[off + 3] & 0x03;
+                        let max_packet = u16::from_le_bytes([cfg[off + 4], cfg[off + 5]]) as usize;
+                        let interval = cfg[off + 6];
+
+                        let is_in = (ep_addr & 0x80) != 0;
+                        let ep_num = ep_addr & 0x0F;
+                        let is_interrupt = attrs == 0x03;
+
+                        if is_in && is_interrupt && ep_num != 0 && max_packet > 0 {
+                            return Some((
+                                config_value,
+                                ifnum,
+                                ep_num,
+                                core::cmp::min(255, max_packet) as u8,
+                                interval,
+                            ));
+                        }
+                    }
+                }
+            }
+            off += len;
+        }
+        None
+    }
 }
 
 impl UsbDriver for MouseDriver {
@@ -29,48 +85,89 @@ impl UsbDriver for MouseDriver {
         device: &mut UsbDevice,
         hc: &mut dyn HostController,
     ) -> Result<(), UsbError> {
-        if device.int_in_ep == 0 || device.int_in_mps == 0 {
-            return Err(UsbError::InvalidDevice);
-        }
-
-        // 1. Set Protocol 0 (Boot Protocol)
-        // Request: 0x21 (0b00100001) - Set Protocol
-        // Value: 0 (Boot)
-        // Index: 0 (Interface)
+        // 1. Get Configuration Descriptor to find endpoints
+        // We assume index 0 for configuration (standard for boot devices)
+        // First get header to find length
+        // Note: For simplicity, we just fetch a reasonable size (e.g. 256 bytes) or do two fetches.
+        // Let's try fetching 9 bytes first.
+        let mut cfg_hdr = [0u8; 9];
+        // GET_DESCRIPTOR(Configuration, 0, 0, 9)
         let mut setup = [0u8; 8];
-        setup[0] = 0x21; // bmRequestType: Host to Device, Class, Interface
-        setup[1] = 0x0B; // bRequest: SET_PROTOCOL
-        setup[2] = 0x00; // wValue: 0 (Boot)
-        setup[3] = 0x00;
-        setup[4] = device.interface; // wIndex: Interface
+        setup[0] = 0x80; // Dir=In
+        setup[1] = 0x06; // GET_DESCRIPTOR
+        setup[2] = 0x00; // Desc Index
+        setup[3] = 0x02; // Desc Type (CONFIGURATION)
+        setup[4] = 0x00;
         setup[5] = 0x00;
-        setup[6] = 0x00; // wLength: 0
+        setup[6] = 0x09;
         setup[7] = 0x00;
 
-        hc.control_transfer(device.addr, 0, setup, None, device.low_speed)?;
+        match hc.control_transfer(device.addr, 0, setup, Some(&mut cfg_hdr), device.low_speed) {
+            Ok(9) => {}
+            _ => return Err(UsbError::UsbError(0)), // Failed to get header
+        }
 
-        // 2. Set Idle 0 (Duration Indefinite / Report only on change)
-        setup[0] = 0x21;
-        setup[1] = 0x0A; // SET_IDLE
-        setup[2] = 0x00; // Duration: 0 (upper byte), ReportID: 0 (lower byte)
+        let total_len = u16::from_le_bytes([cfg_hdr[2], cfg_hdr[3]]) as usize;
+        let mut cfg_buf = alloc::vec![0u8; total_len];
+        setup[6] = total_len as u8; // Lower byte
+        setup[7] = (total_len >> 8) as u8; // Upper byte
+
+        match hc.control_transfer(device.addr, 0, setup, Some(&mut cfg_buf), device.low_speed) {
+            Ok(n) if n == total_len => {}
+            _ => return Err(UsbError::UsbError(0)), // Failed to get full config
+        }
+
+        // Parse for Boot Mouse Interface (Class 3, Subclass 1, Protocol 2)
+        // We move the parsing logic here.
+        let (config_value, interface, ep_num, ep_mps, ep_interval) =
+            Self::parse_boot_hid_int_in_endpoint(&cfg_buf, 0x02).ok_or(UsbError::InvalidDevice)?;
+
+        // 2. Set Configuration
+        let cfg_val_to_set = if config_value == 0 { 1 } else { config_value };
+        // SET_CONFIGURATION
+        setup = [0u8; 8];
+        setup[0] = 0x00; // Dir=Out
+        setup[1] = 0x09; // SET_CONFIGURATION
+        setup[2] = cfg_val_to_set;
         setup[3] = 0x00;
-        setup[4] = device.interface;
+        setup[4] = 0x00;
         setup[5] = 0x00;
         setup[6] = 0x00;
         setup[7] = 0x00;
         hc.control_transfer(device.addr, 0, setup, None, device.low_speed)?;
 
-        // 3. Allocate buffer for Interrupt Transfers
-        // Use endpoint max packet size (cap to a small buffer).
-        let buf_len = core::cmp::min(64usize, core::cmp::max(1usize, device.int_in_mps as usize));
+        // 3. Set Protocol 0 (Boot Protocol)
+        setup[0] = 0x21; // bmRequestType: Class, Interface
+        setup[1] = 0x0B; // SET_PROTOCOL
+        setup[2] = 0x00; // Boot
+        setup[3] = 0x00;
+        setup[4] = interface;
+        setup[5] = 0x00;
+        setup[6] = 0x00;
+        setup[7] = 0x00;
+        hc.control_transfer(device.addr, 0, setup, None, device.low_speed)?;
+
+        // 4. Set Idle 0
+        setup[0] = 0x21;
+        setup[1] = 0x0A; // SET_IDLE
+        setup[2] = 0x00;
+        setup[3] = 0x00;
+        setup[4] = interface;
+        setup[5] = 0x00;
+        setup[6] = 0x00;
+        setup[7] = 0x00;
+        hc.control_transfer(device.addr, 0, setup, None, device.low_speed)?;
+
+        // 5. Schedule Interrupt
+        let buf_len = core::cmp::min(64usize, core::cmp::max(1usize, ep_mps as usize));
         let buf = PhysBuf::new(buf_len);
         let phys_addr = buf.addr();
+        let interval = core::cmp::max(1u8, ep_interval);
 
-        let interval = core::cmp::max(1u8, device.int_in_interval);
         let handle = hc.schedule_interrupt(
             device.addr,
-            device.int_in_ep,
-            device.int_in_mps,
+            ep_num,
+            ep_mps,
             interval,
             phys_addr,
             buf_len,
