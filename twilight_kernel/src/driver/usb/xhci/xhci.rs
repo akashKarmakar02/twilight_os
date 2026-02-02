@@ -1188,8 +1188,11 @@ impl XhciDriver {
                 // Once we hand the event ring to an interrupt transfer handle (mouse),
                 // issuing more xHCI commands from here would race on the event ring.
                 if !self.drivers.is_empty() {
-                    self.port_status_cache[port_index] = portsc;
-                    continue;
+                    // We used to block here to avoid racing on the event ring, but
+                    // since we poll the event ring globally now, it should be safe
+                    // to add more devices.
+                    // self.port_status_cache[port_index] = portsc;
+                    // continue;
                 }
                 if ccs != 0 {
                     let speed = Self::port_speed_name(portsc);
