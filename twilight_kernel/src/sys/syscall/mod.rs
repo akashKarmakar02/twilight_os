@@ -267,6 +267,11 @@ pub extern "sysv64" fn syscall_handler(
                 -(EINVAL as i64)
             }
         }
+        // custom syscall currently used for
+        700 => {
+            crate::kernel_utils::install::main();
+            0
+        }
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
             -(ENOSYS as i64)
