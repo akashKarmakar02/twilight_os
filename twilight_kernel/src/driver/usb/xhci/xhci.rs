@@ -114,60 +114,6 @@ fn endpoint_id(ep_num: u8, dir_in: bool) -> u8 {
     }
 }
 
-fn parse_boot_hid_int_in_endpoint(cfg: &[u8], want_protocol: u8) -> Option<(u8, u8, u8, u8, u8)> {
-    // Returns (config_value, interface, ep_num, max_packet, interval)
-    if cfg.len() < 9 {
-        return None;
-    }
-    let config_value = cfg[5];
-
-    let mut off = 0usize;
-    let mut current_if: Option<(u8, u8, u8, u8)> = None; // (ifnum, class, subclass, protocol)
-
-    while off + 2 <= cfg.len() {
-        let len = cfg[off] as usize;
-        let dtype = cfg[off + 1];
-        if len < 2 || off + len > cfg.len() {
-            break;
-        }
-
-        if dtype == 0x04 && len >= 9 {
-            let ifnum = cfg[off + 2];
-            let class = cfg[off + 5];
-            let subclass = cfg[off + 6];
-            let protocol = cfg[off + 7];
-            current_if = Some((ifnum, class, subclass, protocol));
-        } else if dtype == 0x05 && len >= 7 {
-            if let Some((ifnum, class, subclass, protocol)) = current_if {
-                if class == 0x03 && subclass == 0x01 && protocol == want_protocol {
-                    let ep_addr = cfg[off + 2];
-                    let attrs = cfg[off + 3] & 0x03;
-                    let max_packet = u16::from_le_bytes([cfg[off + 4], cfg[off + 5]]) as usize;
-                    let interval = cfg[off + 6];
-
-                    let is_in = (ep_addr & 0x80) != 0;
-                    let ep_num = ep_addr & 0x0F;
-                    let is_interrupt = attrs == 0x03;
-
-                    if is_in && is_interrupt && ep_num != 0 && max_packet > 0 {
-                        return Some((
-                            config_value,
-                            ifnum,
-                            ep_num,
-                            core::cmp::min(255, max_packet) as u8,
-                            interval,
-                        ));
-                    }
-                }
-            }
-        }
-
-        off += len;
-    }
-
-    None
-}
-
 #[allow(dead_code)]
 pub struct XhciDriver {
     /* MMIO base */
@@ -923,12 +869,6 @@ impl XhciDriver {
         Ok(buf)
     }
 
-    fn set_configuration(&mut self, slot_id: u8, config_value: u8) -> Result<(), UsbError> {
-        let setup = [0x00, 9, config_value, 0, 0, 0, 0, 0];
-        let _ = self.control_transfer_ep0(slot_id, setup, None, true)?;
-        sleep_ms(5);
-        Ok(())
-    }
     fn configure_interrupt_in_endpoint(
         &mut self,
         slot_id: u8,

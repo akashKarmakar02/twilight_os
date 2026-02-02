@@ -9,6 +9,7 @@ use spin::Mutex;
 
 pub mod hid;
 pub mod interfaces;
+pub mod keyboard;
 pub mod manager;
 mod uhci;
 pub mod usb_ids;
