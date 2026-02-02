@@ -267,7 +267,7 @@ pub extern "sysv64" fn syscall_handler(
                 -(EINVAL as i64)
             }
         }
-        // custom syscall currently used for
+        // custom syscall currently used for installing (TODO: do this in normal way by writing to /dev/disk0)
         700 => {
             crate::kernel_utils::install::main();
             0
