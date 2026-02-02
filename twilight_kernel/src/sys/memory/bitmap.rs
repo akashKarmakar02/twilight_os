@@ -279,6 +279,88 @@ impl BitmapFrameAllocator {
 
         None
     }
+
+    /// Allocate `num_pages` physically-contiguous 4KiB frames whose last byte is
+    /// at or below `max_phys_addr_inclusive`.
+    pub fn allocate_contiguous_below(
+        &mut self,
+        num_pages: usize,
+        max_phys_addr_inclusive: u64,
+    ) -> Option<PhysFrame<Size4KiB>> {
+        if num_pages == 0 {
+            return None;
+        }
+
+        let mut base = 0usize;
+        for region_idx in 0..self.regions_count {
+            let Some(region) = self.usable_regions[region_idx] else {
+                continue;
+            };
+
+            let region_len = region.len();
+            if region_len < num_pages {
+                base += region_len;
+                continue;
+            }
+
+            let region_start = region.first_frame().start_address().as_u64();
+            if region_start > max_phys_addr_inclusive {
+                base += region_len;
+                continue;
+            }
+
+            // Limit how much of this region we can use before exceeding max_phys.
+            let max_pages_by_addr = ((max_phys_addr_inclusive + 1).saturating_sub(region_start)
+                / 0x1000) as usize;
+            let region_len_limited = region_len.min(max_pages_by_addr);
+            if region_len_limited < num_pages {
+                base += region_len;
+                continue;
+            }
+
+            let max_start = region_len_limited - num_pages;
+            let start0 = if self.next_free_index >= base
+                && self.next_free_index < base + region_len_limited
+            {
+                (self.next_free_index - base).min(max_start)
+            } else {
+                0
+            };
+
+            for pass in 0..2 {
+                let (start, end_excl) = if pass == 0 {
+                    (start0, max_start + 1)
+                } else {
+                    (0, start0.min(max_start + 1))
+                };
+
+                for start_off in start..end_excl {
+                    let start_index = base + start_off;
+
+                    let mut ok = true;
+                    for j in 0..num_pages {
+                        if self.is_frame_allocated(start_index + j) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if !ok {
+                        continue;
+                    }
+
+                    for j in 0..num_pages {
+                        self.set_frame_allocated(start_index + j, true);
+                    }
+                    self.next_free_index = start_index + num_pages;
+                    return Some(region.first_frame() + start_off as u64);
+                }
+            }
+
+            base += region_len;
+        }
+
+        None
+    }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {

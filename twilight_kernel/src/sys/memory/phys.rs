@@ -42,6 +42,26 @@ impl PhysBuf {
         }
     }
 
+    pub fn new_dma32(len: usize) -> Self {
+        // Bus-master IDE uses 32-bit physical addresses.
+        let aligned_len = (len + 0xFFF) & !0xFFF;
+        let num_pages = aligned_len / 0x1000;
+        let first_frame = with_frame_allocator(|frame_allocator| {
+            frame_allocator
+                .allocate_contiguous_below(num_pages, u32::MAX as u64)
+                .expect("Out of 32-bit DMA memory")
+        });
+
+        let phys = first_frame.start_address();
+        let virt = phys_to_virt(phys).as_mut_ptr();
+        Self {
+            phys,
+            virt: NonNull::new(virt).expect("Failed to map phys addr"),
+            len,
+            pages: num_pages,
+        }
+    }
+
     pub fn virt_addr(&self) -> VirtAddr {
         phys_to_virt(self.phys)
     }

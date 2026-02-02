@@ -5,8 +5,10 @@ pub mod metadata;
 pub mod superblock;
 
 use crate::driver;
-use crate::driver::disk::{BlockDeviceIO, BLOCK_DEVICE};
+use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
+use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO};
 use crate::driver::timer::cmos::CMOS;
+use crate::sys::fs::MFS;
 use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
 use crate::sys::fs::twilight_fs::FsError::{
     FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode,
@@ -14,8 +16,8 @@ use crate::sys::fs::twilight_fs::FsError::{
 use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
-use alloc::collections::{BTreeMap, VecDeque};
 use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -24,8 +26,6 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use spin::rwlock::RwLock;
-use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
-use crate::sys::fs::MFS;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
 static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);
@@ -59,10 +59,18 @@ pub fn read_tfs_block(
     block_no: u32,
     buf: &mut [u8; 2048],
 ) -> Result<(), FsError> {
-    let block_no = block_no as usize;
-    let start_block = (block_no * 4) + fs_block_offset_sectors();
+    read_tfs_blocks(device, block_no, buf)
+}
+
+pub fn read_tfs_blocks(
+    device: &mut dyn BlockDeviceIO,
+    start_block_no: u32,
+    buf: &mut [u8],
+) -> Result<(), FsError> {
+    let start_block_no = start_block_no as usize;
+    let start_device_block = (start_block_no * 4) + fs_block_offset_sectors();
     device
-        .read_blocks(start_block as u32, &mut buf[..])
+        .read_blocks(start_device_block as u32, buf)
         .map_err(|_| InvalidInode)
 }
 
@@ -71,10 +79,18 @@ pub fn write_tfs_block(
     block_no: u32,
     buf: &[u8; 2048],
 ) -> Result<(), FsError> {
-    let block_no = block_no as usize;
-    let start_block = (block_no * 4) + fs_block_offset_sectors();
+    write_tfs_blocks(device, block_no, buf)
+}
+
+pub fn write_tfs_blocks(
+    device: &mut dyn BlockDeviceIO,
+    start_block_no: u32,
+    buf: &[u8],
+) -> Result<(), FsError> {
+    let start_block_no = start_block_no as usize;
+    let start_device_block = (start_block_no * 4) + fs_block_offset_sectors();
     device
-        .write_blocks(start_block as u32, &buf[..])
+        .write_blocks(start_device_block as u32, buf)
         .map_err(|_| InvalidInode)
 }
 
@@ -255,7 +271,9 @@ impl FileContentCache {
         }
 
         while self.total_bytes + size > FILE_CACHE_MAX_TOTAL_BYTES {
-            let Some(evict) = self.order.pop_front() else { break };
+            let Some(evict) = self.order.pop_front() else {
+                break;
+            };
             if let Some(old) = self.map.remove(&evict) {
                 self.total_bytes = self.total_bytes.saturating_sub(old.len());
             }
@@ -420,7 +438,6 @@ impl TwilightFs {
         if read_tfs_block(&mut device, 0, &mut buf).is_err() {
             return Err("Failed to read Twilight FS superblock");
         }
-
 
         let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
         if !sb.is_valid() {

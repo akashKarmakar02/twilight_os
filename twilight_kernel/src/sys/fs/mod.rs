@@ -1,18 +1,19 @@
 mod devfs;
+pub mod fat16;
+pub mod fat32;
 mod gdt;
-mod procfs;
 pub mod partition;
+pub mod pipe;
+mod procfs;
 pub mod ram_fs;
 pub mod twilight_fs;
 pub mod vfs;
-pub mod fat32;
-pub mod fat16;
-pub mod pipe;
 
 use crate::println;
 use crate::sys::fs::devfs::DevFs;
+use crate::sys::fs::fat16::{Fat16Fs, detect_fat16_partition};
 use crate::sys::fs::procfs::ProcFs;
-use crate::sys::fs::fat16::{detect_fat16_partition, Fat16Fs};
+use crate::sys::fs::ram_fs::InitramfsFs;
 use crate::sys::fs::twilight_fs::{TfsProxy, TwilightFs};
 use crate::sys::fs::vfs::VFS;
 use alloc::string::String;
@@ -20,7 +21,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
 use spin::Mutex;
-use crate::sys::fs::ram_fs::InitramfsFs;
 
 pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
 
@@ -87,10 +87,7 @@ pub fn init(show_log: bool) {
         }
         #[allow(static_mut_refs)]
         unsafe {
-            VFS.get_mut().mount(
-                "/",
-                Arc::new(Mutex::new(TfsProxy)),
-            )
+            VFS.get_mut().mount("/", Arc::new(Mutex::new(TfsProxy)))
         }
         #[allow(static_mut_refs)]
         unsafe {
@@ -133,7 +130,10 @@ pub fn init(show_log: bool) {
 
 fn try_mount_rootfs() {
     #[allow(static_mut_refs)]
-    unsafe { VFS.get_mut().mount("/", Arc::new(Mutex::new(InitramfsFs::new()))) };
+    unsafe {
+        VFS.get_mut()
+            .mount("/", Arc::new(Mutex::new(InitramfsFs::new())))
+    };
     // InitramfsFs::new();
 }
 

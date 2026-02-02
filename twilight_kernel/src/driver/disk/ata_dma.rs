@@ -1,6 +1,7 @@
 use crate::driver::disk::AtaImpl;
 use crate::driver::disk::mount_ata_with_impl;
 use crate::println;
+use crate::sys::memory::virt_to_phys;
 use crate::sys::memory::phys::PhysBuf;
 use crate::sys::pci::DeviceConfig;
 use alloc::string::String;
@@ -13,6 +14,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
+use x86_64::VirtAddr;
 
 // ATA DMA (Bus Master IDE) driver.
 // Minimal, polling-based implementation to keep the existing PIO driver intact.
@@ -23,6 +25,14 @@ pub const BLOCK_SIZE: usize = 512;
 const DMA_BUF_BYTES: usize = 512 * 512; // 256KiB
 const PRDT_BYTES: usize = 4096;
 const POLL_SPINS: usize = 5_000_000;
+
+// If set, caps negotiated UDMA mode to this value (0..=6) regardless of controller heuristics.
+// Leave as `None` for auto.
+const FORCE_MAX_UDMA_MODE: Option<u8> = None;
+
+// Drive-side performance features (best-effort; failures are ignored).
+const ENABLE_WRITE_CACHE: bool = true;
+const ENABLE_READ_LOOKAHEAD: bool = true;
 
 static IDE_IRQ_PRIMARY: AtomicBool = AtomicBool::new(false);
 static IDE_IRQ_SECONDARY: AtomicBool = AtomicBool::new(false);
@@ -99,14 +109,11 @@ pub struct Bus {
     prdt: PhysBuf,
     dma_buf: PhysBuf,
     drive_lba48: [bool; 2],
+    max_udma_mode: u8,
 }
 
 impl Bus {
-    // PIIX3/PIIX4 legacy IDE typically tops out at UDMA2 (ATA/33).
-    // Cap the negotiated mode for broad compatibility.
-    const MAX_UDMA_MODE: u8 = 2;
-
-    pub fn new(id: u8, io_base: u16, ctrl_base: u16, bm_base: u16) -> Self {
+    pub fn new(id: u8, io_base: u16, ctrl_base: u16, bm_base: u16, max_udma_mode: u8) -> Self {
         Self {
             id,
             data_register: Port::new(io_base + 0),
@@ -126,9 +133,10 @@ impl Bus {
             bm_status: Port::new(bm_base + 2),
             bm_prdt: Port::new(bm_base + 4),
 
-            prdt: PhysBuf::new(PRDT_BYTES),
-            dma_buf: PhysBuf::new(DMA_BUF_BYTES),
+            prdt: PhysBuf::new_dma32(PRDT_BYTES),
+            dma_buf: PhysBuf::new_dma32(DMA_BUF_BYTES),
             drive_lba48: [false; 2],
+            max_udma_mode,
         }
     }
 
@@ -239,14 +247,35 @@ impl Bus {
         Ok(())
     }
 
-    fn best_xfer_mode_from_identify(id: &[u16; 256]) -> Option<u8> {
+    fn identify_80_conductor_cable(id: &[u16; 256]) -> Option<bool> {
+        // Word 93 contains various hardware results. Many PATA drives report
+        // 80-conductor cable presence here; SATA devices often leave it 0.
+        //
+        // We treat "0" as unknown rather than "not present" to avoid
+        // artificially capping SATA-in-IDE-compat devices.
+        let w93 = id[93];
+        if w93 == 0 {
+            return None;
+        }
+        Some((w93 & (1 << 13)) != 0)
+    }
+
+    fn best_xfer_mode_from_identify(&self, id: &[u16; 256]) -> Option<u8> {
         // Word 88: Ultra DMA modes (bits 0..7 supported, 8..15 active)
         let udma = id[88];
         let supported_udma = (udma & 0x00FF) as u8;
+        let mut max_udma = self.max_udma_mode.min(6);
+        if let Some(forced) = FORCE_MAX_UDMA_MODE {
+            max_udma = forced.min(6);
+        } else if let Some(false) = Self::identify_80_conductor_cable(id) {
+            // Without an 80-conductor cable, UDMA > 2 is not reliable.
+            max_udma = max_udma.min(2);
+        }
+
         if supported_udma != 0 {
             for mode in (0..=6u8).rev() {
                 if (supported_udma & (1u8 << mode)) != 0 {
-                    let mode = core::cmp::min(mode, Self::MAX_UDMA_MODE);
+                    let mode = core::cmp::min(mode, max_udma);
                     return Some(0x40 | mode); // UDMA mode encoding
                 }
             }
@@ -301,13 +330,54 @@ impl Bus {
         Ok(())
     }
 
-    fn setup_dma_prdt(&mut self, len: usize) -> Result<(), ()> {
-        if len == 0 || len > DMA_BUF_BYTES {
+    fn set_feature(&mut self, drive: u8, feature: u8) -> Result<(), ()> {
+        self.select_drive(drive)?;
+        self.poll(Status::BSY, false)?;
+        self.poll(Status::DRQ, false)?;
+
+        unsafe {
+            self.features_register.write(feature);
+            self.sector_count_register.write(0);
+            self.lba0_register.write(0);
+            self.lba1_register.write(0);
+            self.lba2_register.write(0);
+            self.drive_register.write(0xA0 | (drive << 4));
+        }
+
+        self.write_command(Command::SetFeatures)?;
+        let st = self.status();
+        if st.get_bit(Status::ERR as usize) {
+            return Err(());
+        }
+        Ok(())
+    }
+
+    fn program_prdt(&mut self) {
+        unsafe {
+            // Stop bus master.
+            let mut cmd = self.bm_cmd.read();
+            cmd.set_bit(0, false);
+            self.bm_cmd.write(cmd);
+
+            // Clear interrupt/error bits (write 1 to clear).
+            let st = self.bm_status.read();
+            self.bm_status.write(st | 0x06);
+
+            // Program PRDT pointer.
+            self.bm_prdt.write(self.prdt.addr() as u32);
+        }
+    }
+
+    fn setup_dma_prdt_for_phys(&mut self, phys_base: u64, len: usize) -> Result<(), ()> {
+        if len == 0 || len > (PRDT_BYTES / core::mem::size_of::<Prd>()) * 0x10000 {
+            return Err(());
+        }
+        if phys_base > u32::MAX as u64 {
             return Err(());
         }
 
         // Build PRDT entries, splitting at 64KiB boundaries if needed.
-        let base = self.dma_buf.addr();
+        let base = phys_base;
         let mut remaining = len;
         let mut offset = 0usize;
         let mut entries: usize = 0;
@@ -328,6 +398,9 @@ impl Bus {
             }
 
             let phys = base + offset as u64;
+            if phys > u32::MAX as u64 {
+                return Err(());
+            }
             let boundary = ((phys + 0x10000) & !0xFFFF) as u64;
             let to_boundary = (boundary - phys) as usize;
             let chunk = core::cmp::min(remaining, to_boundary);
@@ -347,21 +420,100 @@ impl Bus {
             return Err(());
         }
         prd_slice[entries - 1].flags = 1u16 << 15; // EOT
+        self.program_prdt();
+        Ok(())
+    }
 
-        unsafe {
-            // Stop bus master.
-            let mut cmd = self.bm_cmd.read();
-            cmd.set_bit(0, false);
-            self.bm_cmd.write(cmd);
-
-            // Clear interrupt/error bits (write 1 to clear).
-            let st = self.bm_status.read();
-            self.bm_status.write(st | 0x06);
-
-            // Program PRDT pointer.
-            self.bm_prdt.write(self.prdt.addr() as u32);
+    fn setup_dma_prdt_for_virt(&mut self, buf_ptr: *const u8, len: usize) -> Result<(), ()> {
+        if len == 0 || len > (PRDT_BYTES / core::mem::size_of::<Prd>()) * 0x10000 {
+            return Err(());
         }
 
+        let prd_slice = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.prdt.virt_addr().as_mut_ptr::<Prd>(),
+                PRDT_BYTES / core::mem::size_of::<Prd>(),
+            )
+        };
+        for prd in prd_slice.iter_mut() {
+            *prd = Prd::default();
+        }
+
+        let mut remaining = len;
+        let mut entries = 0usize;
+        let mut cur_virt = VirtAddr::new(buf_ptr as u64);
+
+        while remaining > 0 {
+            if entries >= prd_slice.len() {
+                return Err(());
+            }
+
+            let phys0 = virt_to_phys(cur_virt).ok_or(())?.as_u64();
+            if phys0 > u32::MAX as u64 {
+                return Err(());
+            }
+
+            // Coalesce physically-contiguous pages into up to 64KiB PRD entries, and
+            // never allow a PRD to cross a 64KiB boundary.
+            let mut seg_len = 0usize;
+            let mut seg_virt = cur_virt;
+            loop {
+                if seg_len >= remaining || seg_len >= 0x10000 {
+                    break;
+                }
+
+                let expected_phys = phys0 + seg_len as u64;
+                let phys = virt_to_phys(seg_virt).ok_or(())?.as_u64();
+                if phys != expected_phys || phys > u32::MAX as u64 {
+                    break;
+                }
+
+                let page_off = (seg_virt.as_u64() & 0xFFF) as usize;
+                let mut take = 0x1000 - page_off;
+                take = take.min(remaining - seg_len);
+                take = take.min(0x10000 - seg_len);
+
+                let to_64k = 0x10000 - ((expected_phys as usize) & 0xFFFF);
+                take = take.min(to_64k);
+
+                if take == 0 {
+                    break;
+                }
+
+                seg_len += take;
+                seg_virt = seg_virt + take as u64;
+
+                // If we stopped mid-page (because remaining ended or due to 64KiB boundary),
+                // we can't coalesce further.
+                if page_off + take != 0x1000 {
+                    break;
+                }
+                // If we ended exactly at a 64KiB boundary, start a new PRD.
+                if (expected_phys as usize + take) & 0xFFFF == 0 {
+                    break;
+                }
+            }
+
+            if seg_len == 0 {
+                return Err(());
+            }
+
+            let count16: u16 = if seg_len == 0x10000 { 0 } else { seg_len as u16 };
+            prd_slice[entries] = Prd {
+                addr: phys0 as u32,
+                count: count16,
+                flags: 0,
+            };
+            entries += 1;
+            remaining -= seg_len;
+            cur_virt = cur_virt + seg_len as u64;
+        }
+
+        if entries == 0 {
+            return Err(());
+        }
+        prd_slice[entries - 1].flags = 1u16 << 15; // EOT
+        self.program_prdt();
         Ok(())
     }
 
@@ -374,14 +526,17 @@ impl Bus {
         };
         irq_flag.store(false, Ordering::Release);
 
+        let mut completed = false;
+        let mut failed = false;
         for _ in 0..POLL_SPINS {
             let st = unsafe { self.bm_status.read() };
             if (st & 0x02) != 0 {
-                // error
-                return Err(());
+                failed = true;
+                break;
             }
             // Completion: controller clears ACTIVE bit when the DMA engine is done.
             if (st & 0x01) == 0 {
+                completed = true;
                 break;
             }
 
@@ -406,8 +561,9 @@ impl Bus {
         }
 
         // Acknowledge/clear the device interrupt status.
-        unsafe {
-            let _ = self.status_register.read();
+        let st = unsafe { self.status_register.read() };
+        if failed || !completed || st.get_bit(Status::ERR as usize) {
+            return Err(());
         }
         Ok(())
     }
@@ -425,15 +581,28 @@ impl Bus {
             .get(drive as usize)
             .copied()
             .unwrap_or(false);
-        let max_sectors = if use_lba48 {
+        let max_sectors_direct = if use_lba48 { 0x10000 } else { 256 };
+        let max_sectors_bounce = if use_lba48 {
             DMA_BUF_BYTES / BLOCK_SIZE
         } else {
             core::cmp::min(256, DMA_BUF_BYTES / BLOCK_SIZE)
         };
 
         while remaining_sectors > 0 {
-            let sectors = remaining_sectors.min(max_sectors);
-            let bytes = sectors * BLOCK_SIZE;
+            let mut sectors = remaining_sectors.min(max_sectors_direct);
+            let mut bytes = sectors * BLOCK_SIZE;
+            let mut use_bounce = false;
+
+            // Prefer direct DMA into the caller buffer (avoids the bounce copy).
+            if self
+                .setup_dma_prdt_for_virt(unsafe { buf.as_mut_ptr().add(out_off) }, bytes)
+                .is_err()
+            {
+                use_bounce = true;
+                sectors = remaining_sectors.min(max_sectors_bounce);
+                bytes = sectors * BLOCK_SIZE;
+                self.setup_dma_prdt_for_phys(self.dma_buf.addr(), bytes)?;
+            }
 
             self.select_drive(drive)?;
             if use_lba48 {
@@ -441,7 +610,6 @@ impl Bus {
             } else {
                 self.write_command_params(drive, current_block, sectors)?;
             }
-            self.setup_dma_prdt(bytes)?;
 
             unsafe {
                 // Set direction: 1 = read from disk to memory.
@@ -466,7 +634,9 @@ impl Bus {
 
             self.dma_wait_done()?;
 
-            buf[out_off..out_off + bytes].copy_from_slice(&self.dma_buf[..bytes]);
+            if use_bounce {
+                buf[out_off..out_off + bytes].copy_from_slice(&self.dma_buf[..bytes]);
+            }
             out_off += bytes;
             current_block += sectors as u32;
             remaining_sectors -= sectors;
@@ -487,17 +657,27 @@ impl Bus {
             .get(drive as usize)
             .copied()
             .unwrap_or(false);
-        let max_sectors = if use_lba48 {
+        let max_sectors_direct = if use_lba48 { 0x10000 } else { 256 };
+        let max_sectors_bounce = if use_lba48 {
             DMA_BUF_BYTES / BLOCK_SIZE
         } else {
             core::cmp::min(256, DMA_BUF_BYTES / BLOCK_SIZE)
         };
 
         while remaining_sectors > 0 {
-            let sectors = remaining_sectors.min(max_sectors);
-            let bytes = sectors * BLOCK_SIZE;
+            let mut sectors = remaining_sectors.min(max_sectors_direct);
+            let mut bytes = sectors * BLOCK_SIZE;
 
-            self.dma_buf[..bytes].copy_from_slice(&buf[in_off..in_off + bytes]);
+            // Prefer direct DMA from the caller buffer (avoids the bounce copy).
+            if self
+                .setup_dma_prdt_for_virt(unsafe { buf.as_ptr().add(in_off) }, bytes)
+                .is_err()
+            {
+                sectors = remaining_sectors.min(max_sectors_bounce);
+                bytes = sectors * BLOCK_SIZE;
+                self.dma_buf[..bytes].copy_from_slice(&buf[in_off..in_off + bytes]);
+                self.setup_dma_prdt_for_phys(self.dma_buf.addr(), bytes)?;
+            }
 
             self.select_drive(drive)?;
             if use_lba48 {
@@ -505,7 +685,6 @@ impl Bus {
             } else {
                 self.write_command_params(drive, current_block, sectors)?;
             }
-            self.setup_dma_prdt(bytes)?;
 
             unsafe {
                 // Set direction: 0 = write from memory to disk.
@@ -561,8 +740,17 @@ impl Bus {
         }
 
         // Try to select the best supported transfer mode for performance.
-        if let Some(mode) = Self::best_xfer_mode_from_identify(&id) {
-            if self.set_transfer_mode(drive, mode).is_ok() {}
+        if let Some(mode) = self.best_xfer_mode_from_identify(&id) {
+            let _ = self.set_transfer_mode(drive, mode);
+        }
+
+        if ENABLE_READ_LOOKAHEAD {
+            // SET FEATURES: Enable read look-ahead.
+            let _ = self.set_feature(drive, 0xAA);
+        }
+        if ENABLE_WRITE_CACHE {
+            // SET FEATURES: Enable write cache.
+            let _ = self.set_feature(drive, 0x02);
         }
 
         Ok(IdentifyResponse::Ata(id))
@@ -573,7 +761,20 @@ lazy_static! {
     pub static ref BUSES: Mutex<Vec<Bus>> = Mutex::new(Vec::new());
 }
 
-fn find_bmide_base() -> Option<u16> {
+struct IdeController {
+    bmide_base: u16,
+    max_udma_mode: u8,
+}
+
+fn max_udma_for_controller(vendor_id: u16, device_id: u16) -> u8 {
+    match (vendor_id, device_id) {
+        // PIIX3 / PIIX4.
+        (0x8086, 0x7010) | (0x8086, 0x7111) => 2,
+        _ => 6,
+    }
+}
+
+fn find_bmide_controller() -> Option<IdeController> {
     let devs = crate::sys::pci::list();
     for d in devs.iter() {
         if d.class == 0x01 && d.subclass == 0x01 {
@@ -587,7 +788,10 @@ fn find_bmide_base() -> Option<u16> {
                 // Enable bus mastering (write to config space).
                 let cfg = DeviceConfig::new(d.bus, d.device, d.function);
                 cfg.enable_bus_mastering();
-                return Some(base);
+                return Some(IdeController {
+                    bmide_base: base,
+                    max_udma_mode: max_udma_for_controller(d.vendor_id, d.device_id),
+                });
             }
         }
     }
@@ -597,16 +801,28 @@ fn find_bmide_base() -> Option<u16> {
 pub fn init() {
     let _ = crate::arch::x86_64::idt::register_irq_handler(14, on_irq_primary);
     let _ = crate::arch::x86_64::idt::register_irq_handler(15, on_irq_secondary);
-    let Some(bmide) = find_bmide_base() else {
+    let Some(ctrl) = find_bmide_controller() else {
         crate::driver::disk::ata::init();
         return;
     };
 
     {
         let mut buses = BUSES.lock();
-        // Primary channel bus master regs at bmide + 0, secondary at bmide + 8.
-        buses.push(Bus::new(0, 0x1F0, 0x3F6, bmide));
-        buses.push(Bus::new(1, 0x170, 0x376, bmide + 8));
+        // Primary channel bus master regs at BAR4 + 0, secondary at BAR4 + 8.
+        buses.push(Bus::new(
+            0,
+            0x1F0,
+            0x3F6,
+            ctrl.bmide_base,
+            ctrl.max_udma_mode,
+        ));
+        buses.push(Bus::new(
+            1,
+            0x170,
+            0x376,
+            ctrl.bmide_base + 8,
+            ctrl.max_udma_mode,
+        ));
     }
 
     let time = crate::driver::timer::pit::uptime();

@@ -1,12 +1,13 @@
 #![allow(unused_assignments)]
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
+use crate::print;
+use crate::println;
 use crate::sys::fs::init;
 use crate::sys::fs::partition::{self, PartitionEntry};
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::sys::fs::twilight_fs::inode::Inode;
-use crate::print;
-use crate::println;
+use crate::sys::fs::vfs::VFS;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -140,6 +141,7 @@ pub fn main() {
         let mut initramfs = INITRAMFS.lock().clone();
         let mut done_files: u64 = 0;
         let mut done_bytes: u64 = 0;
+        let mut dir_cache: Option<(String, u32)> = None;
 
         render_progress(done_files, total_files, done_bytes, total_bytes, None);
 
@@ -150,20 +152,49 @@ pub fn main() {
                         let name = entry.filename().unwrap_or("");
                         done_files += 1;
                         done_bytes += entry.data.len() as u64;
-                        render_progress(done_files, total_files, done_bytes, total_bytes, Some(name));
+                        render_progress(
+                            done_files,
+                            total_files,
+                            done_bytes,
+                            total_bytes,
+                            Some(name),
+                        );
 
-                        copy_file(format!("/{}", name).as_str(), entry.data, false);
+                        copy_file(
+                            format!("/{}", name).as_str(),
+                            entry.data,
+                            false,
+                            &mut dir_cache,
+                        );
 
                         // Re-render in case copy_file printed messages.
-                        render_progress(done_files, total_files, done_bytes, total_bytes, Some(name));
+                        render_progress(
+                            done_files,
+                            total_files,
+                            done_bytes,
+                            total_bytes,
+                            Some(name),
+                        );
                     }
                 }
                 Err(_e) => {}
             }
         }
 
-        render_progress(total_files, total_files, done_bytes, total_bytes, Some("done"));
+        render_progress(
+            total_files,
+            total_files,
+            done_bytes,
+            total_bytes,
+            Some("done"),
+        );
         print!("\n\x1b[?25h"); // newline + show cursor
+
+        #[allow(static_mut_refs)]
+        unsafe {
+            VFS.get_mut().unmount("/");
+        }
+        crate::fs::init(false);
     }
 }
 
@@ -390,7 +421,7 @@ fn align_up_u64(value: u64, align: u64) -> u64 {
     ((value + align - 1) / align) * align
 }
 
-fn copy_file(path: &str, data: &[u8], verbose: bool) {
+fn copy_file(path: &str, data: &[u8], verbose: bool, cache: &mut Option<(String, u32)>) {
     use crate::sys::fs::twilight_fs::FsError;
 
     let mut fs = unsafe { crate::fs::MFS.get_unchecked().lock() };
@@ -403,7 +434,23 @@ fn copy_file(path: &str, data: &[u8], verbose: bool) {
     }
 
     let mut cur_inode = 1;
-    for &part in &components[..components.len() - 1] {
+    let mut start_idx = 0;
+
+    // Check cache
+    if components.len() > 1 {
+        let parent_path = components[..components.len() - 1].join("/");
+        if let Some((cached_path, cached_inode)) = cache {
+            if *cached_path == parent_path {
+                cur_inode = *cached_inode;
+                start_idx = components.len() - 1;
+            }
+        }
+    }
+
+    for (i, &part) in components[..components.len() - 1].iter().enumerate() {
+        if i < start_idx {
+            continue;
+        }
         match fs.find_dir_entry(cur_inode, part) {
             Ok(Some(inode)) => cur_inode = inode,
             Ok(None) => match fs.create_dir(cur_inode, part) {
@@ -418,6 +465,12 @@ fn copy_file(path: &str, data: &[u8], verbose: bool) {
                 return;
             }
         }
+    }
+
+    // Update cache
+    if components.len() > 1 {
+        let parent_path = components[..components.len() - 1].join("/");
+        *cache = Some((parent_path, cur_inode));
     }
 
     let file_name = components.last().unwrap();
