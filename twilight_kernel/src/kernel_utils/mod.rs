@@ -1,7 +1,9 @@
 pub mod anirect;
 pub mod cd;
 pub mod df;
+pub mod builtins;
 pub mod dhcp;
+
 pub mod exec;
 pub mod gs;
 pub mod install;

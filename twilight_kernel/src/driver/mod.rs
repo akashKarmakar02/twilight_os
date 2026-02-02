@@ -7,3 +7,4 @@ pub mod nic;
 pub mod timer;
 pub mod uart;
 pub mod usb;
+pub mod pci_device_driver;

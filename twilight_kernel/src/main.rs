@@ -71,8 +71,8 @@ unsafe extern "C" fn kmain() -> ! {
 
     let mut framebuffer: Option<Framebuffer> = None;
     let mut hhdm_response: Option<&HhdmResponse> = None;
-    let mut mp_response: Option<&MpResponse> = None;
     let mut cpio_response: Option<&&limine::file::File> = None;
+    let mut mp_response: Option<&MpResponse> = None;
 
     if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response() {
         if let Some(fb) = framebuffer_response.framebuffers().next() {
@@ -88,10 +88,6 @@ unsafe extern "C" fn kmain() -> ! {
     let memory_map_response: &mut MemoryMapResponse =
         unsafe { &mut *MEMMAP.get() }.get_response_mut().unwrap();
 
-    if let Some(mpr) = MP.get_response() {
-        mp_response = Some(mpr);
-    }
-
     if let Some(module_response) = MODULE_REQUEST.get_response() {
         for module in module_response.modules() {
             if module.path().to_str().unwrap() == "/boot/rootfs.cpio" {
@@ -101,6 +97,10 @@ unsafe extern "C" fn kmain() -> ! {
                 break;
             }
         }
+    }
+
+    if let Some(mpr) = MP.get_response() {
+        mp_response = Some(mpr);
     }
 
     init(
@@ -160,6 +160,7 @@ fn rust_panic(info: &core::panic::PanicInfo) -> ! {
 
 fn hcf() -> ! {
     loop {
+        crate::driver::usb::poll_all_drivers();
         unsafe {
             #[cfg(target_arch = "x86_64")]
             asm!("hlt");

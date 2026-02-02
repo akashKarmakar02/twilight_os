@@ -1,22 +1,24 @@
 use crate::arch::x86_64::syscall::{IA32_EFER, rdmsr, wrmsr};
 use crate::{driver, println};
 use alloc::string::String;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use limine::response::MpResponse;
 use raw_cpuid::CpuId;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 use x86_64::registers::xcontrol::{XCr0, XCr0Flags};
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 
 unsafe extern "C" fn ap_main(cpu: &limine::mp::Cpu) -> ! {
-    use x86_64::instructions::hlt;
-
     crate::arch::x86_64::cpu_local::init(cpu.id as usize);
 
     x86_64::instructions::interrupts::enable();
     loop {
-        hlt();
+        loop {
+            unsafe {
+                core::arch::asm!("hlt");
+            }
+        }
     }
 }
 
@@ -82,6 +84,7 @@ pub fn init(mp_response: &'static MpResponse) {
         device_id,
         name
     );
+    // hlt();
     init_smp(mp_response);
 }
 

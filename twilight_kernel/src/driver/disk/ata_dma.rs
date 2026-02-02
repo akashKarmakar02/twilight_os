@@ -585,7 +585,7 @@ fn find_bmide_base() -> Option<u16> {
             let base = (bar4 as u16) & 0xFFF0;
             if base != 0 {
                 // Enable bus mastering (write to config space).
-                let mut cfg = DeviceConfig::new(d.bus, d.device, d.function);
+                let cfg = DeviceConfig::new(d.bus, d.device, d.function);
                 cfg.enable_bus_mastering();
                 return Some(base);
             }

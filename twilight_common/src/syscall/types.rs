@@ -197,7 +197,7 @@ pub struct FStat {
     pub st_rdev: u64,       // Device ID (if special file) else 0
     pub st_size: i64,       // Total size, in bytes
     pub st_blksize: i64,    // Block size for filesystem I/O
-    pub st_blocks: i64,     // Number of allocated 512B blocks
+    pub st_blocks: i64,     // Number of allocated
     pub st_atime: Timespec, // Time of last access
     pub st_mtime: Timespec, // Time of last modification
     pub st_ctime: Timespec, // Time of last status change

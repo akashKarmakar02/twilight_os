@@ -1,6 +1,6 @@
 CC ?= musl-gcc
 CFLAGS ?= -O2 -static -Wall -Wextra -D_GNU_SOURCE
-LDFLAGS ?= -lcrypt
+LDFLAGS ?=
 
 BIN := logind
 SRC_DIR := src

@@ -1,6 +1,6 @@
-use crate::println;
 use crate::sys::console::DIR;
 use crate::sys::fs::vfs::{FileType, VFS};
+use crate::println;
 use alloc::format;
 use alloc::string::String;
 

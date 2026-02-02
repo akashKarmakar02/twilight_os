@@ -26,6 +26,7 @@ pub(crate) static mut PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
 static mut KERNEL_PAGE_TABLE_FRAME: PhysFrame = PhysFrame::containing_address(PhysAddr::new(0));
 static MEMORY_MAP: OnceCell<&'static [&Entry]> = OnceCell::uninit();
 static MEMORY_SIZE: AtomicUsize = AtomicUsize::new(0);
+pub const PAGE_SIZE: usize = 4096;
 
 pub fn mem_stats_bytes() -> (usize, usize) {
     // Total = total usable frames managed by allocator.

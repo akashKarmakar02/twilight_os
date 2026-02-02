@@ -1151,19 +1151,35 @@ pub fn uname(ptr: usize) -> i64 {
 }
 
 pub fn arch_prctl(code: u64, addr: u64) -> i64 {
-    logger!("arch_prctl: code=0x{:x}, arg=0x{:x}", code, addr);
     match code {
         ARCH_SET_FS => {
             wrmsr(IA32_FS_BASE, addr);
             0
         }
-        ARCH_GET_FS => rdmsr(IA32_FS_BASE) as i64,
+        ARCH_GET_FS => {
+            if addr == 0 {
+                -(EFAULT as i64)
+            } else {
+                unsafe { *(addr as *mut u64) = rdmsr(IA32_FS_BASE) };
+                0
+            }
+        }
         ARCH_SET_GS => {
             wrmsr(IA32_GS_BASE, addr);
             0
         }
-        ARCH_GET_GS => rdmsr(IA32_GS_BASE) as i64,
-        _ => EINVAL as i64,
+        ARCH_GET_GS => {
+            if addr == 0 {
+                -(EFAULT as i64)
+            } else {
+                unsafe { *(addr as *mut u64) = rdmsr(IA32_GS_BASE) };
+                0
+            }
+        }
+        _ => {
+            logger!("arch_prctl: unsupported code=0x{:x}, arg=0x{:x}", code, addr);
+            -(EINVAL as i64)
+        }
     }
 }
 

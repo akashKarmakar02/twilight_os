@@ -62,9 +62,6 @@ run-x86_64: $(IMAGE_NAME).iso
 		-m 1024 \
 		-netdev user,id=net0,hostfwd=tcp::8080-:80 -device rtl8139,netdev=net0 \
 		-smp 4 \
-		-usb \
-		-device usb-mouse \
-		-device piix3-usb-uhci \
 		-drive file=hdd.img,format=raw,if=ide \
 		-cdrom $(IMAGE_NAME).iso \
 		-serial stdio \
@@ -111,7 +108,6 @@ run-aarch64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME)
 		-M virt \
 		-cpu cortex-a72 \
 		-device ramfb \
-		-device qemu-xhci \
 		-device usb-kbd \
 		-device usb-mouse \
 		-drive if=pflash,unit=0,format=raw,file=ovmf/ovmf-code-$(KARCH).fd,readonly=on \
@@ -202,11 +198,11 @@ run-bios: $(IMAGE_NAME).iso
 run-hdd-bios: $(IMAGE_NAME).hdd
 	qemu-system-$(KARCH) \
 		-m 1024 \
+		-device qemu-xhci,id=xhci \
+		-device usb-kbd,bus=xhci.0 \
+		-device usb-mouse,bus=xhci.0 \
 		-netdev user,id=net0,hostfwd=tcp::8080-:80 -device rtl8139,netdev=net0 \
 		-smp 4 \
-		-usb \
-		-device usb-mouse \
-		-device piix3-usb-uhci \
 		-hda $(IMAGE_NAME).hdd \
 		-serial stdio \
 		-d int,guest_errors,unimp \
