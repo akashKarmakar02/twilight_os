@@ -27,7 +27,7 @@ int run_command(char *const argv[]) {
     // Parent
     int st = 0;
     if (waitpid(pid, &st, 0) == -1) {
-        perror("waitpid");
+        // perror("waitpid");
         return -1;
     }
     if (WIFEXITED(st)) {

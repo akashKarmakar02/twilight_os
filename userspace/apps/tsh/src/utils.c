@@ -9,8 +9,31 @@
 const char *resolve_path(const char *cmd, char out[512]) {
   if (!cmd || cmd[0] == '\0')
     return cmd;
+
+  // 1. If absolute path, return as-is
   if (cmd[0] == '/')
     return cmd;
+
+  // 2. If it contains '/', it's a relative path (e.g. ./foo, ../bar, foo/bar)
+  if (strchr(cmd, '/') != NULL) {
+    if (getcwd(out, 512) == NULL) {
+      // Fallback or error, just return cmd and hope for best?
+      return cmd;
+    }
+    // Append / and cmd
+    size_t len = strlen(out);
+    if (len + 1 + strlen(cmd) + 1 > 512) {
+      return cmd; // Too long, return original
+    }
+    // Ensure we don't double slash if root is "/"
+    if (len > 0 && out[len - 1] != '/') {
+      strcat(out, "/");
+    }
+    strcat(out, cmd);
+    return out;
+  }
+
+  // 3. Otherwise, search in /bin/
   snprintf(out, 512, "/bin/%s", cmd);
   return out;
 }
