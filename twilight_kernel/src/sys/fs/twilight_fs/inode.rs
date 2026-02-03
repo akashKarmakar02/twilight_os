@@ -1,3 +1,4 @@
+use crate::serial_println;
 use crate::sys::fs::twilight_fs::{
     TwilightFsShared, read_tfs_block, read_tfs_blocks, write_tfs_block,
 };
@@ -65,10 +66,12 @@ impl VfsNodeOps for TFSVfsNode {
 
         if should_cache {
             if let Some(n) = self.shared.read_cached_file_slice(self.inode_no, lba, buf) {
+                serial_println!("Reading cached file slice {}", self.full_path);
                 return Ok(core::cmp::min(n, max_to_read));
             }
 
             if let Ok(data) = self.read_all_file(device) {
+                serial_println!("Reading file {}", self.full_path);
                 let n = core::cmp::min(max_to_read, data.len().saturating_sub(lba));
                 if n > 0 {
                     buf[..n].copy_from_slice(&data[lba..lba + n]);
@@ -77,6 +80,8 @@ impl VfsNodeOps for TFSVfsNode {
                 return Ok(n);
             }
         }
+
+        serial_println!("Reading file {} (no cache)", self.full_path);
 
         let mut remaining = max_to_read;
         let mut written = 0;
@@ -673,83 +678,6 @@ impl TFSVfsNode {
                     }
                 }
             }
-        }
-
-        // Now coalesce
-        let mut processed = 0;
-        let mut zone_idx = 0;
-
-        while zone_idx < zones.len() {
-            let start_zone = zones[zone_idx];
-            let mut count = 1;
-
-            // Check for contiguous zones
-            while zone_idx + count < zones.len() {
-                if zones[zone_idx + count] == start_zone + count as u32 {
-                    count += 1;
-                } else {
-                    break;
-                }
-            }
-
-            // Cap count to what we need
-            let bytes_needed = file_size - processed;
-            let blocks_needed = (bytes_needed + block_size - 1) / block_size;
-            let read_blocks = core::cmp::min(count, blocks_needed);
-
-            let byte_len = read_blocks * block_size;
-            let target_slice = if processed + byte_len > out.len() {
-                // Last chunk might be partial in terms of file size vs block alignment
-                // We need a temp buffer if we can't read past end of `out` (which `vec` ensures we fit if we sized it right)
-                // But wait, `read_blocks` expects `buf` to be multiple of block_size.
-                // If `out` is exactly `file_size`, it might not be a multiple.
-                // We need to handle the tail.
-                &mut temp_buf[..byte_len]
-            } else {
-                &mut out[processed..processed + byte_len]
-            };
-
-            // Special handling for the very last part if it's not block_size aligned
-            if target_slice.len() % block_size != 0 {
-                // Must use temp buffer
-                if let Err(_) = read_tfs_blocks(
-                    device.lock().as_mut(),
-                    start_zone,
-                    &mut temp_buf[..byte_len],
-                ) {
-                    return Err(());
-                }
-                let actual_len = core::cmp::min(byte_len, file_size - processed);
-                out[processed..processed + actual_len].copy_from_slice(&temp_buf[..actual_len]);
-            } else {
-                if let Err(_) = read_tfs_blocks(device.lock().as_mut(), start_zone, target_slice) {
-                    return Err(());
-                }
-            }
-
-            processed += read_blocks * block_size; // this might overshoot file_size but `out` was clamped?
-            // Logic correction:
-            // If we read directly into `out`, we must ensure `out` has enough space for full blocks.
-            // But `out` is initialized to `file_size`.
-
-            // Correct approach:
-            // 1. Read contiguous blocks into `temp_buf` (or a properly aligned slice).
-            // 2. Copy to `out`.
-
-            // Optimization: If `out` has enough space for full blocks, read directly.
-            // If this is the last chunk and `file_size` is not aligned, read to `temp_buf` and copy.
-
-            // Since we allocated `out` with `file_size`, the tail is likely not aligned.
-
-            // Re-eval loop:
-            let bytes_remaining = file_size - (processed % file_size); // simple check
-            if bytes_remaining == 0 {
-                break;
-            }
-
-            // Actually `processed` tracks bytes written to `out` effectively (conceptually).
-            // simpler: `processed` is offset in `out`.
-            // reset processed
         }
 
         // Clean implementation of coalesce loop
