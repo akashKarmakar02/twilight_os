@@ -953,7 +953,6 @@ pub fn fork(
     stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
     regs: &mut crate::arch::x86_64::idt::Registers,
 ) -> i64 {
-    serial_println!("Fork called");
     use crate::sys::proc::{InterruptStack, IretRegisters, PreservedRegisters, ScratchRegisters};
 
     #[allow(static_mut_refs)]
@@ -1177,7 +1176,11 @@ pub fn arch_prctl(code: u64, addr: u64) -> i64 {
             }
         }
         _ => {
-            logger!("arch_prctl: unsupported code=0x{:x}, arg=0x{:x}", code, addr);
+            logger!(
+                "arch_prctl: unsupported code=0x{:x}, arg=0x{:x}",
+                code,
+                addr
+            );
             -(EINVAL as i64)
         }
     }
@@ -2165,6 +2168,10 @@ pub fn setuid(uid: u64) -> i64 {
     sys::proc::user::set_user_env();
 
     0
+}
+
+pub fn geteuid() -> i64 {
+    sys::proc::user::get_uid() as i64
 }
 
 fn poll_fd_set(fds: &mut [PollFd], process: &mut Process) -> Result<usize, i64> {

@@ -136,7 +136,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_RMDIR => service::rmdir(arg1 as usize),
         SYS_UNLINK => service::unlink(arg1 as usize),
         SYS_SET_UID => service::setuid(arg1),
-        SYS_GET_EUID => 0,
+        SYS_GET_EUID => service::geteuid(),
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
         SYS_GET_TID => crate::sys::proc::id() as i64,
         SYS_TIME => {

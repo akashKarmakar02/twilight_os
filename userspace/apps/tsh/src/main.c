@@ -2,7 +2,6 @@
 #include "executor.h"
 #include "parser.h"
 #include "utils.h"
-#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -46,15 +45,16 @@ int main(void) {
         // External command
         run_command(argv);
       }
-      
+
       free_argv(argv);
       free_strv(segs);
       continue;
     }
 
     // Pipeline
-    // Note: pipelines don't support builtins effectively here (they run in subshell if we fork, or complex logic)
-    // We treat all pipeline segments as external commands or subshells.
+    // Note: pipelines don't support builtins effectively here (they run in
+    // subshell if we fork, or complex logic) We treat all pipeline segments as
+    // external commands or subshells.
     run_pipeline(segs, nseg);
 
     free_strv(segs);
