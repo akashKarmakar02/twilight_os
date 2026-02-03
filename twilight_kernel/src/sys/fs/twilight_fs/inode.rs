@@ -1,4 +1,3 @@
-use crate::serial_println;
 use crate::sys::fs::twilight_fs::{
     TwilightFsShared, read_tfs_block, read_tfs_blocks, write_tfs_block,
 };
@@ -66,12 +65,10 @@ impl VfsNodeOps for TFSVfsNode {
 
         if should_cache {
             if let Some(n) = self.shared.read_cached_file_slice(self.inode_no, lba, buf) {
-                serial_println!("Reading cached file slice {}", self.full_path);
                 return Ok(core::cmp::min(n, max_to_read));
             }
 
             if let Ok(data) = self.read_all_file(device) {
-                serial_println!("Reading file {}", self.full_path);
                 let n = core::cmp::min(max_to_read, data.len().saturating_sub(lba));
                 if n > 0 {
                     buf[..n].copy_from_slice(&data[lba..lba + n]);
@@ -80,8 +77,6 @@ impl VfsNodeOps for TFSVfsNode {
                 return Ok(n);
             }
         }
-
-        serial_println!("Reading file {} (no cache)", self.full_path);
 
         let mut remaining = max_to_read;
         let mut written = 0;
