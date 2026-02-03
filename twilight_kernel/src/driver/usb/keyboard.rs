@@ -203,10 +203,11 @@ impl UsbDriver for KeyboardDriver {
                     for &k in old_keys.iter() {
                         if k != 0 && !keys.contains(&k) {
                             if let Some(sc) = hid_usage_to_scancode(k) {
+                                // Extended keys check
+                                if (0x49..=0x52).contains(&k) {
+                                    keyboard_interrupt(0xE0);
+                                }
                                 // Break code: scancode + 0x80
-                                // Note: Extended keys (E0 xx) handling is skipped for simplicity for now,
-                                // assuming standard keys map to single-byte Set 1 codes mostly.
-                                // If scancode is > 0x7F this might be lossy.
                                 keyboard_interrupt(sc | 0x80);
                             }
                         }
@@ -215,20 +216,11 @@ impl UsbDriver for KeyboardDriver {
                     // Check for Pressed Keys (in New but not Old)
                     for &k in keys.iter() {
                         if k != 0 && (k == 42 || !old_keys.contains(&k)) {
-                            // ErrorRollOver (0x01) -> ignore?
-                            // k==42 check? no, `!old_keys.contains(&k)` handles new presses.
-                            // However, USB keyboard sends repeates by keep reporting them?
-                            // No, HID reports state. If key is still in report, it's still held.
-                            // The OS handles repeat usually, or the Controller.
-                            // Wait, if I hold 'A', subsequent reports have 'A'.
-                            // If I don't emit 'Make' again, the OS typematic repeat won't trigger?
-                            // Actually, PS/2 controller sends repeats.
-                            // Here we are emulating PS/2 inputs.
-                            // If we only send Make on transition, we lose hardware repeat.
-                            // We might need to handle software repeat or rely on the upper layer.
-                            // For now, let's just handle transitions.
-
                             if let Some(sc) = hid_usage_to_scancode(k) {
+                                // Extended keys check
+                                if (0x49..=0x52).contains(&k) {
+                                    keyboard_interrupt(0xE0);
+                                }
                                 keyboard_interrupt(sc);
                             }
                         }
