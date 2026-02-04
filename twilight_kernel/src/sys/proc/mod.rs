@@ -904,8 +904,12 @@ pub fn schedule_now() {
     for step in 1..=slice.len() {
         let idx = (cur_idx + step) % slice.len();
         if matches!(slice[idx].state, ProcessState::Running) {
-            next_idx = Some(idx);
-            break;
+            // We can only use switch_tasks (cooperative) if the task does not have a pending interrupt frame.
+            // If preempt_frame is set, it must be resumed via iretq (timer_preempt), not switch_tasks.
+            if slice[idx].preempt_frame == 0 {
+                next_idx = Some(idx);
+                break;
+            }
         }
     }
     let Some(next_idx) = next_idx else {
@@ -960,11 +964,20 @@ pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mu
     }
 
     if from_user == 0 {
-        return frame;
+        let cur_pid = id();
+        if cur_pid != 0 {
+            return frame;
+        }
     }
 
     #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    #[allow(static_mut_refs)]
+    let table = unsafe {
+        match PROCESS_TABLE.get_mut() {
+            Some(t) => t,
+            None => return frame,
+        }
+    };
     let cur_pid = id();
 
     let slice = table.proc_list.make_contiguous();
@@ -1045,11 +1058,20 @@ pub extern "C" fn apic_timer_preempt(
     crate::driver::apic::lapic::end_of_interrupt();
 
     if from_user == 0 {
-        return frame;
+        let cur_pid = id();
+        if cur_pid != 0 {
+            return frame;
+        }
     }
 
     #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    #[allow(static_mut_refs)]
+    let table = unsafe {
+        match PROCESS_TABLE.get_mut() {
+            Some(t) => t,
+            None => return frame,
+        }
+    };
     let cur_pid = id();
 
     let slice = table.proc_list.make_contiguous();
@@ -1163,107 +1185,48 @@ pub fn init() {
     let page_table = crate::memory::create_page_table(page_table_frame);
     let mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
-    let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
-    PID.store(pid, Ordering::SeqCst);
+    // Initialize PID to 0 (Idle)
+    PID.store(0, Ordering::SeqCst);
+    // Next PID for real processes starts at 1
+    NEXT_PID.store(1, Ordering::SeqCst);
 
     let proc_mm = Box::new(ProcMM::new(0));
 
-    let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
-
-    let mut stack_ptr = switch_stack as u64;
+    // Create Idle Task (PID 0)
+    // We don't allocate a switch stack for Idle because we are *already* on the boot stack,
+    // which effectively becomes the Idle task's stack.
+    // However, for consistency in Process struct, we should probably record it.
+    // But since `switch_tasks` swaps RSP, if we ever switch *back* to Idle, we need a valid Context.
+    // The "boot context" is effectively preserved on the boot stack when we switch away.
+    // So we just need a Process struct that represents "currently running boot thread".
 
     let mut kgs = Box::new(KernelGsData {
         kernel_rsp: 0,
         user_rsp: 0,
     });
-
-    kgs.kernel_rsp = stack_ptr;
-
+    // Idle task doesn't use sysenter/syscall usually, but if it did...
     let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
 
-    let mut stack = StackHelper::new(&mut stack_ptr);
-
-    let task_stack = unsafe {
-        let layout = Layout::from_size_align_unchecked(4096 * 16, 0x1000);
-        alloc_zeroed(layout).add(layout.size())
-    };
-
-    // Skip the frame initialization - stack segment will be set elsewhere
-    let kframe = stack.offset::<InterruptErrorStack>();
-
-    // Alternatively, could store the segment selector for later use if needed
-    kframe.stack.iret.ss = 0x10;
-    kframe.stack.iret.cs = 0x08;
-    kframe.stack.iret.rip = init_console as u64;
-    kframe.stack.iret.rflags = 0x200;
-    kframe.stack.iret.rsp = task_stack as u64;
-
-    let context = stack.offset::<Context>();
-
-    *context = Context::default();
-    context.rip = iretq_init as u64;
-    context.cr3 = read_cr3();
-
-    #[allow(static_mut_refs)]
-    unsafe {
-        PROCESS_TABLE
-            .get_mut()
-            .unwrap()
-            .proc_list
-            .push_back(Process {
-                context,
-                context_switch_rsp: VirtAddr::new(stack_ptr),
-                fpu_storage: Some(FpuState::default()),
-
-                pid,
-                addr_size_vec: Vec::new(),
-                stack: 0,
-                stack_size: 0,
-                entry_point: 0,
-                state: ProcessState::Running,
-                page_table_frame,
-                mapper,
-                pwd: "/".to_string(),
-                fd_table: Vec::new(),
-                kernel_gs: kgs,
-                gs_base: kgs_va,
-                fs_base: VirtAddr::zero(),
-                proc_mm,
-                parent_pid: 1,
-                stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
-                stdio_fd_flags: [0; 3],
-                stdio_target: [-1; 3],
-                exit_code: 0,
-                preempt_frame: 0,
-            })
-    }
-
-    let (f, _) = Cr3::read();
-    let page_table = crate::memory::create_page_table(f);
-    let mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
-
-    let mut idle_task = Process {
+    let idle_task = Process {
         context: core::ptr::null_mut(),
-        stack: 0,
-        kernel_gs: Box::new(KernelGsData {
-            kernel_rsp: 0,
-            user_rsp: 0,
-        }),
-        fs_base: VirtAddr::zero(),
-        gs_base: VirtAddr::zero(),
-        proc_mm: Box::new(ProcMM::new(0)),
-        parent_pid: 1,
-        pid: 1,
-        pwd: String::from("/"),
-        context_switch_rsp: VirtAddr::zero(),
-        mapper,
+        context_switch_rsp: VirtAddr::zero(), // Will be updated by switch_tasks
         fpu_storage: Some(FpuState::default()),
-        entry_point: 0,
+
+        pid: 0,
         addr_size_vec: Vec::new(),
-        page_table_frame: f,
-        fd_table: Vec::new(),
-        state: ProcessState::Running,
+        stack: 0,
         stack_size: 0,
+        entry_point: 0,
+        state: ProcessState::Running,
+        page_table_frame,
+        mapper,
+        pwd: "/".to_string(),
+        fd_table: Vec::new(),
+        kernel_gs: kgs,
+        gs_base: kgs_va,
+        fs_base: VirtAddr::zero(),
+        proc_mm,
+        parent_pid: 0,
         stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
         stdio_fd_flags: [0; 3],
         stdio_target: [-1; 3],
@@ -1271,12 +1234,121 @@ pub fn init() {
         preempt_frame: 0,
     };
 
-    idle_task.gs_base = VirtAddr::new(&*idle_task.kernel_gs as *const _ as u64);
+    #[allow(static_mut_refs)]
+    unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .proc_list
+            .push_back(idle_task);
+    }
+
+    // Now create Init Process (PID 1)
+    // We will switch to it manually.
+
+    // Reuse frame/mapper for init process shell? Or create new?
+    // The previous code created a generic "init_console" task as PID 1?
+    // Wait, the previous code had: kframe.stack.iret.rip = init_console as u64;
+    // So PID 1 is the console/init task.
+
+    // We need to construct PID 1.
+    let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst); // Returns 1
+
+    let (pt_frame, _) = Cr3::read();
+    let pt = crate::memory::create_page_table(pt_frame);
+    let mapper_init = unsafe { OffsetPageTable::new(pt, VirtAddr::new(phys_mem_offset())) };
+    let proc_mm_init = Box::new(ProcMM::new(0));
+
+    let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
+    let mut stack_ptr = switch_stack as u64;
+
+    let mut kgs_init = Box::new(KernelGsData {
+        kernel_rsp: 0,
+        user_rsp: 0, // No user stack yet?
+    });
+    kgs_init.kernel_rsp = stack_ptr;
+    let kgs_va_init = VirtAddr::new(&*kgs_init as *const _ as u64);
+
+    let mut stack = StackHelper::new(&mut stack_ptr);
+
+    // Setup stack for Init
+    // See previous code lines 1186-1200
+    // It allocated a separate "task_stack" for the logic?
+    let task_stack = unsafe {
+        let layout = Layout::from_size_align_unchecked(4096 * 16, 0x1000);
+        alloc_zeroed(layout).add(layout.size())
+    };
+
+    let kframe = stack.offset::<InterruptErrorStack>();
+    kframe.stack.iret.ss = 0x10; // Kernel Data
+    kframe.stack.iret.cs = 0x08; // Kernel Code
+    kframe.stack.iret.rip = init_console as u64;
+    kframe.stack.iret.rflags = 0x200; // Interrupts enabled
+    kframe.stack.iret.rsp = task_stack as u64;
+
+    let context = stack.offset::<Context>();
+    *context = Context::default();
+    context.rip = iretq_init as u64;
+    context.cr3 = read_cr3();
+
+    let init_process = Process {
+        context,
+        context_switch_rsp: VirtAddr::new(stack_ptr),
+        fpu_storage: Some(FpuState::default()),
+
+        pid, // 1
+        addr_size_vec: Vec::new(),
+        stack: 0,
+        stack_size: 0,
+        entry_point: 0,
+        state: ProcessState::Running,
+        page_table_frame: pt_frame,
+        mapper: mapper_init,
+        pwd: "/".to_string(),
+        fd_table: Vec::new(),
+        kernel_gs: kgs_init,
+        gs_base: kgs_va_init,
+        fs_base: VirtAddr::zero(),
+        proc_mm: proc_mm_init,
+        parent_pid: 0,
+        stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
+        stdio_fd_flags: [0; 3],
+        stdio_target: [-1; 3],
+        exit_code: 0,
+        preempt_frame: 0,
+    };
 
     #[allow(static_mut_refs)]
-    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(1).unwrap() };
+    unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .proc_list
+            .push_back(init_process);
+    }
 
-    switch_tasks(&mut idle_task, proc);
+    // Switch from Idle (PID 0) to Init (PID 1)
+    // We need to get mutable references to both.
+    #[allow(static_mut_refs)]
+    unsafe {
+        let table = PROCESS_TABLE.get_mut().unwrap();
+        // Index 0 is Idle, Index 1 is Init
+        let idle_ptr: *mut Process = &mut table.proc_list[0];
+        let init_ptr: *mut Process = &mut table.proc_list[1];
+
+        PID.store(1, Ordering::SeqCst);
+        switch_tasks(&mut *idle_ptr, &mut *init_ptr);
+    }
+
+    // We return here when Idle task is scheduled back!
+    // Enter infinite loop.
+    enable_idle_loop();
+}
+
+fn enable_idle_loop() -> ! {
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 #[repr(C)]
