@@ -2,7 +2,6 @@ use crate::driver::mouse::enqueue_packet;
 use crate::driver::usb::interfaces::{
     HostController, InterruptTransfer, UsbDevice, UsbDriver, UsbError,
 };
-use crate::serial_println;
 use crate::sys::memory::phys::PhysBuf;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicUsize, Ordering};
