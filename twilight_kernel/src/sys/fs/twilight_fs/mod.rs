@@ -4,7 +4,7 @@ pub mod inode;
 pub mod metadata;
 pub mod superblock;
 
-use crate::driver;
+use crate::{driver, serial_println};
 use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
 use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO};
 use crate::driver::timer::cmos::CMOS;
@@ -1051,10 +1051,10 @@ impl TwilightFs {
 
                 let entry = unsafe { &*(chunk.as_ptr() as *const DirEntry) };
 
-                bytes_processed += DIR_ENTRY_SIZE;
-
                 if entry.inode == 0 {
                     continue;
+                } else {
+                    bytes_processed += DIR_ENTRY_SIZE;
                 }
 
                 let inode = self.read_inode(entry.inode)?;
