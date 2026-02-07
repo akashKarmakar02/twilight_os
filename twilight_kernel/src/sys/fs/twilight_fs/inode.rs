@@ -9,29 +9,79 @@ use alloc::vec::Vec;
 use spin::Mutex;
 use twilight_common::syscall::types::{EIO, EISDIR};
 
-#[allow(dead_code)]
+pub const MODE_TYPE_MASK: u16 = 0xF000; // you can define your own layout
+pub const MODE_PERM_MASK: u16 = 0x01FF; // rwxrwxrwx
+
+pub type InodeFlags = u32;
+pub const IFLAG_IMMUTABLE: InodeFlags   = 1 << 0;
+pub const IFLAG_APPEND: InodeFlags      = 1 << 1;
+pub const IFLAG_ENCRYPTED: InodeFlags   = 1 << 2;
+pub const IFLAG_INLINE_DATA: InodeFlags = 1 << 3; // inline symlink/small file
+pub const IFLAG_DIR_INDEXED: InodeFlags = 1 << 4; // has dir hash index block
+pub const IFLAG_HAS_XATTR: InodeFlags   = 1 << 5;
+
 #[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
-    File,
-    Directory,
-    Symlink,
-    BlockDevice,
-    CharacterDevice,
-    Socket,
-    Pipe,
+    File            = 1,
+    Directory       = 2,
+    Symlink         = 3,
+    BlockDevice     = 4,
+    CharacterDevice = 5,
+    Socket          = 6,
+    Pipe            = 7,
 }
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
+pub struct Extent32 {
+    pub start_block: u32, // physical start block
+    pub block_len: u32,   // length in blocks
+}
+
+pub const INODE_INLINE_BYTES: usize = 64;
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
 pub struct Inode {
-    pub mode: u16,
+    // permissions + type (POSIX-ish)
+    pub mode: u16,     // includes type bits + permission bits
     pub nlinks: u16,
     pub uid: u32,
     pub gid: u32,
+
+    // size & timestamps
     pub size: u64,
-    pub access_time: u32,
-    pub modified_time: u32,
-    pub created_time: u32,
+    pub access_time: u64,
+    pub modified_time: u64,
+    pub change_time: u64,
+    pub created_time: u64, // creation time (nice to have)
+
+    // inode metadata
+    pub flags: InodeFlags,
+    pub generation: u64, // bump when inode changes (useful for key derivation/consistency)
+
+    // xattrs
+    pub xattr_block: u32, // 0 = none
+    pub _pad0: u32,
+
+    // data mapping:
+    // - if IFLAG_INLINE_DATA: `inline_data` holds payload (symlink target or small file)
+    // - else: direct extents + indirect extent lists
+    pub direct: [Extent32; 6],   // a few direct extents
+    pub indirect: u32,           // block containing Extent32[]
+    pub double_indirect: u32,    // block containing u32[] -> indirect blocks
+    pub triple_indirect: u32,
+
+    // inline payload area (used only when IFLAG_INLINE_DATA set)
+    pub inline_data: [u8; INODE_INLINE_BYTES],
+
+    // inode checksum (optional; if metadata csum feature enabled)
+    pub inode_checksum: u32,
+    pub _pad1: u32,
+
+
+    // TODO: remove this for data access
     pub zones: [u32; 7],
     pub indirect_zones: u32,
     pub double_indirect_zones: u32,
