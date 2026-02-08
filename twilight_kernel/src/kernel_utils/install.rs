@@ -80,21 +80,8 @@ pub fn main() {
 
             let time = CMOS::new().unix_time();
 
-            let mut root_inode = Inode {
-                mode: 0o040755, // directory
-                nlinks: 2,
-                uid: 0,
-                gid: 0,
-                size: 0,
-                access_time: time as u32,
-                created_time: time as u32,
-                modified_time: time as u32,
-                zones: [0; 7],
-                indirect_zones: 0,
-                double_indirect_zones: 0,
-                triple_indirect_zones: 0,
-            };
-            root_inode.zones[0] = root_zone;
+            let mut root_inode = Inode::new_dir(time, 0o755);
+            root_inode.direct_slot_set(0, root_zone);
 
             fs.write_inode(root_inode_num + 1, &root_inode)
                 .expect("TODO: panic message");
