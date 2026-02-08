@@ -75,6 +75,12 @@ const TRB_IOC: u32 = 1 << 5;
 const TRB_IDT: u32 = 1 << 6; // Immediate Data (Setup Stage)
 const TRB_DIR_IN: u32 = 1 << 16; // Data/Status Stage
 
+// Endpoint Context EP Type encodings (xHCI spec)
+const EP_TYPE_BULK_OUT: u32 = 2;
+const EP_TYPE_CONTROL: u32 = 4;
+const EP_TYPE_BULK_IN: u32 = 6;
+const EP_TYPE_INTR_IN: u32 = 7;
+
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct ErstEntry {
@@ -93,7 +99,43 @@ struct XhciSlotState {
     ep0_ring: PhysBuf,
     ep0_cycle: bool,
     ep0_index: usize,
+    ep_rings: Vec<Option<XhciEndpointRing>>,
     ep_transfers: Vec<Option<Arc<AtomicU8>>>,
+}
+
+struct XhciEndpointRing {
+    ring: PhysBuf,
+    cycle: bool,
+    index: usize,
+}
+
+struct XhciMscDevice {
+    slot_id: u8,
+    interface: u8,
+    bulk_in_ep: u8,
+    bulk_out_ep: u8,
+    bulk_in_mps: u16,
+    bulk_out_mps: u16,
+    block_size: u32,
+    block_count: u32,
+    tag: u32,
+}
+
+struct MscInterfaceInfo {
+    config_value: u8,
+    interface: u8,
+    bulk_in_ep: u8,
+    bulk_in_mps: u16,
+    bulk_out_ep: u8,
+    bulk_out_mps: u16,
+}
+
+struct MscCmdInfo {
+    slot_id: u8,
+    bulk_in_ep: u8,
+    bulk_out_ep: u8,
+    bulk_in_mps: u16,
+    bulk_out_mps: u16,
 }
 
 // ... (existing code)
@@ -116,6 +158,7 @@ fn endpoint_id(ep_num: u8, dir_in: bool) -> u8 {
 
 #[allow(dead_code)]
 pub struct XhciDriver {
+    controller_id: usize,
     /* MMIO base */
     xhc_base: usize,
     mmio_phys: u64,
@@ -180,6 +223,9 @@ pub struct XhciDriver {
 
     /* Generic Driver Support */
     drivers: Vec<Box<dyn UsbDriver>>,
+
+    /* USB Mass Storage devices (BOT) */
+    msc_devices: Vec<XhciMscDevice>,
 
     /* Port status tracking */
     port_status_cache: Vec<u32>,
@@ -257,6 +303,7 @@ impl XhciDriver {
         let db_regs = NonNull::dangling();
 
         Self {
+            controller_id: 0,
             xhc_base,
             mmio_phys,
             mmio_valid,
@@ -307,9 +354,14 @@ impl XhciDriver {
 
             slots: Vec::new(),
             drivers: Vec::new(),
+            msc_devices: Vec::new(),
 
             port_status_cache: Vec::new(),
         }
+    }
+
+    pub fn set_controller_id(&mut self, id: usize) {
+        self.controller_id = id;
     }
 
     /* -----------------------------------------------------
@@ -869,6 +921,165 @@ impl XhciDriver {
         Ok(buf)
     }
 
+    fn parse_msc_interface(cfg: &[u8]) -> Option<MscInterfaceInfo> {
+        if cfg.len() < 9 {
+            return None;
+        }
+        let config_value = cfg[5];
+
+        let mut off = 0usize;
+        let mut current_if: Option<(u8, u8, u8, u8)> = None;
+        let mut bulk_in: Option<(u8, u16)> = None;
+        let mut bulk_out: Option<(u8, u16)> = None;
+
+        while off + 2 <= cfg.len() {
+            let len = cfg[off] as usize;
+            let dtype = cfg[off + 1];
+            if len < 2 || off + len > cfg.len() {
+                break;
+            }
+
+            if dtype == 0x04 && len >= 9 {
+                // Interface descriptor
+                if let Some((ifnum, class, subclass, protocol)) = current_if {
+                    if class == 0x08 && subclass == 0x06 && protocol == 0x50 {
+                        if let (Some((bin, bin_mps)), Some((bout, bout_mps))) = (bulk_in, bulk_out) {
+                            return Some(MscInterfaceInfo {
+                                config_value,
+                                interface: ifnum,
+                                bulk_in_ep: bin,
+                                bulk_in_mps: bin_mps,
+                                bulk_out_ep: bout,
+                                bulk_out_mps: bout_mps,
+                            });
+                        }
+                    }
+                }
+
+                let ifnum = cfg[off + 2];
+                let class = cfg[off + 5];
+                let subclass = cfg[off + 6];
+                let protocol = cfg[off + 7];
+                current_if = Some((ifnum, class, subclass, protocol));
+                bulk_in = None;
+                bulk_out = None;
+            } else if dtype == 0x05 && len >= 7 {
+                // Endpoint descriptor
+                if let Some((_, class, subclass, protocol)) = current_if {
+                    if class == 0x08 && subclass == 0x06 && protocol == 0x50 {
+                        let ep_addr = cfg[off + 2];
+                        let attrs = cfg[off + 3] & 0x03;
+                        let max_packet = u16::from_le_bytes([cfg[off + 4], cfg[off + 5]]);
+                        let is_in = (ep_addr & 0x80) != 0;
+                        let ep_num = ep_addr & 0x0F;
+                        if attrs == 0x02 && ep_num != 0 {
+                            if is_in {
+                                bulk_in = Some((ep_num, max_packet));
+                            } else {
+                                bulk_out = Some((ep_num, max_packet));
+                            }
+                        }
+                    }
+                }
+            }
+
+            off += len;
+        }
+
+        if let Some((ifnum, class, subclass, protocol)) = current_if {
+            if class == 0x08 && subclass == 0x06 && protocol == 0x50 {
+                if let (Some((bin, bin_mps)), Some((bout, bout_mps))) = (bulk_in, bulk_out) {
+                    return Some(MscInterfaceInfo {
+                        config_value,
+                        interface: ifnum,
+                        bulk_in_ep: bin,
+                        bulk_in_mps: bin_mps,
+                        bulk_out_ep: bout,
+                        bulk_out_mps: bout_mps,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    fn detect_device_kind(
+        &mut self,
+        slot_id: u8,
+        dev_class: u8,
+        dev_subclass: u8,
+        dev_protocol: u8,
+    ) -> UsbDeviceKind {
+        match dev_class {
+            0x09 => return UsbDeviceKind::Hub,
+            0x08 => return UsbDeviceKind::MassStorage,
+            0x02 => return UsbDeviceKind::Communication,
+            0x0E => return UsbDeviceKind::Video,
+            0x01 => return UsbDeviceKind::Audio,
+            0x03 => {
+                if dev_subclass == 0x01 && dev_protocol == 0x01 {
+                    return UsbDeviceKind::Keyboard;
+                }
+                if dev_subclass == 0x01 && dev_protocol == 0x02 {
+                    return UsbDeviceKind::Mouse;
+                }
+                return UsbDeviceKind::Hid;
+            }
+            _ => {}
+        }
+
+        if dev_class != 0x00 {
+            return UsbDeviceKind::Unknown;
+        }
+
+        let cfg = match self.get_config_descriptor(slot_id) {
+            Ok(b) => b,
+            Err(_) => return UsbDeviceKind::Unknown,
+        };
+
+        let mut off = 0usize;
+        while off + 2 <= cfg.len() {
+            let len = cfg[off] as usize;
+            let dtype = cfg[off + 1];
+            if len < 2 || off + len > cfg.len() {
+                break;
+            }
+            if dtype == 0x04 && len >= 9 {
+                let if_class = cfg[off + 5];
+                let if_subclass = cfg[off + 6];
+                let if_protocol = cfg[off + 7];
+                if if_class == 0x03 {
+                    if if_subclass == 0x01 && if_protocol == 0x01 {
+                        return UsbDeviceKind::Keyboard;
+                    }
+                    if if_subclass == 0x01 && if_protocol == 0x02 {
+                        return UsbDeviceKind::Mouse;
+                    }
+                    return UsbDeviceKind::Hid;
+                }
+                if if_class == 0x09 {
+                    return UsbDeviceKind::Hub;
+                }
+                if if_class == 0x08 {
+                    return UsbDeviceKind::MassStorage;
+                }
+                if if_class == 0x02 {
+                    return UsbDeviceKind::Communication;
+                }
+                if if_class == 0x0E {
+                    return UsbDeviceKind::Video;
+                }
+                if if_class == 0x01 {
+                    return UsbDeviceKind::Audio;
+                }
+            }
+            off += len;
+        }
+
+        UsbDeviceKind::Unknown
+    }
+
     fn configure_interrupt_in_endpoint(
         &mut self,
         slot_id: u8,
@@ -907,7 +1118,7 @@ impl XhciDriver {
         unsafe {
             let ec = ic_ptr.add(ep_off) as *mut u32;
             ec.add(0).write_volatile(interval_field);
-            let ep_type = 7u32 << 3; // interrupt IN
+            let ep_type = EP_TYPE_INTR_IN << 3; // interrupt IN
             ec.add(1)
                 .write_volatile(ep_type | ((max_packet as u32) << 16));
             // dword2/3: TR Dequeue Pointer (16-byte aligned), DCS is bit0 of the low dword
@@ -936,6 +1147,215 @@ impl XhciDriver {
             sleep_us(50);
         }
         Err(UsbError::Timeout)
+    }
+
+    fn create_transfer_ring(&self) -> XhciEndpointRing {
+        let trb_count = 256usize;
+        let mut ring = PhysBuf::new(trb_count * size_of::<Trb>());
+        ring.fill(0);
+        let ring_phys = ring.addr();
+        unsafe {
+            let trbs =
+                core::slice::from_raw_parts_mut(ring.virt_addr().as_mut_ptr::<Trb>(), trb_count);
+            trbs[trb_count - 1] = Trb {
+                d0: (ring_phys as u32) & !0xF,
+                d1: (ring_phys >> 32) as u32,
+                d2: 0,
+                d3: TRB_CYCLE | TRB_TC | (TRB_TYPE_LINK << TRB_TYPE_SHIFT),
+            };
+        }
+        XhciEndpointRing {
+            ring,
+            cycle: true,
+            index: 0,
+        }
+    }
+
+    fn configure_bulk_endpoint(
+        &mut self,
+        slot_id: u8,
+        port_index: usize,
+        speed_psiv: u8,
+        ep_num: u8,
+        dir_in: bool,
+        max_packet: u16,
+        ring_phys: u64,
+    ) -> Result<(), UsbError> {
+        let ep_id = endpoint_id(ep_num, dir_in);
+        let ctx_sz = self.context_size();
+        let bytes = ctx_sz * (ep_id as usize + 2); // ICC + contexts up to ep_id
+        let mut input_ctx = PhysBuf::new(bytes);
+        input_ctx.fill(0);
+        let ic_ptr = input_ctx.virt_addr().as_mut_ptr::<u8>();
+
+        unsafe {
+            *(ic_ptr.add(4) as *mut u32) = (1u32 << 0) | (1u32 << (ep_id as u32));
+        }
+
+        // Slot context
+        let slot_off = ctx_sz;
+        unsafe {
+            let sc = ic_ptr.add(slot_off) as *mut u32;
+            let speed_field = (speed_psiv as u32 & 0xF) << 20;
+            let entries = (ep_id as u32) << 27;
+            sc.add(0).write_volatile(speed_field | entries);
+            sc.add(1)
+                .write_volatile(((port_index as u32 + 1) & 0xFF) << 16);
+        }
+
+        // Endpoint context
+        let ep_off = ctx_sz * (ep_id as usize + 1);
+        unsafe {
+            let ec = ic_ptr.add(ep_off) as *mut u32;
+            ec.add(0).write_volatile(0);
+            let ep_type = if dir_in {
+                EP_TYPE_BULK_IN
+            } else {
+                EP_TYPE_BULK_OUT
+            } << 3;
+            ec.add(1)
+                .write_volatile(ep_type | ((max_packet as u32) << 16));
+            ec.add(2).write_volatile(((ring_phys as u32) & !0xF) | 1);
+            ec.add(3).write_volatile((ring_phys >> 32) as u32);
+            ec.add(4).write_volatile(8);
+        }
+
+        self.last_cmd_seen = false;
+        let ic_phys = input_ctx.addr();
+        self.push_cmd(Trb {
+            d0: (ic_phys as u32) & !0xF,
+            d1: (ic_phys >> 32) as u32,
+            d2: 0,
+            d3: (TRB_TYPE_CONFIGURE_ENDPOINT_CMD << TRB_TYPE_SHIFT) | ((slot_id as u32) << 24),
+        });
+
+        for _ in 0..8000 {
+            self.poll_event_ring();
+            if self.last_cmd_seen {
+                if self.last_cmd_cc == 1 {
+                    return Ok(());
+                }
+                return Err(UsbError::UsbError(self.last_cmd_cc as u32));
+            }
+            sleep_us(50);
+        }
+        Err(UsbError::Timeout)
+    }
+
+    fn ensure_bulk_endpoint(
+        &mut self,
+        slot_id: u8,
+        ep_num: u8,
+        dir_in: bool,
+        max_packet: u16,
+    ) -> Result<u8, UsbError> {
+        let ep_id = endpoint_id(ep_num, dir_in);
+        let (port_index, speed_psiv, already_configured) = {
+            let Some(Some(st)) = self.slots.get(slot_id as usize) else {
+                return Err(UsbError::InvalidDevice);
+            };
+            (
+                st.port_index,
+                st.speed_psiv,
+                st.ep_rings
+                    .get(ep_id as usize)
+                    .and_then(|e| e.as_ref())
+                    .is_some(),
+            )
+        };
+
+        if already_configured {
+            return Ok(ep_id);
+        }
+
+        let ring_state = self.create_transfer_ring();
+        let ring_phys = ring_state.ring.addr();
+        self.configure_bulk_endpoint(
+            slot_id,
+            port_index,
+            speed_psiv,
+            ep_num,
+            dir_in,
+            max_packet,
+            ring_phys,
+        )?;
+
+        let Some(Some(st)) = self.slots.get_mut(slot_id as usize) else {
+            return Err(UsbError::InvalidDevice);
+        };
+        st.ep_rings[ep_id as usize] = Some(ring_state);
+
+        Ok(ep_id)
+    }
+
+    fn bulk_transfer(
+        &mut self,
+        slot_id: u8,
+        ep_num: u8,
+        dir_in: bool,
+        max_packet: u16,
+        data: &mut [u8],
+    ) -> Result<usize, UsbError> {
+        let ep_id = self.ensure_bulk_endpoint(slot_id, ep_num, dir_in, max_packet)?;
+
+        let Some(Some(st)) = self.slots.get_mut(slot_id as usize) else {
+            return Err(UsbError::InvalidDevice);
+        };
+        let ring_state = st.ep_rings[ep_id as usize]
+            .as_mut()
+            .ok_or(UsbError::InvalidDevice)?;
+
+        let data_len = data.len();
+        let mut data_buf = if data_len > 0 {
+            Some(PhysBuf::new(data_len))
+        } else {
+            None
+        };
+        if let Some(ref mut b) = data_buf {
+            if !dir_in {
+                b.copy_from_slice(data);
+            } else {
+                b.fill(0);
+            }
+        }
+
+        if data_len > 0 {
+            let p = data_buf.as_ref().unwrap().addr();
+            Self::push_ring_trb(
+                &mut ring_state.ring,
+                &mut ring_state.index,
+                &mut ring_state.cycle,
+                Trb {
+                    d0: (p as u32) & !0xF,
+                    d1: (p >> 32) as u32,
+                    d2: (data_len as u32),
+                    d3: TRB_IOC | (TRB_TYPE_NORMAL << TRB_TYPE_SHIFT),
+                },
+            );
+        } else {
+            Self::push_ring_trb(
+                &mut ring_state.ring,
+                &mut ring_state.index,
+                &mut ring_state.cycle,
+                Trb {
+                    d0: 0,
+                    d1: 0,
+                    d2: 0,
+                    d3: TRB_IOC | (TRB_TYPE_NORMAL << TRB_TYPE_SHIFT),
+                },
+            );
+        }
+
+        self.ring_doorbell_slot_ep(slot_id, ep_id);
+        self.wait_for_xfer(slot_id, ep_id, 3000)?;
+
+        if dir_in {
+            if let Some(src) = data_buf {
+                data.copy_from_slice(&src[..data_len]);
+            }
+        }
+
+        Ok(data_len)
     }
 
     fn try_attach_device(&mut self, slot_id: u8, port_index: usize) {
@@ -975,45 +1395,7 @@ impl XhciDriver {
         // OR duplicate the detect logic.
         // Better: let's match what we have.
 
-        let mut kind = UsbDeviceKind::Unknown;
-        if class == 0x03 && subclass == 0x01 && protocol == 0x02 {
-            kind = UsbDeviceKind::Mouse;
-        } else if class == 0x03 && subclass == 0x01 && protocol == 0x01 {
-            kind = UsbDeviceKind::Keyboard;
-        } else if class == 0x00 {
-            // Device Class is 0, so Look in Interface Descriptors
-            // We need to fetch the config descriptor to check interfaces.
-            if let Ok(cfg) = self.get_config_descriptor(slot_id) {
-                // Iterate interfaces to find Mouse/Keyboard
-                // Logic similar to parse_boot_hid_int_in_endpoint but just for Kind detection
-                let mut off = 0usize;
-                while off + 2 <= cfg.len() {
-                    let len = cfg[off] as usize;
-                    let dtype = cfg[off + 1];
-                    if len < 2 || off + len > cfg.len() {
-                        break;
-                    }
-
-                    if dtype == 0x04 && len >= 9 {
-                        // Interface Descriptor
-                        let if_class = cfg[off + 5];
-                        let if_subclass = cfg[off + 6];
-                        let if_protocol = cfg[off + 7];
-
-                        if if_class == 0x03 && if_subclass == 0x01 {
-                            if if_protocol == 0x02 {
-                                kind = UsbDeviceKind::Mouse;
-                                break;
-                            } else if if_protocol == 0x01 {
-                                kind = UsbDeviceKind::Keyboard;
-                                break;
-                            }
-                        }
-                    }
-                    off += len;
-                }
-            }
-        }
+        let kind = self.detect_device_kind(slot_id, class, subclass, protocol);
 
         let name = usb_ids::lookup(vid, pid)
             .map(|(v, p)| format!("{} {}", v, p))
@@ -1037,6 +1419,14 @@ impl XhciDriver {
             int_in_interval: 0,
         };
 
+        if kind == UsbDeviceKind::MassStorage {
+            log!("XHCI: Mass storage device detected: {}", name);
+            if let Err(e) = self.init_msc_device(slot_id) {
+                log!("XHCI: MSC init failed: {:?}", e);
+            }
+            return;
+        }
+
         if let Some(mut driver) = crate::driver::usb::manager::get_driver(&dev) {
             log!("XHCI: Initializing driver for {}", name);
             if let Err(e) = driver.init(&mut dev, self) {
@@ -1048,6 +1438,327 @@ impl XhciDriver {
         } else {
             log!("XHCI: No driver found for {}", name);
         }
+    }
+
+    fn init_msc_device(&mut self, slot_id: u8) -> Result<(), UsbError> {
+        let cfg = self.get_config_descriptor(slot_id)?;
+        let info = Self::parse_msc_interface(&cfg).ok_or(UsbError::InvalidDevice)?;
+
+        // Set Configuration
+        let cfg_val = if info.config_value == 0 { 1 } else { info.config_value };
+        let setup = [0x00, 0x09, cfg_val, 0x00, 0x00, 0x00, 0x00, 0x00];
+        self.control_transfer_ep0(slot_id, setup, None, false)?;
+
+        // BOT reset (best-effort)
+        let setup_reset = [0x21, 0xFF, 0x00, 0x00, info.interface, 0x00, 0x00, 0x00];
+        let _ = self.control_transfer_ep0(slot_id, setup_reset, None, false);
+
+        // Clear HALT on bulk endpoints (best-effort)
+        let out_addr = info.bulk_out_ep & 0x0F;
+        let in_addr = (info.bulk_in_ep & 0x0F) | 0x80;
+        let setup_clr_out = [0x02, 0x01, 0x00, 0x00, out_addr, 0x00, 0x00, 0x00];
+        let setup_clr_in = [0x02, 0x01, 0x00, 0x00, in_addr, 0x00, 0x00, 0x00];
+        let _ = self.control_transfer_ep0(slot_id, setup_clr_out, None, false);
+        let _ = self.control_transfer_ep0(slot_id, setup_clr_in, None, false);
+
+        // Configure bulk endpoints (rings + context)
+        self.ensure_bulk_endpoint(slot_id, info.bulk_out_ep, false, info.bulk_out_mps)?;
+        self.ensure_bulk_endpoint(slot_id, info.bulk_in_ep, true, info.bulk_in_mps)?;
+
+        let mut dev = XhciMscDevice {
+            slot_id,
+            interface: info.interface,
+            bulk_in_ep: info.bulk_in_ep,
+            bulk_out_ep: info.bulk_out_ep,
+            bulk_in_mps: info.bulk_in_mps,
+            bulk_out_mps: info.bulk_out_mps,
+            block_size: 0,
+            block_count: 0,
+            tag: 1,
+        };
+
+        {
+            let (info, tag) = Self::msc_next_tag_local(&mut dev);
+            let _ = self.scsi_inquiry(&info, tag);
+        }
+
+        for _ in 0..10 {
+            let (info, tag) = Self::msc_next_tag_local(&mut dev);
+            if self.scsi_test_unit_ready(&info, tag).is_ok() {
+                break;
+            }
+            let (info, tag) = Self::msc_next_tag_local(&mut dev);
+            let _ = self.scsi_request_sense(&info, tag);
+            sleep_ms(50);
+        }
+
+        let (block_count, block_size) = {
+            let (info, tag) = Self::msc_next_tag_local(&mut dev);
+            self.scsi_read_capacity_10(&info, tag)?
+        };
+        dev.block_size = block_size;
+        dev.block_count = block_count;
+
+        let msc_index = self.msc_devices.len();
+        self.msc_devices.push(dev);
+
+        crate::driver::usb::msc::register_usb_msc_block_device(
+            self.controller_id,
+            msc_index,
+            block_size,
+            block_count,
+        );
+
+        log!(
+            "XHCI: MSC ready (blocks={}, block_size={})",
+            block_count,
+            block_size
+        );
+        Ok(())
+    }
+
+    fn msc_cmd_info_from_dev(dev: &XhciMscDevice) -> MscCmdInfo {
+        MscCmdInfo {
+            slot_id: dev.slot_id,
+            bulk_in_ep: dev.bulk_in_ep,
+            bulk_out_ep: dev.bulk_out_ep,
+            bulk_in_mps: dev.bulk_in_mps,
+            bulk_out_mps: dev.bulk_out_mps,
+        }
+    }
+
+    fn msc_next_tag_local(dev: &mut XhciMscDevice) -> (MscCmdInfo, u32) {
+        let tag = dev.tag;
+        dev.tag = dev.tag.wrapping_add(1);
+        (Self::msc_cmd_info_from_dev(dev), tag)
+    }
+
+    fn msc_next_tag_index(&mut self, dev_index: usize) -> Result<(MscCmdInfo, u32), UsbError> {
+        let (info, tag) = {
+            let Some(dev) = self.msc_devices.get_mut(dev_index) else {
+                return Err(UsbError::InvalidDevice);
+            };
+            let tag = dev.tag;
+            dev.tag = dev.tag.wrapping_add(1);
+            (Self::msc_cmd_info_from_dev(dev), tag)
+        };
+        Ok((info, tag))
+    }
+
+    fn msc_bot_command(
+        &mut self,
+        info: &MscCmdInfo,
+        tag: u32,
+        cdb: &[u8],
+        data: Option<&mut [u8]>,
+        data_in: bool,
+    ) -> Result<(), UsbError> {
+        if cdb.is_empty() || cdb.len() > 16 {
+            return Err(UsbError::InvalidDevice);
+        }
+
+        let data_len = data.as_ref().map(|d| d.len()).unwrap_or(0);
+
+        let mut cbw = [0u8; 31];
+        cbw[0..4].copy_from_slice(&0x4342_5355u32.to_le_bytes());
+        cbw[4..8].copy_from_slice(&tag.to_le_bytes());
+        cbw[8..12].copy_from_slice(&(data_len as u32).to_le_bytes());
+        cbw[12] = if data_in { 0x80 } else { 0x00 };
+        cbw[13] = 0;
+        cbw[14] = cdb.len() as u8;
+        cbw[15..15 + cdb.len()].copy_from_slice(cdb);
+
+        self.bulk_transfer(
+            info.slot_id,
+            info.bulk_out_ep,
+            false,
+            info.bulk_out_mps,
+            &mut cbw,
+        )?;
+
+        if data_len > 0 {
+            if let Some(buf) = data {
+                if data_in {
+                    self.bulk_transfer(
+                        info.slot_id,
+                        info.bulk_in_ep,
+                        true,
+                        info.bulk_in_mps,
+                        buf,
+                    )?;
+                } else {
+                    self.bulk_transfer(
+                        info.slot_id,
+                        info.bulk_out_ep,
+                        false,
+                        info.bulk_out_mps,
+                        buf,
+                    )?;
+                }
+            }
+        }
+
+        let mut csw = [0u8; 13];
+        self.bulk_transfer(
+            info.slot_id,
+            info.bulk_in_ep,
+            true,
+            info.bulk_in_mps,
+            &mut csw,
+        )?;
+
+        let sig = u32::from_le_bytes([csw[0], csw[1], csw[2], csw[3]]);
+        if sig != 0x5342_5355 {
+            return Err(UsbError::UsbError(0xDEAD));
+        }
+        let csw_tag = u32::from_le_bytes([csw[4], csw[5], csw[6], csw[7]]);
+        if csw_tag != tag {
+            return Err(UsbError::UsbError(0xBADD));
+        }
+        let status = csw[12];
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(UsbError::UsbError(status as u32))
+        }
+    }
+
+    fn scsi_inquiry(&mut self, info: &MscCmdInfo, tag: u32) -> Result<(), UsbError> {
+        let mut buf = [0u8; 36];
+        let cdb = [0x12, 0x00, 0x00, 0x00, 36, 0x00];
+        self.msc_bot_command(info, tag, &cdb, Some(&mut buf), true)?;
+        Ok(())
+    }
+
+    fn scsi_test_unit_ready(&mut self, info: &MscCmdInfo, tag: u32) -> Result<(), UsbError> {
+        let cdb = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        self.msc_bot_command(info, tag, &cdb, None, false)
+    }
+
+    fn scsi_request_sense(&mut self, info: &MscCmdInfo, tag: u32) -> Result<(), UsbError> {
+        let mut buf = [0u8; 18];
+        let cdb = [0x03, 0x00, 0x00, 0x00, 18, 0x00];
+        self.msc_bot_command(info, tag, &cdb, Some(&mut buf), true)?;
+        Ok(())
+    }
+
+    fn scsi_read_capacity_10(
+        &mut self,
+        info: &MscCmdInfo,
+        tag: u32,
+    ) -> Result<(u32, u32), UsbError> {
+        let mut buf = [0u8; 8];
+        let cdb = [0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        self.msc_bot_command(info, tag, &cdb, Some(&mut buf), true)?;
+        let last_lba = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let block_len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        if last_lba == 0xFFFF_FFFF || block_len == 0 {
+            return Err(UsbError::InvalidDevice);
+        }
+        Ok((last_lba + 1, block_len))
+    }
+
+    fn scsi_read10(
+        &mut self,
+        info: &MscCmdInfo,
+        tag: u32,
+        lba: u32,
+        blocks: u16,
+        data: &mut [u8],
+    ) -> Result<(), UsbError> {
+        let cdb = [
+            0x28,
+            0x00,
+            ((lba >> 24) & 0xFF) as u8,
+            ((lba >> 16) & 0xFF) as u8,
+            ((lba >> 8) & 0xFF) as u8,
+            (lba & 0xFF) as u8,
+            0x00,
+            ((blocks >> 8) & 0xFF) as u8,
+            (blocks & 0xFF) as u8,
+            0x00,
+        ];
+        self.msc_bot_command(info, tag, &cdb, Some(data), true)?;
+        Ok(())
+    }
+
+    fn scsi_write10(
+        &mut self,
+        info: &MscCmdInfo,
+        tag: u32,
+        lba: u32,
+        blocks: u16,
+        data: &mut [u8],
+    ) -> Result<(), UsbError> {
+        let cdb = [
+            0x2A,
+            0x00,
+            ((lba >> 24) & 0xFF) as u8,
+            ((lba >> 16) & 0xFF) as u8,
+            ((lba >> 8) & 0xFF) as u8,
+            (lba & 0xFF) as u8,
+            0x00,
+            ((blocks >> 8) & 0xFF) as u8,
+            (blocks & 0xFF) as u8,
+            0x00,
+        ];
+        self.msc_bot_command(info, tag, &cdb, Some(data), false)?;
+        Ok(())
+    }
+
+    pub(crate) fn msc_read(
+        &mut self,
+        dev_index: usize,
+        lba: u32,
+        buf: &mut [u8],
+    ) -> Result<(), UsbError> {
+        let (block_size, block_count) = {
+            let Some(dev) = self.msc_devices.get(dev_index) else {
+                return Err(UsbError::InvalidDevice);
+            };
+            (dev.block_size, dev.block_count)
+        };
+        let bs = block_size as usize;
+        if bs == 0 || buf.is_empty() || (buf.len() % bs) != 0 {
+            return Err(UsbError::InvalidDevice);
+        }
+        let blocks = (buf.len() / bs) as u32;
+        if lba.checked_add(blocks).is_none() || lba + blocks > block_count {
+            return Err(UsbError::InvalidDevice);
+        }
+        if blocks > u16::MAX as u32 {
+            return Err(UsbError::InvalidDevice);
+        }
+        let (info, tag) = self.msc_next_tag_index(dev_index)?;
+        self.scsi_read10(&info, tag, lba, blocks as u16, buf)
+    }
+
+    pub(crate) fn msc_write(
+        &mut self,
+        dev_index: usize,
+        lba: u32,
+        buf: &[u8],
+    ) -> Result<(), UsbError> {
+        let (block_size, block_count) = {
+            let Some(dev) = self.msc_devices.get(dev_index) else {
+                return Err(UsbError::InvalidDevice);
+            };
+            (dev.block_size, dev.block_count)
+        };
+        let bs = block_size as usize;
+        if bs == 0 || buf.is_empty() || (buf.len() % bs) != 0 {
+            return Err(UsbError::InvalidDevice);
+        }
+        let blocks = (buf.len() / bs) as u32;
+        if lba.checked_add(blocks).is_none() || lba + blocks > block_count {
+            return Err(UsbError::InvalidDevice);
+        }
+        if blocks > u16::MAX as u32 {
+            return Err(UsbError::InvalidDevice);
+        }
+        let (info, tag) = self.msc_next_tag_index(dev_index)?;
+        let mut tmp = buf.to_vec();
+        self.scsi_write10(&info, tag, lba, blocks as u16, &mut tmp)
     }
 
     fn address_device(&mut self, slot_id: u8, port_index: usize) -> bool {
@@ -1116,7 +1827,7 @@ impl XhciDriver {
         unsafe {
             let ec = ic_ptr.add(ep0_off) as *mut u32;
             // dword1: EP type in bits 3..5, max packet in bits 16..31
-            let ep_type = 4u32 << 3; // control
+            let ep_type = EP_TYPE_CONTROL << 3; // control
             ec.add(1).write_volatile(ep_type | (max_packet << 16));
             // dword2/3: TR Dequeue Pointer (16-byte aligned), DCS is bit0 of the low dword
             ec.add(2).write_volatile(((ep0_phys as u32) & !0xF) | 1);
@@ -1158,6 +1869,7 @@ impl XhciDriver {
                         ep0_ring,
                         ep0_cycle,
                         ep0_index,
+                        ep_rings: (0..32).map(|_| None).collect(),
                         ep_transfers: vec![None; 32],
                     });
                 }

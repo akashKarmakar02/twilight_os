@@ -10,7 +10,7 @@ use crate::driver::mouse::MouseDev;
 use crate::fs::vfs::Metadata;
 use crate::sys::console::tty::TtyDev;
 use crate::sys::framebuffer::FramebufferDev;
-use crate::sys::fs::devfs::disk::{Disk0, disk_size_bytes};
+use crate::sys::fs::devfs::disk::{Disk0, Disk1, disk_size_bytes, usb_disk_size_bytes};
 use crate::sys::fs::devfs::full::Full;
 use crate::sys::fs::devfs::null::Null;
 use crate::sys::fs::devfs::random::{RandomDev, URandomDev};
@@ -111,6 +111,12 @@ impl DevFs {
         devices.push((
             "disk0".to_string(),
             VfsNode::new(dummy_blockdev(), disk0_meta, Arc::new(RwLock::new(Disk0))),
+        ));
+
+        let disk1_meta = Metadata::blk(13, "disk1", usb_disk_size_bytes().unwrap_or(0));
+        devices.push((
+            "disk1".to_string(),
+            VfsNode::new(dummy_blockdev(), disk1_meta, Arc::new(RwLock::new(Disk1))),
         ));
 
         DevFs {

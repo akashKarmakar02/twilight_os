@@ -12,6 +12,7 @@ pub mod virtioblkdev;
 pub const BLOCK_SIZE: usize = 2048;
 
 pub static mut BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
+pub static mut USB_BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AtaImpl {

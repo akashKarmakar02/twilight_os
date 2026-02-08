@@ -11,6 +11,7 @@ pub mod hid;
 pub mod interfaces;
 pub mod keyboard;
 pub mod manager;
+pub mod msc;
 mod uhci;
 pub mod usb_ids;
 mod xhci;
@@ -76,7 +77,9 @@ pub fn init() {
             let base_addr = dev.mem_base().as_u64();
             log!("XHCI MMIO Base: {:#x}", base_addr);
 
+            let controller_id = XHCI_DEVICES.lock().len();
             let mut xhci = XhciDriver::new(base_addr);
+            xhci.set_controller_id(controller_id);
             if !xhci.init_device() {
                 log!("XHCI: Failed to initialize device");
                 continue;
