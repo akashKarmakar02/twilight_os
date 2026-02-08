@@ -11,7 +11,20 @@
 #include <unistd.h>
 #include <string.h>
 
-int run_command(char *const argv[]) {
+#ifndef WNOHANG
+#define WNOHANG 1
+#endif
+
+void reap_background_jobs(void) {
+  int st = 0;
+  for (;;) {
+    pid_t pid = waitpid(-1, &st, WNOHANG);
+    if (pid <= 0)
+      break;
+  }
+}
+
+int run_command(char *const argv[], int background) {
   char fullpath[512];
   const char *path = resolve_path(argv[0], fullpath);
   char *const envp[] = {NULL};
@@ -25,6 +38,11 @@ int run_command(char *const argv[]) {
     _exit(127);
   } else if (pid > 0) {
     // Parent
+    if (background) {
+      printf("[bg] started pid %d\n", (int)pid);
+      return 0;
+    }
+
     int st = 0;
     if (waitpid(pid, &st, 0) == -1) {
         // perror("waitpid");
@@ -40,7 +58,7 @@ int run_command(char *const argv[]) {
   }
 }
 
-int run_pipeline(char **segs, int nseg) {
+int run_pipeline(char **segs, int nseg, int background) {
   if (nseg <= 0)
     return 0;
 
@@ -174,7 +192,16 @@ int run_pipeline(char **segs, int nseg) {
     free(pipes);
   }
 
-  // Wait for all children
+  if (background) {
+    pid_t leader = (nseg > 0) ? pids[0] : -1;
+    if (leader > 0) {
+      printf("[bg] started pipeline pid %d\n", (int)leader);
+    }
+    free(pids);
+    return 0;
+  }
+
+  // Wait for all children (foreground)
   for (int i = 0; i < nseg; i++) {
     int st = 0;
     if (pids[i] > 0) {
