@@ -5,6 +5,7 @@ use crate::driver::timer::pit::uptime;
 use crate::sys::console::{DIR, get_tty};
 use crate::sys::fs::pipe::{IOCTL_PIPE_GET_ERRNO, IOCTL_PIPE_GET_LAST_WRITE, make_pipe_nodes};
 use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
+use crate::sys::kmsg::IOCTL_KMSG_GET_HEAD;
 use crate::sys::net::socket::{SocketFile, tcp::TcpSocket, udp::UdpSocket};
 use crate::sys::proc::{FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
@@ -663,8 +664,27 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
                     FileType::Dir => (-(EISDIR as i64), None),
                     FileType::CharDevice => {
                         let is_pipe = vfs_node.metadata.name == "pipe";
-                        match vfs_node.read(buf.len(), buf) {
-                            Ok(n) => (n as i64, None),
+                        let mut effective_seek = seek;
+                        if vfs_node.metadata.name == "kmsg"
+                            && let Ok(head) = vfs_node.ioctl(IOCTL_KMSG_GET_HEAD, 0)
+                            && head >= 0
+                        {
+                            effective_seek = effective_seek.max(head as usize);
+                        }
+
+                        match vfs_node.read(effective_seek, buf) {
+                            Ok(n) => {
+                                let advance_seek = if is_pipe {
+                                    None
+                                } else {
+                                    Some(
+                                        effective_seek
+                                            .saturating_sub(seek)
+                                            .saturating_add(n),
+                                    )
+                                };
+                                (n as i64, advance_seek)
+                            }
                             Err(_) => {
                                 if is_pipe {
                                     let errno = vfs_node

@@ -154,6 +154,7 @@ unsafe extern "C" fn kmain() -> ! {
 #[cfg(not(test))]
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {
+    crate::sys::kmsg::push_log(format_args!("[PANIC]: {}", info));
     serial_println!("[PANIC]: {}", info);
     hcf();
 }
@@ -254,6 +255,7 @@ pub fn init(
 macro_rules! log {
     ($($arg:tt)*) => ({
         let time = $crate::driver::timer::pit::uptime();
+        $crate::sys::kmsg::push_log(format_args!("[{:.6}] {}", time, format_args!($($arg)*)));
         $crate::serial_println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
     });
 }
@@ -262,6 +264,7 @@ macro_rules! log {
 macro_rules! logger {
     ($($arg:tt)*) => ({
         let time = $crate::driver::timer::pit::uptime();
+        $crate::sys::kmsg::push_log(format_args!("[{:.6}] {}", time, format_args!($($arg)*)));
         $crate::serial_println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
     });
 }

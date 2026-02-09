@@ -3,6 +3,7 @@ mod clk;
 pub mod console;
 pub mod framebuffer;
 pub mod fs;
+pub mod kmsg;
 pub mod memory;
 pub mod net;
 pub mod pci;

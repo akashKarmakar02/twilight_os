@@ -1,5 +1,6 @@
 mod full;
 mod disk;
+mod kmsg;
 mod null;
 mod random;
 mod zero;
@@ -12,6 +13,7 @@ use crate::sys::console::tty::TtyDev;
 use crate::sys::framebuffer::FramebufferDev;
 use crate::sys::fs::devfs::disk::{Disk0, disk_size_bytes};
 use crate::sys::fs::devfs::full::Full;
+use crate::sys::fs::devfs::kmsg::KmsgDev;
 use crate::sys::fs::devfs::null::Null;
 use crate::sys::fs::devfs::random::{RandomDev, URandomDev};
 use crate::sys::fs::devfs::zero::Zero;
@@ -79,7 +81,12 @@ impl DevFs {
             "full".to_string(),
             VfsNode::new(dummy_blockdev(), full_meta, Arc::new(RwLock::new(Full))),
         ));
-        let input_dir_meta = Metadata::dir(9, "input");
+        let kmsg_meta = Metadata::chr(9, "kmsg");
+        devices.push((
+            "kmsg".to_string(),
+            VfsNode::new(dummy_blockdev(), kmsg_meta, Arc::new(RwLock::new(KmsgDev))),
+        ));
+        let input_dir_meta = Metadata::dir(10, "input");
         devices.push((
             "input".to_string(),
             VfsNode::new(
@@ -88,7 +95,7 @@ impl DevFs {
                 Arc::new(RwLock::new(DirNodeOps)),
             ),
         ));
-        let mice_meta = Metadata::chr(10, "mice");
+        let mice_meta = Metadata::chr(11, "mice");
         devices.push((
             "input/mice".to_string(),
             VfsNode::new(
@@ -97,7 +104,7 @@ impl DevFs {
                 Arc::new(RwLock::new(MouseDev::new())),
             ),
         ));
-        let keyboard_meta = Metadata::chr(11, "event0");
+        let keyboard_meta = Metadata::chr(12, "event0");
         devices.push((
             "input/event0".to_string(),
             VfsNode::new(
@@ -107,7 +114,7 @@ impl DevFs {
             ),
         ));
 
-        let disk0_meta = Metadata::blk(12, "disk0", disk_size_bytes().unwrap_or(0));
+        let disk0_meta = Metadata::blk(13, "disk0", disk_size_bytes().unwrap_or(0));
         devices.push((
             "disk0".to_string(),
             VfsNode::new(dummy_blockdev(), disk0_meta, Arc::new(RwLock::new(Disk0))),
