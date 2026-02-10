@@ -9,7 +9,7 @@ use crate::sys::net::socket::{SocketFile, tcp::TcpSocket, udp::UdpSocket};
 use crate::sys::proc::{FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
 use crate::task::executor::halt;
-use crate::{logger, print, serial_println, sys};
+use crate::{logger, print, sys};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -1522,8 +1522,6 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
             file_path = file_path.replace("./", format!("{}/", process.pwd.as_str()).as_str());
         }
     }
-
-    serial_println!("{}", file_path);
 
     #[allow(static_mut_refs)]
     let Ok(metadata) = (unsafe { VFS.get_mut().metadata(&file_path) }) else {
