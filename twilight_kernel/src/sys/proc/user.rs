@@ -10,6 +10,7 @@ lazy_static! {
     pub static ref USER_ENV: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 }
 pub static USER_ID: Mutex<usize> = Mutex::new(0);
+pub static GROUP_ID: Mutex<usize> = Mutex::new(0);
 
 pub fn set_uid(uid: usize) {
     *USER_ID.lock() = uid;
@@ -17,6 +18,14 @@ pub fn set_uid(uid: usize) {
 
 pub fn get_uid() -> usize {
     *USER_ID.lock()
+}
+
+pub fn set_gid(gid: usize) {
+    *GROUP_ID.lock() = gid;
+}
+
+pub fn get_gid() -> usize {
+    *GROUP_ID.lock()
 }
 
 pub fn set_user_env() {

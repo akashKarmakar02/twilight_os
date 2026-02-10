@@ -72,16 +72,16 @@ fn normalize_path(p: &str) -> String {
 }
 
 #[inline(always)]
-fn fill_stat_from_meta(out: &mut Stat, meta: &crate::sys::fs::vfs::Metadata) {
+fn fill_stat_from_meta(out: &mut Stat, meta: &sys::fs::vfs::Metadata) {
     out.st_size = meta.size as i64;
     out.st_mode = match meta.file_type {
-        FileType::File => 0o100644,        // regular file: rw-r--r--
+        FileType::File => 0o100666,        // regular file: rw-rw-rw-
         FileType::Dir => 0o040755,         // directory: rwxr-xr-x
         FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
         FileType::BlockDevice => 0o060660, // block device: rw-rw----
     };
-    out.st_uid = 0;
-    out.st_gid = 0;
+    out.st_uid = meta.uid;
+    out.st_gid = meta.gid;
     out.st_ino = meta.ino as u64;
     out.st_nlink = 1;
     out.st_rdev = 0;
@@ -1527,6 +1527,12 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     0
 }
 
+pub(crate) fn lstat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
+    // TwilightFS currently does not expose distinct symlink metadata semantics here,
+    // so lstat behaves the same as stat for now.
+    stat(file_name_ptr, stat_ptr)
+}
+
 pub fn access(path_ptr: usize, _mode: i32) -> i64 {
     let path_ptr = UserPtr(path_ptr as *const u8);
     let Ok(path) = copy_cstr_from_user(path_ptr, 4096) else {
@@ -1534,7 +1540,28 @@ pub fn access(path_ptr: usize, _mode: i32) -> i64 {
     };
 
     #[allow(static_mut_refs)]
-    match unsafe { VFS.get_mut().metadata(path.trim()) } {
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    // AT_FDCWD is -100
+    let full_path = if path.starts_with('/') {
+        normalize_path(path.trim())
+    } else {
+        match base_for_dirfd(process, -100) {
+            Ok(base) => normalize_path(&join_paths(&base, path.trim())),
+            Err(e) => return e as i64,
+        }
+    };
+
+    #[allow(static_mut_refs)]
+    match unsafe { VFS.get_mut().metadata(&full_path) } {
         Ok(_) => 0,
         Err(_) => -(ENOENT as i64),
     }
@@ -1636,17 +1663,17 @@ pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
 
                 user_stat.st_size = metadata.size as i64;
                 user_stat.st_mode = match metadata.file_type {
-                    FileType::File => 0o100644,
+                    FileType::File => 0o100666,
                     FileType::Dir => 0o040755,
                     FileType::CharDevice => 0o020666,
                     FileType::BlockDevice => 0o060660,
                 };
-                user_stat.st_uid = 0;
-                user_stat.st_gid = 0;
+                user_stat.st_uid = node.metadata.uid;
+                user_stat.st_gid = node.metadata.gid;
                 user_stat.st_ino = metadata.ino as u64;
                 user_stat.st_nlink = 1;
                 user_stat.st_rdev = 0;
-                user_stat.st_blksize = 4096;
+                user_stat.st_blksize = 2048;
                 user_stat.st_blocks = ((metadata.size as u64 + 511) / 512) as i64;
                 user_stat.st_atim = Timespec {
                     tv_sec: metadata.access_time as i64,
@@ -2172,6 +2199,15 @@ pub fn setuid(uid: u64) -> i64 {
 
 pub fn geteuid() -> i64 {
     sys::proc::user::get_uid() as i64
+}
+
+pub fn setgid(gid: u64) -> i64 {
+    sys::proc::user::set_gid(gid as usize);
+    0
+}
+
+pub fn getegid() -> i64 {
+    sys::proc::user::get_gid() as i64
 }
 
 fn poll_fd_set(fds: &mut [PollFd], process: &mut Process) -> Result<usize, i64> {

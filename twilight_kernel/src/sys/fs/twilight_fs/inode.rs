@@ -8,6 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 use twilight_common::syscall::types::{EIO, EISDIR};
+use crate::sys;
 
 pub const MODE_TYPE_MASK: u16 = 0xF000; // you can define your own layout
 pub const MODE_PERM_MASK: u16 = 0x01FF; // rwxrwxrwx
@@ -98,11 +99,13 @@ impl Inode {
     pub const DIRECT_SLOT_COUNT: usize = 6;
 
     fn base(mode: u16, now: u64) -> Self {
+        let user_id = sys::proc::user::get_uid();
+        let g_id = sys::proc::user::get_gid();
         Self {
             mode,
             nlinks: 1,
-            uid: 0,
-            gid: 0,
+            uid: user_id as u32,
+            gid: g_id as u32,
             size: 0,
             access_time: now,
             modified_time: now,

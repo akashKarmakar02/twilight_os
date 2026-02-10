@@ -53,6 +53,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_CLOSE => service::close(arg1 as i32),
         SYS_STAT => service::stat(arg1 as usize, arg2 as usize),
         SYS_FSTAT => service::fstat(arg1 as usize, arg2 as usize),
+        SYS_LSTAT => service::lstat(arg1 as usize, arg2 as usize),
         SYS_POLL => service::poll(arg1 as usize, arg2 as usize, arg3 as isize),
         SYS_LSEEK => service::lseek(arg1 as usize, arg2, arg3 as u8),
         SYS_MMAP => memory::mmap(
@@ -135,8 +136,12 @@ pub extern "sysv64" fn syscall_handler(
         SYS_MKDIR => service::mkdir(arg1 as usize, arg2 as usize),
         SYS_RMDIR => service::rmdir(arg1 as usize),
         SYS_UNLINK => service::unlink(arg1 as usize),
+        SYS_GETUID => service::geteuid(),
+        SYS_GETGID => service::getegid(),
         SYS_SET_UID => service::setuid(arg1),
+        SYS_SET_GID => service::setgid(arg1),
         SYS_GET_EUID => service::geteuid(),
+        SYS_GET_EGID => service::getegid(),
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
         SYS_GET_TID => crate::sys::proc::id() as i64,
         SYS_TIME => {
