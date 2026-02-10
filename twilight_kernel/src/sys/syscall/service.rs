@@ -760,6 +760,8 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
     // Resolve full path
     let full_path = if path.starts_with('/') {
         normalize_path(path)
+    } else if path.starts_with(".") {
+        path.replace(".", process.pwd.as_str())
     } else {
         match base_for_dirfd(process, dirfd) {
             Ok(base) => normalize_path(&join_paths(&base, path)),
@@ -1505,16 +1507,18 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
         return -1;
     };
 
+    #[allow(static_mut_refs)]
+    let process = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(sys::proc::id()).unwrap() };
+
     if file_path.starts_with("./") {
-        #[allow(static_mut_refs)]
-        let pwd = unsafe { DIR.as_str() };
-        let calnonical_pwd = if pwd.ends_with("/") {
-            pwd.to_string()
+        if process.pwd.ends_with("/") {
+            file_path = file_path.replace("./", process.pwd.as_str());
         } else {
-            format!("{}/", pwd)
-        };
-        file_path = file_path.replace("./", &calnonical_pwd.as_str());
+            file_path = file_path.replace("./", format!("{}/", process.pwd.as_str()).as_str());
+        }
     }
+
+    serial_println!("{}", file_path);
 
     #[allow(static_mut_refs)]
     let Ok(metadata) = (unsafe { VFS.get_mut().metadata(&file_path) }) else {
@@ -1589,6 +1593,8 @@ pub fn newfstatat(dirfd: i32, pathname_ptr: usize, stat_ptr: usize, _flags: i32)
 
     let full_path = if path.starts_with('/') {
         normalize_path(path.trim())
+    } else if path.starts_with(".") {
+        path.replace(".", process.pwd.as_str()).to_string()
     } else {
         match base_for_dirfd(process, dirfd) {
             Ok(base) => normalize_path(&join_paths(&base, path.trim())),
