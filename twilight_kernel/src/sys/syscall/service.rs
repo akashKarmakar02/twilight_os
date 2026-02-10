@@ -2,7 +2,7 @@ use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
 use crate::driver::disk::ata::IO;
 use crate::driver::disk::dummy_blockdev;
 use crate::driver::timer::pit::uptime;
-use crate::sys::console::{DIR, get_tty};
+use crate::sys::console::get_tty;
 use crate::sys::fs::pipe::{IOCTL_PIPE_GET_ERRNO, IOCTL_PIPE_GET_LAST_WRITE, make_pipe_nodes};
 use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
 use crate::sys::net::socket::{SocketFile, tcp::TcpSocket, udp::UdpSocket};
@@ -785,7 +785,6 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
                     return -(ENOTDIR as i64);
                 }
             } else {
-                serial_println!("{}", full_path);
                 return -(ENOENT as i64);
             }
 
@@ -1508,7 +1507,13 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     };
 
     #[allow(static_mut_refs)]
-    let process = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(sys::proc::id()).unwrap() };
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(sys::proc::id())
+            .unwrap()
+    };
 
     if file_path.starts_with("./") {
         if process.pwd.ends_with("/") {
@@ -2348,6 +2353,78 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
         }
 
         halt();
+
+        ready = match poll_fd_set(fds, process) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+
+        if ready > 0 {
+            return ready as i64;
+        }
+    }
+}
+
+pub fn ppoll(
+    fds_ptr: usize,
+    nfds: usize,
+    tmo_p: usize,
+    _sigmask_ptr: usize,
+    _sigsetsize: usize,
+) -> i64 {
+    if nfds == 0 {
+        return 0;
+    }
+    if fds_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let fds = unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds) };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let mut ready = match poll_fd_set(fds, process) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    if ready > 0 {
+        return ready as i64;
+    }
+
+    let deadline = if tmo_p != 0 {
+        let ts_ptr = tmo_p as *const Timespec;
+        let ts = unsafe { &*ts_ptr };
+        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
+            return 0;
+        }
+        let now = uptime();
+        let dur = (ts.tv_sec as f64) + (ts.tv_nsec as f64) / 1_000_000_000.0;
+        Some(now + dur)
+    } else {
+        None
+    };
+
+    loop {
+        if let Some(limit) = deadline {
+            if uptime() >= limit {
+                return 0;
+            }
+        }
+
+        halt();
+
+        // Check for signals here if we implemented them?
+        // But for now just poll fds.
 
         ready = match poll_fd_set(fds, process) {
             Ok(n) => n,

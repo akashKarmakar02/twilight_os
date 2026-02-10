@@ -277,6 +277,14 @@ pub extern "sysv64" fn syscall_handler(
             crate::kernel_utils::install::main();
             0
         }
+        // SYS_PPOLL
+        271 => service::ppoll(
+            arg1 as usize,
+            arg2 as usize,
+            arg3 as usize,
+            arg4 as usize,
+            arg5 as usize,
+        ),
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
             -(ENOSYS as i64)
