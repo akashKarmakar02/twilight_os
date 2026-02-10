@@ -1,9 +1,9 @@
 pub mod blockgroup;
 pub mod dir_entry;
 pub mod inode;
+mod journal;
 pub mod metadata;
 pub mod superblock;
-mod journal;
 
 use crate::driver;
 use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
@@ -887,7 +887,7 @@ impl TwilightFs {
             )?;
 
             let zone_entries = FS_BLOCK_SIZE / 4;
-            for i in 0..(zone_entries - 1) {
+            for i in 0..zone_entries {
                 if remaining == 0 {
                     break;
                 }
@@ -945,7 +945,7 @@ impl TwilightFs {
             )?;
 
             let zone_entries = FS_BLOCK_SIZE / 4;
-            for i in 0..(zone_entries - 1) {
+            for i in 0..zone_entries {
                 if remaining == 0 {
                     break;
                 }
@@ -977,7 +977,7 @@ impl TwilightFs {
                 )?;
 
                 let zone_entries = FS_BLOCK_SIZE / 4;
-                for j in 0..(zone_entries - 1) {
+                for j in 0..zone_entries {
                     if remaining == 0 {
                         break;
                     }
