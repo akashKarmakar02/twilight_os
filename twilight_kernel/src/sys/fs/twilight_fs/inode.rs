@@ -1,3 +1,4 @@
+use crate::sys;
 use crate::sys::fs::twilight_fs::{
     TwilightFsShared, read_tfs_block, read_tfs_blocks, write_tfs_block,
 };
@@ -8,7 +9,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 use twilight_common::syscall::types::{EIO, EISDIR};
-use crate::sys;
 
 pub const MODE_TYPE_MASK: u16 = 0xF000; // you can define your own layout
 pub const MODE_PERM_MASK: u16 = 0x01FF; // rwxrwxrwx
@@ -16,23 +16,23 @@ pub const MODE_DIR: u16 = 0o040000;
 pub const MODE_FILE: u16 = 0o100000;
 
 pub type InodeFlags = u32;
-pub const IFLAG_IMMUTABLE: InodeFlags   = 1 << 0;
-pub const IFLAG_APPEND: InodeFlags      = 1 << 1;
-pub const IFLAG_ENCRYPTED: InodeFlags   = 1 << 2;
+pub const IFLAG_IMMUTABLE: InodeFlags = 1 << 0;
+pub const IFLAG_APPEND: InodeFlags = 1 << 1;
+pub const IFLAG_ENCRYPTED: InodeFlags = 1 << 2;
 pub const IFLAG_INLINE_DATA: InodeFlags = 1 << 3; // inline symlink/small file
 pub const IFLAG_DIR_INDEXED: InodeFlags = 1 << 4; // has dir hash index block
-pub const IFLAG_HAS_XATTR: InodeFlags   = 1 << 5;
+pub const IFLAG_HAS_XATTR: InodeFlags = 1 << 5;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
-    File            = 1,
-    Directory       = 2,
-    Symlink         = 3,
-    BlockDevice     = 4,
+    File = 1,
+    Directory = 2,
+    Symlink = 3,
+    BlockDevice = 4,
     CharacterDevice = 5,
-    Socket          = 6,
-    Pipe            = 7,
+    Socket = 6,
+    Pipe = 7,
 }
 
 #[repr(C, packed)]
@@ -45,12 +45,12 @@ pub struct Extent32 {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct XattrBlockHeader {
-    pub magic: u32,     // e.g. "XATR"
+    pub magic: u32, // e.g. "XATR"
     pub used_bytes: u16,
     pub count: u16,
-    pub checksum: u32,  // checksum over header+payload (excluding this field if you want)
-    // followed by TLVs
-    // [key_len:u16][val_len:u16][key_bytes][val_bytes]...
+    pub checksum: u32, // checksum over header+payload (excluding this field if you want)
+                       // followed by TLVs
+                       // [key_len:u16][val_len:u16][key_bytes][val_bytes]...
 }
 
 pub const INODE_INLINE_BYTES: usize = 64;
@@ -59,7 +59,7 @@ pub const INODE_INLINE_BYTES: usize = 64;
 #[derive(Debug, Clone, Copy)]
 pub struct Inode {
     // permissions + type (POSIX-ish)
-    pub mode: u16,     // includes type bits + permission bits
+    pub mode: u16, // includes type bits + permission bits
     pub nlinks: u16,
     pub uid: u32,
     pub gid: u32,
@@ -82,9 +82,9 @@ pub struct Inode {
     // data mapping:
     // - if IFLAG_INLINE_DATA: `inline_data` holds payload (symlink target or small file)
     // - else: direct extents + indirect extent lists
-    pub direct: [Extent32; 6],   // a few direct extents
-    pub indirect: u32,           // block containing Extent32[]
-    pub double_indirect: u32,    // block containing u32[] -> indirect blocks
+    pub direct: [Extent32; 6], // a few direct extents
+    pub indirect: u32,         // block containing Extent32[]
+    pub double_indirect: u32,  // block containing u32[] -> indirect blocks
     pub triple_indirect: u32,
 
     // inline payload area (used only when IFLAG_INLINE_DATA set)
@@ -265,6 +265,8 @@ impl VfsNodeOps for TFSVfsNode {
                 return Err(());
             }
 
+            self.apply_crypto(zone as u64, &mut buffer);
+
             let available = block_size - current_offset_in_block;
             let to_copy = core::cmp::min(remaining, available);
 
@@ -320,10 +322,15 @@ impl VfsNodeOps for TFSVfsNode {
                 if read_tfs_block(device.lock().as_mut(), zone, &mut buffer).is_err() {
                     return Err(());
                 }
+                // Decrypt existing content to allow correct partial update
+                self.apply_crypto(zone as u64, &mut buffer);
             }
 
             buffer[offset_in_block..offset_in_block + copy_size]
                 .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+
+            // Encrypt before writing back
+            self.apply_crypto(zone as u64, &mut buffer);
 
             if write_tfs_block(device.lock().as_mut(), zone, &buffer).is_err() {
                 return Err(());
@@ -403,11 +410,13 @@ impl VfsNodeOps for TFSVfsNode {
                     if read_tfs_block(device.lock().as_mut(), zone, &mut buffer).is_err() {
                         return Err(());
                     }
+                    self.apply_crypto(zone as u64, &mut buffer);
                 }
 
                 buffer[offset_in_block..offset_in_block + copy_size]
                     .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
 
+                self.apply_crypto(zone as u64, &mut buffer);
                 if write_tfs_block(device.lock().as_mut(), zone, &buffer).is_err() {
                     return Err(());
                 }
@@ -557,11 +566,13 @@ impl VfsNodeOps for TFSVfsNode {
                         if let Err(_) = read_tfs_block(device.lock().as_mut(), zone, &mut buffer) {
                             return Err(());
                         }
+                        self.apply_crypto(zone as u64, &mut buffer);
                     }
 
                     buffer[offset_in_block..offset_in_block + copy_size]
                         .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
 
+                    self.apply_crypto(zone as u64, &mut buffer);
                     if let Err(_) = write_tfs_block(device.lock().as_mut(), zone, &buffer) {
                         return Err(());
                     }
@@ -662,6 +673,46 @@ impl VfsNodeOps for TFSVfsNode {
 }
 
 impl TFSVfsNode {
+    fn is_encrypted(&self) -> bool {
+        (self.inode.flags & IFLAG_ENCRYPTED) != 0
+    }
+
+    fn get_encryption_key(&self) -> Option<[u8; 32]> {
+        if !self.is_encrypted() {
+            return None;
+        }
+
+        let current_uid = crate::sys::proc::user::get_uid() as u32;
+        if current_uid != 0 && current_uid != self.inode.uid {
+            return None;
+        }
+
+        crate::sys::syscall::crypto::get_user_key(self.inode.uid)
+    }
+
+    fn apply_crypto(&self, block_idx: u64, buf: &mut [u8]) {
+        use chacha20::ChaCha20;
+        use chacha20::cipher::{KeyIvInit, StreamCipher};
+
+        if let Some(key) = self.get_encryption_key() {
+            // Nonce generation: hash(inode) ^ block_index
+            // Simple approach: nonces should be 12 bytes (96 bits).
+            // We use inode_no (32-bit) and block_idx (64-bit).
+
+            let mut nonce = [0u8; 12];
+            nonce[0..4].copy_from_slice(&self.inode_no.to_le_bytes());
+            nonce[4..12].copy_from_slice(&block_idx.to_le_bytes());
+
+            let key_arr = key.into();
+            let nonce_arr = nonce.into();
+
+            let mut cipher = ChaCha20::new(&key_arr, &nonce_arr);
+            cipher.apply_keystream(buf);
+        }
+    }
+}
+
+impl TFSVfsNode {
     fn get_zone(&self, device: &mut BlockDev, logical_block: usize) -> Result<u32, ()> {
         let block_size = 2048;
         if logical_block < Inode::DIRECT_SLOT_COUNT {
@@ -683,7 +734,7 @@ impl TFSVfsNode {
                 self.inode.single_indirect_get(),
                 &mut buf,
             )
-                .map_err(|_| ())?;
+            .map_err(|_| ())?;
             return Ok(u32::from_le_bytes(
                 buf[idx * 4..(idx + 1) * 4].try_into().unwrap(),
             ));
@@ -825,6 +876,11 @@ impl TFSVfsNode {
                 &mut temp_buf[..bytes_to_read],
             ) {
                 return Err(());
+            }
+            for j in 0..run_len {
+                let start = j * block_size;
+                let end = start + block_size;
+                self.apply_crypto(zones[z_i + j] as u64, &mut temp_buf[start..end]);
             }
 
             let bytes_to_copy = core::cmp::min(bytes_to_read, file_size - offset);

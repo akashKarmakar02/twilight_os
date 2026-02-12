@@ -14,6 +14,7 @@ pub const EINTR: i32 = 4;
 pub const EIO: i32 = 5;
 pub const EBADF: i32 = 9;
 pub const EAGAIN: i32 = 11;
+pub const EACCES: i32 = 13;
 pub const EEXIST: i32 = 17;
 pub const ENOTDIR: i32 = 20;
 pub const EISDIR: i32 = 21;

@@ -1,3 +1,5 @@
+pub mod crypto;
+pub mod fs_attr;
 pub(crate) mod memory;
 pub mod service;
 mod utils;
@@ -285,6 +287,10 @@ pub extern "sysv64" fn syscall_handler(
             arg4 as usize,
             arg5 as usize,
         ),
+        // SYS_ADD_USER_KEY
+        448 => crypto::sys_add_user_key(arg1 as u32, arg2 as *const u8, arg3 as usize) as i64,
+        // SYS_SET_FILE_ATTR
+        449 => fs_attr::sys_set_file_attr(arg1 as *const u8, arg2 as u32, arg3 as u32) as i64,
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
             -(ENOSYS as i64)

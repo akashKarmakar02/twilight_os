@@ -100,7 +100,10 @@ run-blk-bios: $(IMAGE_NAME).iso
 		-cdrom $(IMAGE_NAME).iso \
   		-drive file=hdd.img,if=none,format=raw,id=vd0 \
   		-device virtio-blk-pci,drive=vd0 \
-		-serial stdio
+		-serial file:serial.log \
+		-d int,guest_errors,unimp \
+	  	-D qemu.log \
+		-vga std
 
 .PHONY: run-aarch64
 run-aarch64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
@@ -291,7 +294,7 @@ endif
 
 $(IMAGE_NAME).hdd: limine/limine kernel userspace cpio
 	rm -f $(IMAGE_NAME).hdd
-	dd if=/dev/zero bs=1M count=0 seek=100 of=$(IMAGE_NAME).hdd
+	dd if=/dev/zero bs=1M count=0 seek=200 of=$(IMAGE_NAME).hdd
 	PATH=$$PATH:/usr/sbin:/sbin sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00 -m 1
 	./limine/limine bios-install $(IMAGE_NAME).hdd
 ifeq ($(KARCH),x86_64)

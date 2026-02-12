@@ -206,6 +206,12 @@ pub trait FileSystem: Send + Sync + 'static {
     fn rm(&mut self, path: &str) -> Result<(), ()>;
     fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()>;
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()>;
+    fn set_attr(&mut self, _path: &str, _attr: u32, _value: u32) -> Result<(), ()> {
+        Err(())
+    }
+    fn get_attr(&mut self, _path: &str, _attr: u32) -> Result<u32, ()> {
+        Err(())
+    }
 }
 
 pub struct Vfs {
@@ -289,5 +295,17 @@ impl Vfs {
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
         guard.metadata(rel)
+    }
+
+    pub fn set_attr(&self, path: &str, attr: u32, value: u32) -> Result<(), ()> {
+        let (rel, fs) = self.route(path).ok_or(())?;
+        let mut guard = fs.lock();
+        guard.set_attr(rel, attr, value)
+    }
+
+    pub fn get_attr(&self, path: &str, attr: u32) -> Result<u32, ()> {
+        let (rel, fs) = self.route(path).ok_or(())?;
+        let mut guard = fs.lock();
+        guard.get_attr(rel, attr)
     }
 }

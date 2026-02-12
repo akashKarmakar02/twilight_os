@@ -17,6 +17,7 @@ use crate::sys::fs::twilight_fs::FsError::{
 use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
+use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -822,6 +823,10 @@ impl TwilightFs {
 
         // Initialize inode
         let mut inode = Inode::new_file(time, 0o777);
+        // Inherit encryption flag from parent directory
+        if (parent_inode.flags & inode::IFLAG_ENCRYPTED) != 0 {
+            inode.flags |= inode::IFLAG_ENCRYPTED;
+        }
         inode.direct_slot_set(0, new_zone);
 
         self.write_inode(new_inode_num, &inode).unwrap();
@@ -1136,6 +1141,9 @@ impl TwilightFs {
 
         // Create the new directory inode
         let mut inode = Inode::new_dir(time, 0o777);
+        if (parent_inode.flags & inode::IFLAG_ENCRYPTED) != 0 {
+            inode.flags |= inode::IFLAG_ENCRYPTED;
+        }
         inode.direct_slot_set(0, new_zone);
         self.write_inode(new_inode_num, &inode).unwrap();
 
@@ -1580,6 +1588,45 @@ impl FileSystem for TwilightFs {
             Err(())
         }
     }
+
+    fn set_attr(&mut self, path: &str, attr: u32, value: u32) -> Result<(), ()> {
+        if attr != IFLAG_ENCRYPTED {
+            return Err(());
+        }
+
+        let inode_num = if path == "/" {
+            1
+        } else {
+            self.resolve_path(path).or_else(|_| Err(()))?
+        };
+
+        let mut inode = self.read_inode(inode_num).map_err(|_| ())?;
+        if value != 0 {
+            inode.flags |= inode::IFLAG_ENCRYPTED;
+        } else {
+            inode.flags &= !inode::IFLAG_ENCRYPTED;
+        }
+        self.write_inode(inode_num, &inode).map_err(|_| ())
+    }
+
+    fn get_attr(&mut self, path: &str, attr: u32) -> Result<u32, ()> {
+        if attr != IFLAG_ENCRYPTED {
+            return Err(());
+        }
+
+        let inode_num = if path == "/" {
+            1
+        } else {
+            self.resolve_path(path).or_else(|_| Err(()))?
+        };
+
+        let inode = self.read_inode(inode_num).map_err(|_| ())?;
+        Ok(if (inode.flags & inode::IFLAG_ENCRYPTED) != 0 {
+            IFLAG_ENCRYPTED
+        } else {
+            0
+        })
+    }
 }
 
 pub struct TfsProxy;
@@ -1618,5 +1665,15 @@ impl FileSystem for TfsProxy {
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
         #[allow(static_mut_refs)]
         unsafe { MFS.get_unchecked().lock() }.metadata(path)
+    }
+
+    fn set_attr(&mut self, path: &str, attr: u32, value: u32) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.set_attr(path, attr, value)
+    }
+
+    fn get_attr(&mut self, path: &str, attr: u32) -> Result<u32, ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.get_attr(path, attr)
     }
 }

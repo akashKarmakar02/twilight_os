@@ -7,6 +7,7 @@ use crate::sys::fs::pipe::{IOCTL_PIPE_GET_ERRNO, IOCTL_PIPE_GET_LAST_WRITE, make
 use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
 use crate::sys::net::socket::{SocketFile, tcp::TcpSocket, udp::UdpSocket};
 use crate::sys::proc::{FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, USER_STACK_SIZE};
+use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
 use crate::task::executor::halt;
 use crate::{logger, print, sys};
@@ -68,6 +69,49 @@ fn normalize_path(p: &str) -> String {
         "/".to_string()
     } else {
         format!("/{}", out.join("/"))
+    }
+}
+
+fn home_root_for_path(path: &str) -> Option<String> {
+    if !path.starts_with("/home/") {
+        return None;
+    }
+    let rest = &path["/home/".len()..];
+    let user = rest.split('/').next().unwrap_or("");
+    if user.is_empty() {
+        return None;
+    }
+    Some(format!("/home/{}", user))
+}
+
+fn check_encrypted_home_access(path: &str) -> Result<(), i64> {
+    let Some(home_root) = home_root_for_path(path) else {
+        return Ok(());
+    };
+
+    #[allow(static_mut_refs)]
+    let encrypted = match unsafe { VFS.get_mut().get_attr(&home_root, IFLAG_ENCRYPTED) } {
+        Ok(v) => (v & IFLAG_ENCRYPTED) != 0,
+        Err(_) => false,
+    };
+    if !encrypted {
+        return Ok(());
+    }
+
+    let current_uid = sys::proc::user::get_uid() as u32;
+    if current_uid == 0 {
+        return Ok(());
+    }
+
+    #[allow(static_mut_refs)]
+    let home_meta = match unsafe { VFS.get_mut().metadata(&home_root) } {
+        Ok(meta) => meta,
+        Err(_) => return Ok(()),
+    };
+    if home_meta.uid == current_uid {
+        Ok(())
+    } else {
+        Err(-(EACCES as i64))
     }
 }
 
@@ -760,14 +804,15 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
     // Resolve full path
     let full_path = if path.starts_with('/') {
         normalize_path(path)
-    } else if path.starts_with(".") {
-        path.replace(".", process.pwd.as_str())
     } else {
         match base_for_dirfd(process, dirfd) {
             Ok(base) => normalize_path(&join_paths(&base, path)),
             Err(e) => return e as i64,
         }
     };
+    if let Err(e) = check_encrypted_home_access(&full_path) {
+        return e;
+    }
 
     // Try open existing
     let mut existed = true;
@@ -1407,6 +1452,9 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
         }
         OpenFileKind::Socket(_) => return -(ENOTDIR as i64),
     }
+    if let Err(e) = check_encrypted_home_access(&file.path) {
+        return e;
+    }
 
     // Read directory entries from VFS (adjust API if yours differs)
     #[allow(static_mut_refs)]
@@ -1502,7 +1550,7 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
 
 pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     let file_name_ptr = UserPtr(file_name_ptr as *const u8);
-    let Ok(mut file_path) = copy_cstr_from_user(file_name_ptr, 4096) else {
+    let Ok(file_path) = copy_cstr_from_user(file_name_ptr, 4096) else {
         return -1;
     };
 
@@ -1515,12 +1563,13 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
             .unwrap()
     };
 
-    if file_path.starts_with("./") {
-        if process.pwd.ends_with("/") {
-            file_path = file_path.replace("./", process.pwd.as_str());
-        } else {
-            file_path = file_path.replace("./", format!("{}/", process.pwd.as_str()).as_str());
-        }
+    let file_path = if file_path.starts_with('/') {
+        normalize_path(file_path.as_str())
+    } else {
+        normalize_path(&join_paths(process.pwd.as_str(), file_path.as_str()))
+    };
+    if let Err(e) = check_encrypted_home_access(file_path.as_str()) {
+        return e;
     }
 
     #[allow(static_mut_refs)]
@@ -1566,6 +1615,9 @@ pub fn access(path_ptr: usize, _mode: i32) -> i64 {
             Err(e) => return e as i64,
         }
     };
+    if let Err(e) = check_encrypted_home_access(&full_path) {
+        return e;
+    }
 
     #[allow(static_mut_refs)]
     match unsafe { VFS.get_mut().metadata(&full_path) } {
@@ -1596,14 +1648,15 @@ pub fn newfstatat(dirfd: i32, pathname_ptr: usize, stat_ptr: usize, _flags: i32)
 
     let full_path = if path.starts_with('/') {
         normalize_path(path.trim())
-    } else if path.starts_with(".") {
-        path.replace(".", process.pwd.as_str()).to_string()
     } else {
         match base_for_dirfd(process, dirfd) {
             Ok(base) => normalize_path(&join_paths(&base, path.trim())),
             Err(e) => return e as i64,
         }
     };
+    if let Err(e) = check_encrypted_home_access(&full_path) {
+        return e;
+    }
 
     #[allow(static_mut_refs)]
     let Ok(meta) = (unsafe { VFS.get_mut().metadata(&full_path) }) else {
@@ -1754,34 +1807,14 @@ pub fn chdir(path_ptr: usize) -> i64 {
             .unwrap()
     };
 
-    let dir_path = if path.starts_with("./") || !path.starts_with("/") {
-        #[allow(static_mut_refs)]
-        let pwd = process.pwd.as_str();
-        let calnonical_pwd = if pwd.ends_with("/") {
-            pwd.to_string()
-        } else {
-            format!("{}/", pwd)
-        };
-        format!("{}{}", calnonical_pwd, path.replace("./", ""))
+    let dir_path = if path.starts_with('/') {
+        normalize_path(path.as_str())
     } else {
-        path
+        normalize_path(&join_paths(process.pwd.as_str(), path.as_str()))
     };
-
-    let dir_path = if dir_path.ends_with("..") {
-        let parts = dir_path.split("/");
-        let mut vec = parts.collect::<Vec<&str>>();
-
-        vec.pop();
-        vec.pop();
-
-        if vec.is_empty() || (vec[0] == "" && vec.len() == 1) {
-            "/".to_string()
-        } else {
-            vec.join("/")
-        }
-    } else {
-        dir_path
-    };
+    if let Err(e) = check_encrypted_home_access(&dir_path) {
+        return e;
+    }
 
     #[allow(static_mut_refs)]
     let fs = unsafe { VFS.get_mut() };
