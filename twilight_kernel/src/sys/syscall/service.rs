@@ -1786,6 +1786,7 @@ pub fn getcwd(buf_ptr: usize, buf_len: usize) -> i64 {
             .unwrap()
     };
 
+    buf.fill(0);
     let cwd = proc.pwd.as_str();
     let cwd_bytes = cwd.as_bytes();
     buf[..cwd_bytes.len()].copy_from_slice(cwd_bytes);
