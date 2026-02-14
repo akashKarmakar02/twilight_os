@@ -396,47 +396,47 @@ impl FramebufferTerminal {
 
     /// Draw a single ScreenChar at a pixel coordinate
     fn draw_char(&self, x: usize, y: usize, screen_char: ScreenChar) {
-        let pitch_pixels = self.width;
-        let ascii = screen_char.char;
-        let (fg, bg) = if self.reverse {
-            (
-                convert_color(self.bg_color),
-                convert_color(screen_char.color),
-            )
+        let fg_u32 = if self.reverse {
+            self.bg_color
         } else {
-            (
-                convert_color(screen_char.color),
-                convert_color(self.bg_color),
-            )
+            screen_char.color
+        };
+        let bg_u32 = if self.reverse {
+            screen_char.color
+        } else {
+            self.bg_color
         };
 
-        let glyph_opt = get_glyph(ascii);
+        let glyph_opt = get_glyph(screen_char.char);
 
         if let Some(font_bitmap) = glyph_opt {
             #[allow(static_mut_refs)]
             unsafe {
                 let fb = FRAMEBUFFER.get_mut().unwrap();
+                let width = fb.width as usize;
+
+                // Use raw pointers to avoid double mutable borrow of `fb`
+                // (one for pixels_mut and one for video_buf)
+                let pixels_ptr = fb.pixels_mut().as_mut_ptr();
+                let vram_ptr = fb.video_buf.as_mut_ptr();
+                let total_len = fb.video_buf.len(); // Assume both buffers same size
 
                 for (row, &bits) in font_bitmap.iter().enumerate() {
-                    // Build one scanline: bg everywhere, then overwrite fg where bit=1
-                    let mut row_buf = [0u8; Self::CHAR_W * 4];
+                    let row_start = (y + row) * width + x;
+
                     for col in 0..Self::CHAR_W {
-                        // Start with bg
-                        let off = col * 4;
-                        row_buf[off..off + 4].copy_from_slice(&bg);
-                        // Overlay fg if pixel bit is set
-                        if (bits & (1 << (7 - col))) != 0 {
-                            row_buf[off..off + 4].copy_from_slice(&fg);
+                        let is_fg = (bits & (1 << (7 - col))) != 0;
+                        let color = if is_fg { fg_u32 } else { bg_u32 };
+
+                        let idx = row_start + col;
+                        if idx < total_len {
+                            // Write to RAM backbuffer
+                            pixels_ptr.add(idx).write(color);
+                            // Write to VRAM (Write Combining)
+                            vram_ptr.add(idx).write(color);
                         }
                     }
-
-                    let pixel_offset = (y + row) * pitch_pixels + x; // pixel index
-                    fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf)
-                        .unwrap();
                 }
-
-                // Optional: sync only the glyph area
-                // fb.sync_partial((y * pitch_pixels + x) as u64, (Self::CHAR_W * Self::CHAR_H) as u64);
             }
         }
     }
