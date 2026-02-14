@@ -456,11 +456,11 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
     let scancode: u8 = unsafe { port.read() };
 
-    keyboard_interrupt(scancode);
-
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(1));
     }
+
+    keyboard_interrupt(scancode);
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
