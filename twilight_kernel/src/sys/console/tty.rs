@@ -554,6 +554,8 @@ impl Tty {
                 i += 1;
             }
         }
+        // Lazy cursor: ensure cursor is visible after batch write
+        self.term.refresh_cursor();
     }
 }
 
@@ -689,7 +691,8 @@ impl VfsNodeOps for Tty {
 
                 unsafe {
                     let winsize = &mut *winsize_ptr;
-                    winsize.ws_row = (self.term.height / 16) as u16;
+                    // Jitter fix: Report one less row so apps don't print newline on last line and scroll
+                    winsize.ws_row = ((self.term.height / 16).saturating_sub(1)) as u16;
                     winsize.ws_col = (self.term.width / 8) as u16;
                     winsize.ws_xpixel = self.term.width as u16;
                     winsize.ws_ypixel = self.term.height as u16;

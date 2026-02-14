@@ -5,7 +5,6 @@ use crate::sys::{
 
 use crate::driver::disk::dummy_blockdev;
 use crate::sys::fs::vfs::VfsNodeOps;
-use alloc::vec;
 
 const CURSOR_W: usize = 8;
 const CURSOR_H: usize = 16;
@@ -140,7 +139,7 @@ impl FramebufferTerminal {
 
             // Draw block cursor (full cell) in the current foreground color.
             let color_bytes = convert_color(self.color);
-            let mut out_row = vec![0u8; w * 4];
+            let mut out_row = [0u8; CURSOR_W * 4];
             for px in 0..w {
                 let off = px * 4;
                 out_row[off..off + 4].copy_from_slice(&color_bytes);
@@ -206,24 +205,41 @@ impl FramebufferTerminal {
 
     fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
         let pitch_pixels = get_framebuffer().width as usize; // pixels per row
-        let mut row_buf = vec![0u8; w * 4];
+
+        // Chunk configuration
+        const CHUNK_PIXELS: usize = 256; // 1024 bytes
+        let mut row_buf = [0u8; CHUNK_PIXELS * 4];
         let color_bytes = convert_color(color);
 
-        // prepare one scanline filled with bg color
-        for px in 0..w {
-            let off = px * 4;
+        // Fill buffer with color pattern once
+        for i in 0..CHUNK_PIXELS {
+            let off = i * 4;
             row_buf[off..off + 4].copy_from_slice(&color_bytes);
         }
 
         #[allow(static_mut_refs)]
         unsafe {
             let fb = FRAMEBUFFER.get_mut().unwrap();
+
             for row in 0..h {
-                let pixel_offset = (y + row) * pitch_pixels + x; // pixel index, not bytes
-                fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf)
-                    .unwrap();
+                let row_start_pixel = (y + row) * pitch_pixels + x;
+
+                // Write row in chunks
+                let mut pixels_written = 0;
+                while pixels_written < w {
+                    let remaining = w - pixels_written;
+                    let chunk = remaining.min(CHUNK_PIXELS);
+
+                    let pixel_offset = row_start_pixel + pixels_written;
+                    let byte_count = chunk * 4;
+
+                    fb.write(&mut dummy_blockdev(), pixel_offset, &row_buf[..byte_count])
+                        .unwrap();
+
+                    pixels_written += chunk;
+                }
             }
-            // If you have a cheap partial sync, sync the whole rect; otherwise skip.
+            // Sync the filled rect
             fb.sync_partial(((y * pitch_pixels) + x) as u64, (w * h) as u64);
         }
     }
@@ -309,17 +325,14 @@ impl FramebufferTerminal {
         match c {
             '\n' => {
                 self.new_line();
-                self.draw_cursor();
                 return;
             }
             '\u{08}' | '\u{7F}' => {
                 self.backspace();
-                self.draw_cursor();
                 return;
             }
             '\r' => {
                 self.cursor_x = 0;
-                self.draw_cursor();
                 return;
             }
             _ => {}
@@ -346,7 +359,6 @@ impl FramebufferTerminal {
         if self.cursor_x * Self::CHAR_W > self.width {
             self.new_line();
         }
-        self.draw_cursor();
     }
 
     /// Writes a full string (no ANSI yet)
@@ -407,7 +419,7 @@ impl FramebufferTerminal {
 
                 for (row, &bits) in font_bitmap.iter().enumerate() {
                     // Build one scanline: bg everywhere, then overwrite fg where bit=1
-                    let mut row_buf = vec![0u8; Self::CHAR_W * 4];
+                    let mut row_buf = [0u8; Self::CHAR_W * 4];
                     for col in 0..Self::CHAR_W {
                         // Start with bg
                         let off = col * 4;
@@ -448,17 +460,30 @@ fn apply_console_bg(color: u32) {
     let height = fb.height as usize;
     let total_pixels = width * height;
 
-    let mut buf = vec![0u8; total_pixels * 4];
+    // Chunk size: 256 pixels = 1024 bytes (same as fill_rect)
+    const CHUNK_PIXELS: usize = 256;
+    let mut buf = [0u8; CHUNK_PIXELS * 4];
     let color_bytes = convert_color(color);
 
-    for i in 0..total_pixels {
-        let start = i * 4;
-        buf[start..start + 4].clone_from_slice(&color_bytes);
+    // Fill buffer pattern
+    for i in 0..CHUNK_PIXELS {
+        let off = i * 4;
+        buf[off..off + 4].copy_from_slice(&color_bytes);
     }
 
     #[allow(static_mut_refs)]
     unsafe {
         let fb = FRAMEBUFFER.get_mut().unwrap();
-        fb.write(&mut dummy_blockdev(), 0, buf.as_slice()).unwrap();
+
+        let mut pixels_written = 0;
+        while pixels_written < total_pixels {
+            let remaining = total_pixels - pixels_written;
+            let chunk = remaining.min(CHUNK_PIXELS);
+
+            fb.write(&mut dummy_blockdev(), pixels_written, &buf[..chunk * 4])
+                .unwrap();
+
+            pixels_written += chunk;
+        }
     }
 }
