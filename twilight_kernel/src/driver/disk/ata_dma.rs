@@ -1,30 +1,37 @@
 use crate::driver::disk::AtaImpl;
 use crate::driver::disk::mount_ata_with_impl;
 use crate::println;
-use crate::sys::memory::virt_to_phys;
 use crate::sys::memory::phys::PhysBuf;
+use crate::sys::memory::virt_to_phys;
 use crate::sys::pci::DeviceConfig;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use bit_field::BitField;
 use core::convert::TryInto;
 use core::fmt;
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::slice;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
-use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 use x86_64::VirtAddr;
+use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 
 // ATA DMA (Bus Master IDE) driver.
 // Minimal, polling-based implementation to keep the existing PIO driver intact.
 
 pub const BLOCK_SIZE: usize = 512;
-// Bigger DMA buffer reduces per-command overhead significantly.
-// With LBA48 DMA EXT we can exceed 256 sectors/command; LBA28 is still capped at 256.
-const DMA_BUF_BYTES: usize = 512 * 512; // 256KiB
-const PRDT_BYTES: usize = 4096;
+// Moderate bump to reduce per-command overhead without being too memory-aggressive.
+// LBA28 remains capped at 256 sectors; LBA48 can use bigger transfers.
+const DMA_BUF_BYTES: usize = 2 * 1024 * 1024; // 2MiB
+const PRDT_BYTES: usize = 8192; // 8KiB => 1024 PRDT entries
 const POLL_SPINS: usize = 5_000_000;
+const DMA_POLL_SPINS_BEFORE_HALT: usize = 4096;
+const MAX_MERGED_BYTES: usize = DMA_BUF_BYTES;
+const MAX_MERGED_REQS: usize = 32;
+const DMA_RETRY_COUNT: usize = 1;
+const ENABLE_COOP_QUEUE: bool = true;
 
 // If set, caps negotiated UDMA mode to this value (0..=6) regardless of controller heuristics.
 // Leave as `None` for auto.
@@ -34,8 +41,132 @@ const FORCE_MAX_UDMA_MODE: Option<u8> = None;
 const ENABLE_WRITE_CACHE: bool = true;
 const ENABLE_READ_LOOKAHEAD: bool = true;
 
+const REQ_PENDING: u8 = 0;
+const REQ_DONE: u8 = 1;
+const REQ_FAILED: u8 = 2;
+
 static IDE_IRQ_PRIMARY: AtomicBool = AtomicBool::new(false);
 static IDE_IRQ_SECONDARY: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AtaReqOp {
+    Read,
+    Write,
+}
+
+struct AtaIoRequest {
+    op: AtaReqOp,
+    drive: u8,
+    lba_start: u32,
+    sectors: usize,
+    buf_ptr: *mut u8,
+    byte_len: usize,
+    status: AtomicU8,
+}
+
+impl AtaIoRequest {
+    fn new_read(drive: u8, lba_start: u32, buf: &mut [u8]) -> Self {
+        Self {
+            op: AtaReqOp::Read,
+            drive,
+            lba_start,
+            sectors: buf.len() / BLOCK_SIZE,
+            buf_ptr: buf.as_mut_ptr(),
+            byte_len: buf.len(),
+            status: AtomicU8::new(REQ_PENDING),
+        }
+    }
+
+    fn new_write(drive: u8, lba_start: u32, buf: &[u8]) -> Self {
+        Self {
+            op: AtaReqOp::Write,
+            drive,
+            lba_start,
+            sectors: buf.len() / BLOCK_SIZE,
+            buf_ptr: buf.as_ptr() as *mut u8,
+            byte_len: buf.len(),
+            status: AtomicU8::new(REQ_PENDING),
+        }
+    }
+}
+
+struct AtaQueueState {
+    active: bool,
+    pending: VecDeque<usize>,
+}
+
+struct AtaChannelQueue {
+    inner: Mutex<AtaQueueState>,
+}
+
+struct AtaPerfCounters {
+    read_bytes: AtomicU64,
+    write_bytes: AtomicU64,
+    dma_cmd_read: AtomicU64,
+    dma_cmd_write: AtomicU64,
+    dma_cmd_retry: AtomicU64,
+    dma_cmd_fail: AtomicU64,
+    pio_fallback_count: AtomicU64,
+    queue_enqueued: AtomicU64,
+    queue_merged_groups: AtomicU64,
+    queue_merged_reqs: AtomicU64,
+    dma_wait_iterations_total: AtomicU64,
+    prdt_histogram: [AtomicU64; 8],
+}
+
+impl AtaPerfCounters {
+    const fn new() -> Self {
+        Self {
+            read_bytes: AtomicU64::new(0),
+            write_bytes: AtomicU64::new(0),
+            dma_cmd_read: AtomicU64::new(0),
+            dma_cmd_write: AtomicU64::new(0),
+            dma_cmd_retry: AtomicU64::new(0),
+            dma_cmd_fail: AtomicU64::new(0),
+            pio_fallback_count: AtomicU64::new(0),
+            queue_enqueued: AtomicU64::new(0),
+            queue_merged_groups: AtomicU64::new(0),
+            queue_merged_reqs: AtomicU64::new(0),
+            dma_wait_iterations_total: AtomicU64::new(0),
+            prdt_histogram: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+        }
+    }
+
+    fn prdt_bucket(entries: usize) -> usize {
+        if entries <= 1 {
+            0
+        } else if entries <= 2 {
+            1
+        } else if entries <= 4 {
+            2
+        } else if entries <= 8 {
+            3
+        } else if entries <= 16 {
+            4
+        } else if entries <= 32 {
+            5
+        } else if entries <= 64 {
+            6
+        } else {
+            7
+        }
+    }
+}
+
+struct PerfLogState {
+    last_ts: f64,
+    last_read_bytes: u64,
+    last_write_bytes: u64,
+}
 
 fn on_irq_primary() {
     IDE_IRQ_PRIMARY.store(true, Ordering::Release);
@@ -382,15 +513,12 @@ impl Bus {
         let mut offset = 0usize;
         let mut entries: usize = 0;
 
-        let prd_slice = unsafe {
+        let prd_slice: &mut [Prd] = unsafe {
             core::slice::from_raw_parts_mut(
                 self.prdt.virt_addr().as_mut_ptr::<Prd>(),
                 PRDT_BYTES / core::mem::size_of::<Prd>(),
             )
         };
-        for prd in prd_slice.iter_mut() {
-            *prd = Prd::default();
-        }
 
         while remaining > 0 {
             if entries >= prd_slice.len() {
@@ -419,6 +547,11 @@ impl Bus {
         if entries == 0 {
             return Err(());
         }
+        ATA_PERF.prdt_histogram[AtaPerfCounters::prdt_bucket(entries)]
+            .fetch_add(1, Ordering::Relaxed);
+        if entries < prd_slice.len() {
+            prd_slice[entries] = Prd::default();
+        }
         prd_slice[entries - 1].flags = 1u16 << 15; // EOT
         self.program_prdt();
         Ok(())
@@ -429,15 +562,12 @@ impl Bus {
             return Err(());
         }
 
-        let prd_slice = unsafe {
+        let prd_slice: &mut [Prd] = unsafe {
             core::slice::from_raw_parts_mut(
                 self.prdt.virt_addr().as_mut_ptr::<Prd>(),
                 PRDT_BYTES / core::mem::size_of::<Prd>(),
             )
         };
-        for prd in prd_slice.iter_mut() {
-            *prd = Prd::default();
-        }
 
         let mut remaining = len;
         let mut entries = 0usize;
@@ -498,7 +628,11 @@ impl Bus {
                 return Err(());
             }
 
-            let count16: u16 = if seg_len == 0x10000 { 0 } else { seg_len as u16 };
+            let count16: u16 = if seg_len == 0x10000 {
+                0
+            } else {
+                seg_len as u16
+            };
             prd_slice[entries] = Prd {
                 addr: phys0 as u32,
                 count: count16,
@@ -511,6 +645,11 @@ impl Bus {
 
         if entries == 0 {
             return Err(());
+        }
+        ATA_PERF.prdt_histogram[AtaPerfCounters::prdt_bucket(entries)]
+            .fetch_add(1, Ordering::Relaxed);
+        if entries < prd_slice.len() {
+            prd_slice[entries] = Prd::default();
         }
         prd_slice[entries - 1].flags = 1u16 << 15; // EOT
         self.program_prdt();
@@ -528,7 +667,9 @@ impl Bus {
 
         let mut completed = false;
         let mut failed = false;
-        for _ in 0..POLL_SPINS {
+        let mut wait_iters = 0u64;
+        for i in 0..POLL_SPINS {
+            wait_iters += 1;
             let st = unsafe { self.bm_status.read() };
             if (st & 0x02) != 0 {
                 failed = true;
@@ -545,8 +686,18 @@ impl Bus {
                 continue;
             }
 
-            // Sleep until next interrupt to avoid busy-waiting.
-            crate::arch::x86_64::halt();
+            // Interrupt status bit is a completion hint on many controllers:
+            // immediately re-check ACTIVE/ERR in the next iteration.
+            if (st & 0x04) != 0 {
+                continue;
+            }
+
+            if i >= DMA_POLL_SPINS_BEFORE_HALT {
+                // Sleep until next interrupt to avoid busy-waiting.
+                crate::arch::x86_64::halt();
+            } else {
+                spin_loop();
+            }
         }
 
         unsafe {
@@ -562,8 +713,131 @@ impl Bus {
 
         // Acknowledge/clear the device interrupt status.
         let st = unsafe { self.status_register.read() };
+        ATA_PERF
+            .dma_wait_iterations_total
+            .fetch_add(wait_iters, Ordering::Relaxed);
         if failed || !completed || st.get_bit(Status::ERR as usize) {
             return Err(());
+        }
+        Ok(())
+    }
+
+    fn run_dma_command_with_retry(
+        &mut self,
+        drive: u8,
+        block: u64,
+        sectors: usize,
+        use_lba48: bool,
+        read: bool,
+    ) -> Result<(), ()> {
+        for attempt in 0..=DMA_RETRY_COUNT {
+            self.select_drive(drive)?;
+            if use_lba48 {
+                self.write_command_params_lba48(drive, block, sectors)?;
+            } else {
+                self.write_command_params(drive, block as u32, sectors)?;
+            }
+
+            unsafe {
+                let mut cmd = self.bm_cmd.read();
+                cmd.set_bit(3, read);
+                cmd.set_bit(0, false);
+                self.bm_cmd.write(cmd);
+            }
+
+            if read {
+                ATA_PERF.dma_cmd_read.fetch_add(1, Ordering::Relaxed);
+            } else {
+                ATA_PERF.dma_cmd_write.fetch_add(1, Ordering::Relaxed);
+            }
+
+            self.write_command(if read {
+                if use_lba48 {
+                    Command::ReadDmaExt
+                } else {
+                    Command::ReadDma
+                }
+            } else if use_lba48 {
+                Command::WriteDmaExt
+            } else {
+                Command::WriteDma
+            })?;
+
+            unsafe {
+                let mut cmd = self.bm_cmd.read();
+                cmd.set_bit(0, true);
+                self.bm_cmd.write(cmd);
+            }
+
+            if self.dma_wait_done().is_ok() {
+                return Ok(());
+            }
+
+            if attempt < DMA_RETRY_COUNT {
+                ATA_PERF.dma_cmd_retry.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        ATA_PERF.dma_cmd_fail.fetch_add(1, Ordering::Relaxed);
+        Err(())
+    }
+
+    fn read_dma_bounce_window(&mut self, drive: u8, block: u32, bytes: usize) -> Result<(), ()> {
+        if bytes == 0 || bytes > DMA_BUF_BYTES || (bytes % BLOCK_SIZE) != 0 {
+            return Err(());
+        }
+        let mut remaining_sectors = bytes / BLOCK_SIZE;
+        let mut current_block = block as u64;
+        let mut off = 0usize;
+        let use_lba48 = self
+            .drive_lba48
+            .get(drive as usize)
+            .copied()
+            .unwrap_or(false);
+        let max_sectors = if use_lba48 {
+            DMA_BUF_BYTES / BLOCK_SIZE
+        } else {
+            core::cmp::min(256, DMA_BUF_BYTES / BLOCK_SIZE)
+        };
+
+        while remaining_sectors > 0 {
+            let sectors = remaining_sectors.min(max_sectors);
+            let chunk = sectors * BLOCK_SIZE;
+            self.setup_dma_prdt_for_phys(self.dma_buf.addr() + off as u64, chunk)?;
+            self.run_dma_command_with_retry(drive, current_block, sectors, use_lba48, true)?;
+            remaining_sectors -= sectors;
+            current_block += sectors as u64;
+            off += chunk;
+        }
+        Ok(())
+    }
+
+    fn write_dma_bounce_window(&mut self, drive: u8, block: u32, bytes: usize) -> Result<(), ()> {
+        if bytes == 0 || bytes > DMA_BUF_BYTES || (bytes % BLOCK_SIZE) != 0 {
+            return Err(());
+        }
+        let mut remaining_sectors = bytes / BLOCK_SIZE;
+        let mut current_block = block as u64;
+        let mut off = 0usize;
+        let use_lba48 = self
+            .drive_lba48
+            .get(drive as usize)
+            .copied()
+            .unwrap_or(false);
+        let max_sectors = if use_lba48 {
+            DMA_BUF_BYTES / BLOCK_SIZE
+        } else {
+            core::cmp::min(256, DMA_BUF_BYTES / BLOCK_SIZE)
+        };
+
+        while remaining_sectors > 0 {
+            let sectors = remaining_sectors.min(max_sectors);
+            let chunk = sectors * BLOCK_SIZE;
+            self.setup_dma_prdt_for_phys(self.dma_buf.addr() + off as u64, chunk)?;
+            self.run_dma_command_with_retry(drive, current_block, sectors, use_lba48, false)?;
+            remaining_sectors -= sectors;
+            current_block += sectors as u64;
+            off += chunk;
         }
         Ok(())
     }
@@ -587,52 +861,30 @@ impl Bus {
         } else {
             core::cmp::min(256, DMA_BUF_BYTES / BLOCK_SIZE)
         };
+        // If direct PRDT setup fails once for this request, keep using bounce
+        // to avoid repeatedly walking/validating the same fragmented mapping.
+        let mut direct_setup_ok = true;
 
         while remaining_sectors > 0 {
+            let mut use_bounce = false;
             let mut sectors = remaining_sectors.min(max_sectors_direct);
             let mut bytes = sectors * BLOCK_SIZE;
-            let mut use_bounce = false;
 
-            // Prefer direct DMA into the caller buffer (avoids the bounce copy).
-            if self
-                .setup_dma_prdt_for_virt(unsafe { buf.as_mut_ptr().add(out_off) }, bytes)
-                .is_err()
+            if direct_setup_ok
+                && self
+                    .setup_dma_prdt_for_virt(unsafe { buf.as_mut_ptr().add(out_off) }, bytes)
+                    .is_ok()
             {
+                // direct PRDT ready
+            } else {
                 use_bounce = true;
+                direct_setup_ok = false;
                 sectors = remaining_sectors.min(max_sectors_bounce);
                 bytes = sectors * BLOCK_SIZE;
                 self.setup_dma_prdt_for_phys(self.dma_buf.addr(), bytes)?;
             }
 
-            self.select_drive(drive)?;
-            if use_lba48 {
-                self.write_command_params_lba48(drive, current_block as u64, sectors)?;
-            } else {
-                self.write_command_params(drive, current_block, sectors)?;
-            }
-
-            unsafe {
-                // Set direction: 1 = read from disk to memory.
-                let mut cmd = self.bm_cmd.read();
-                cmd.set_bit(3, true);
-                cmd.set_bit(0, false);
-                self.bm_cmd.write(cmd);
-            }
-
-            self.write_command(if use_lba48 {
-                Command::ReadDmaExt
-            } else {
-                Command::ReadDma
-            })?;
-
-            unsafe {
-                // Start bus master.
-                let mut cmd = self.bm_cmd.read();
-                cmd.set_bit(0, true);
-                self.bm_cmd.write(cmd);
-            }
-
-            self.dma_wait_done()?;
+            self.run_dma_command_with_retry(drive, current_block as u64, sectors, use_lba48, true)?;
 
             if use_bounce {
                 buf[out_off..out_off + bytes].copy_from_slice(&self.dma_buf[..bytes]);
@@ -663,55 +915,150 @@ impl Bus {
         } else {
             core::cmp::min(256, DMA_BUF_BYTES / BLOCK_SIZE)
         };
+        // If direct PRDT setup fails once for this request, keep using bounce
+        // to avoid repeated virtual->physical walk overhead on fragmented buffers.
+        let mut direct_setup_ok = true;
 
         while remaining_sectors > 0 {
             let mut sectors = remaining_sectors.min(max_sectors_direct);
             let mut bytes = sectors * BLOCK_SIZE;
 
-            // Prefer direct DMA from the caller buffer (avoids the bounce copy).
-            if self
-                .setup_dma_prdt_for_virt(unsafe { buf.as_ptr().add(in_off) }, bytes)
-                .is_err()
+            if direct_setup_ok
+                && self
+                    .setup_dma_prdt_for_virt(unsafe { buf.as_ptr().add(in_off) }, bytes)
+                    .is_ok()
             {
+                // direct PRDT ready
+            } else {
+                direct_setup_ok = false;
                 sectors = remaining_sectors.min(max_sectors_bounce);
                 bytes = sectors * BLOCK_SIZE;
                 self.dma_buf[..bytes].copy_from_slice(&buf[in_off..in_off + bytes]);
                 self.setup_dma_prdt_for_phys(self.dma_buf.addr(), bytes)?;
             }
 
-            self.select_drive(drive)?;
-            if use_lba48 {
-                self.write_command_params_lba48(drive, current_block as u64, sectors)?;
-            } else {
-                self.write_command_params(drive, current_block, sectors)?;
-            }
-
-            unsafe {
-                // Set direction: 0 = write from memory to disk.
-                let mut cmd = self.bm_cmd.read();
-                cmd.set_bit(3, false);
-                cmd.set_bit(0, false);
-                self.bm_cmd.write(cmd);
-            }
-
-            self.write_command(if use_lba48 {
-                Command::WriteDmaExt
-            } else {
-                Command::WriteDma
-            })?;
-
-            unsafe {
-                let mut cmd = self.bm_cmd.read();
-                cmd.set_bit(0, true);
-                self.bm_cmd.write(cmd);
-            }
-
-            self.dma_wait_done()?;
+            self.run_dma_command_with_retry(
+                drive,
+                current_block as u64,
+                sectors,
+                use_lba48,
+                false,
+            )?;
 
             in_off += bytes;
             current_block += sectors as u32;
             remaining_sectors -= sectors;
         }
+        Ok(())
+    }
+
+    fn read_dma_resilient(&mut self, drive: u8, block: u32, buf: &mut [u8]) -> Result<(), ()> {
+        match self.read_dma(drive, block, buf) {
+            Ok(()) => {
+                ATA_PERF
+                    .read_bytes
+                    .fetch_add(buf.len() as u64, Ordering::Relaxed);
+                maybe_log_perf();
+                Ok(())
+            }
+            Err(()) => {
+                ATA_PERF.pio_fallback_count.fetch_add(1, Ordering::Relaxed);
+                let res = crate::driver::disk::ata::read(self.id, drive, block, buf);
+                if res.is_ok() {
+                    ATA_PERF
+                        .read_bytes
+                        .fetch_add(buf.len() as u64, Ordering::Relaxed);
+                }
+                maybe_log_perf();
+                res
+            }
+        }
+    }
+
+    fn write_dma_resilient(&mut self, drive: u8, block: u32, buf: &[u8]) -> Result<(), ()> {
+        match self.write_dma(drive, block, buf) {
+            Ok(()) => {
+                ATA_PERF
+                    .write_bytes
+                    .fetch_add(buf.len() as u64, Ordering::Relaxed);
+                maybe_log_perf();
+                Ok(())
+            }
+            Err(()) => {
+                ATA_PERF.pio_fallback_count.fetch_add(1, Ordering::Relaxed);
+                let res = crate::driver::disk::ata::write(self.id, drive, block, buf);
+                if res.is_ok() {
+                    ATA_PERF
+                        .write_bytes
+                        .fetch_add(buf.len() as u64, Ordering::Relaxed);
+                }
+                maybe_log_perf();
+                res
+            }
+        }
+    }
+
+    fn execute_merged_group(&mut self, reqs: &[usize]) -> Result<(), ()> {
+        if reqs.is_empty() {
+            return Err(());
+        }
+
+        let first = unsafe { &*(reqs[0] as *const AtaIoRequest) };
+        if reqs.len() == 1 {
+            return match first.op {
+                AtaReqOp::Read => {
+                    let buf = unsafe { slice::from_raw_parts_mut(first.buf_ptr, first.byte_len) };
+                    self.read_dma_resilient(first.drive, first.lba_start, buf)
+                }
+                AtaReqOp::Write => {
+                    let buf = unsafe {
+                        slice::from_raw_parts(first.buf_ptr as *const u8, first.byte_len)
+                    };
+                    self.write_dma_resilient(first.drive, first.lba_start, buf)
+                }
+            };
+        }
+
+        let mut total_bytes = 0usize;
+        for req_ptr in reqs {
+            let req = unsafe { &*(*req_ptr as *const AtaIoRequest) };
+            total_bytes += req.byte_len;
+        }
+        if total_bytes == 0 || total_bytes > DMA_BUF_BYTES || (total_bytes % BLOCK_SIZE) != 0 {
+            return Err(());
+        }
+
+        match first.op {
+            AtaReqOp::Write => {
+                let mut off = 0usize;
+                for req_ptr in reqs {
+                    let req = unsafe { &*(*req_ptr as *const AtaIoRequest) };
+                    let src =
+                        unsafe { slice::from_raw_parts(req.buf_ptr as *const u8, req.byte_len) };
+                    self.dma_buf[off..off + req.byte_len].copy_from_slice(src);
+                    off += req.byte_len;
+                }
+                self.write_dma_bounce_window(first.drive, first.lba_start, total_bytes)?;
+                ATA_PERF
+                    .write_bytes
+                    .fetch_add(total_bytes as u64, Ordering::Relaxed);
+            }
+            AtaReqOp::Read => {
+                self.read_dma_bounce_window(first.drive, first.lba_start, total_bytes)?;
+                let mut off = 0usize;
+                for req_ptr in reqs {
+                    let req = unsafe { &*(*req_ptr as *const AtaIoRequest) };
+                    let dst = unsafe { slice::from_raw_parts_mut(req.buf_ptr, req.byte_len) };
+                    dst.copy_from_slice(&self.dma_buf[off..off + req.byte_len]);
+                    off += req.byte_len;
+                }
+                ATA_PERF
+                    .read_bytes
+                    .fetch_add(total_bytes as u64, Ordering::Relaxed);
+            }
+        }
+
+        maybe_log_perf();
         Ok(())
     }
 
@@ -759,6 +1106,183 @@ impl Bus {
 
 lazy_static! {
     pub static ref BUSES: Mutex<Vec<Bus>> = Mutex::new(Vec::new());
+    static ref ATA_PERF: AtaPerfCounters = AtaPerfCounters::new();
+    static ref CHANNEL_QUEUES: [AtaChannelQueue; 2] = [
+        AtaChannelQueue {
+            inner: Mutex::new(AtaQueueState {
+                active: false,
+                pending: VecDeque::new(),
+            }),
+        },
+        AtaChannelQueue {
+            inner: Mutex::new(AtaQueueState {
+                active: false,
+                pending: VecDeque::new(),
+            }),
+        },
+    ];
+    static ref PERF_LOG_STATE: Mutex<PerfLogState> = Mutex::new(PerfLogState {
+        last_ts: 0.0,
+        last_read_bytes: 0,
+        last_write_bytes: 0,
+    });
+}
+
+fn maybe_log_perf() {
+    #[cfg(debug_assertions)]
+    {
+        let now = crate::driver::timer::pit::uptime();
+        let mut st = PERF_LOG_STATE.lock();
+        if st.last_ts == 0.0 {
+            st.last_ts = now;
+            st.last_read_bytes = ATA_PERF.read_bytes.load(Ordering::Relaxed);
+            st.last_write_bytes = ATA_PERF.write_bytes.load(Ordering::Relaxed);
+            return;
+        }
+        let dt = now - st.last_ts;
+        if dt < 2.0 {
+            return;
+        }
+
+        let read_now = ATA_PERF.read_bytes.load(Ordering::Relaxed);
+        let write_now = ATA_PERF.write_bytes.load(Ordering::Relaxed);
+        let read_delta = read_now.saturating_sub(st.last_read_bytes);
+        let write_delta = write_now.saturating_sub(st.last_write_bytes);
+        let read_mibs = (read_delta as f64) / (1024.0 * 1024.0) / dt;
+        let write_mibs = (write_delta as f64) / (1024.0 * 1024.0) / dt;
+        let merged = ATA_PERF.queue_merged_groups.load(Ordering::Relaxed);
+        let enq = ATA_PERF.queue_enqueued.load(Ordering::Relaxed);
+        let retries = ATA_PERF.dma_cmd_retry.load(Ordering::Relaxed);
+        let fallbacks = ATA_PERF.pio_fallback_count.load(Ordering::Relaxed);
+
+        println!(
+            "ATA-DMA perf r={:.2}MiB/s w={:.2}MiB/s merge={}/{} retry={} pio_fallback={}",
+            read_mibs, write_mibs, merged, enq, retries, fallbacks
+        );
+
+        st.last_ts = now;
+        st.last_read_bytes = read_now;
+        st.last_write_bytes = write_now;
+    }
+}
+
+fn mark_request(req_ptr: usize, ok: bool) {
+    let req = unsafe { &*(req_ptr as *const AtaIoRequest) };
+    req.status
+        .store(if ok { REQ_DONE } else { REQ_FAILED }, Ordering::Release);
+}
+
+fn wait_for_request(req: &AtaIoRequest) -> Result<(), ()> {
+    let mut spins = 0usize;
+    loop {
+        match req.status.load(Ordering::Acquire) {
+            REQ_DONE => return Ok(()),
+            REQ_FAILED => return Err(()),
+            _ => {
+                if spins < DMA_POLL_SPINS_BEFORE_HALT {
+                    spin_loop();
+                    spins += 1;
+                } else {
+                    crate::arch::x86_64::halt();
+                }
+            }
+        }
+    }
+}
+
+fn enqueue_request(bus: u8, req: &mut AtaIoRequest) -> Result<bool, ()> {
+    let Some(queue) = CHANNEL_QUEUES.get(bus as usize) else {
+        return Err(());
+    };
+    let mut q = queue.inner.lock();
+    q.pending.push_back(req as *mut AtaIoRequest as usize);
+    ATA_PERF.queue_enqueued.fetch_add(1, Ordering::Relaxed);
+    if q.active {
+        Ok(false)
+    } else {
+        q.active = true;
+        Ok(true)
+    }
+}
+
+fn dequeue_merged_group(bus: u8) -> Option<Vec<usize>> {
+    let queue = CHANNEL_QUEUES.get(bus as usize)?;
+    let mut q = queue.inner.lock();
+    let first = match q.pending.pop_front() {
+        Some(req) => req,
+        None => {
+            q.active = false;
+            return None;
+        }
+    };
+
+    let first_req = unsafe { &*(first as *const AtaIoRequest) };
+    let op = first_req.op;
+    let drive = first_req.drive;
+    let mut next_lba = first_req.lba_start as u64 + first_req.sectors as u64;
+    let mut total_bytes = first_req.byte_len;
+    let mut group = Vec::with_capacity(4);
+    group.push(first);
+
+    while group.len() < MAX_MERGED_REQS {
+        let Some(next_ptr) = q.pending.front().copied() else {
+            break;
+        };
+        let next = unsafe { &*(next_ptr as *const AtaIoRequest) };
+        if next.op != op || next.drive != drive || next.lba_start as u64 != next_lba {
+            break;
+        }
+        if total_bytes + next.byte_len > MAX_MERGED_BYTES {
+            break;
+        }
+        q.pending.pop_front();
+        group.push(next_ptr);
+        total_bytes += next.byte_len;
+        next_lba += next.sectors as u64;
+    }
+
+    if group.len() > 1 {
+        ATA_PERF.queue_merged_groups.fetch_add(1, Ordering::Relaxed);
+        ATA_PERF
+            .queue_merged_reqs
+            .fetch_add((group.len() - 1) as u64, Ordering::Relaxed);
+    }
+
+    Some(group)
+}
+
+fn process_group(bus: u8, group: &[usize]) {
+    if group.is_empty() {
+        return;
+    }
+
+    let mut buses = BUSES.lock();
+    let Some(dev) = buses.get_mut(bus as usize) else {
+        for req in group {
+            mark_request(*req, false);
+        }
+        return;
+    };
+
+    if dev.execute_merged_group(group).is_ok() {
+        for req in group {
+            mark_request(*req, true);
+        }
+        return;
+    }
+
+    // Failure containment: process each request independently.
+    for req_ptr in group {
+        let single = core::slice::from_ref(req_ptr);
+        let ok = dev.execute_merged_group(single).is_ok();
+        mark_request(*req_ptr, ok);
+    }
+}
+
+fn drain_channel_queue(bus: u8) {
+    while let Some(group) = dequeue_merged_group(bus) {
+        process_group(bus, &group);
+    }
 }
 
 struct IdeController {
@@ -826,6 +1350,12 @@ pub fn init() {
     }
 
     let time = crate::driver::timer::pit::uptime();
+    println!(
+        "\x1b[93m[{:.6}]\x1b[0m ATA-DMA mode queue={} dma_buf={}KiB",
+        time,
+        if ENABLE_COOP_QUEUE { "on" } else { "off" },
+        DMA_BUF_BYTES / 1024
+    );
     let drives = list();
     for drive in drives {
         println!(
@@ -912,11 +1442,41 @@ pub fn list() -> Vec<Drive> {
 }
 
 pub fn read(bus: u8, drive: u8, block: u32, buf: &mut [u8]) -> Result<(), ()> {
-    let mut buses = BUSES.lock();
-    buses[bus as usize].read_dma(drive, block, buf)
+    if buf.is_empty() || (buf.len() % BLOCK_SIZE) != 0 {
+        return Err(());
+    }
+    if !ENABLE_COOP_QUEUE {
+        let mut buses = BUSES.lock();
+        let Some(dev) = buses.get_mut(bus as usize) else {
+            return Err(());
+        };
+        return dev.read_dma_resilient(drive, block, buf);
+    }
+
+    let mut req = AtaIoRequest::new_read(drive, block, buf);
+    let became_owner = enqueue_request(bus, &mut req)?;
+    if became_owner {
+        drain_channel_queue(bus);
+    }
+    wait_for_request(&req)
 }
 
 pub fn write(bus: u8, drive: u8, block: u32, buf: &[u8]) -> Result<(), ()> {
-    let mut buses = BUSES.lock();
-    buses[bus as usize].write_dma(drive, block, buf)
+    if buf.is_empty() || (buf.len() % BLOCK_SIZE) != 0 {
+        return Err(());
+    }
+    if !ENABLE_COOP_QUEUE {
+        let mut buses = BUSES.lock();
+        let Some(dev) = buses.get_mut(bus as usize) else {
+            return Err(());
+        };
+        return dev.write_dma_resilient(drive, block, buf);
+    }
+
+    let mut req = AtaIoRequest::new_write(drive, block, buf);
+    let became_owner = enqueue_request(bus, &mut req)?;
+    if became_owner {
+        drain_channel_queue(bus);
+    }
+    wait_for_request(&req)
 }
