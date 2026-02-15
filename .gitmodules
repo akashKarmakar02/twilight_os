@@ -1,3 +1,6 @@
 [submodule "userspace/apps/tcc"]
 	path = userspace/apps/tcc
 	url = https://github.com/akashKarmakar02/tinycc
+[submodule "userspace/vi"]
+	path = userspace/vi
+	url = https://github.com/akashKarmakar02/viless.git
