@@ -1343,6 +1343,158 @@ impl TwilightFs {
         Ok(None)
     }
 
+    fn split_parent_and_name(path: &str) -> Result<(String, String), FsError> {
+        let mut components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        if components.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+
+        let name = components.pop().unwrap();
+        if name.is_empty() || name == "." || name == ".." {
+            return Err(FsError::InvalidPath);
+        }
+
+        let parent = if components.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", components.join("/"))
+        };
+
+        Ok((parent, name.to_string()))
+    }
+
+    fn find_dir_entry_slot(
+        &mut self,
+        parent_inode_num: u32,
+        name: &str,
+    ) -> Result<Option<(u32, usize, u32)>, FsError> {
+        let parent_inode = self.read_inode(parent_inode_num).map_err(|_| InvalidInode)?;
+        let dir_entry_size = size_of::<DirEntry>();
+        let entries_per_block = self.superblock.block_size as usize / dir_entry_size;
+        let mut buffer = [0u8; FS_BLOCK_SIZE];
+
+        for i in 0..Inode::DIRECT_SLOT_COUNT {
+            let zone = parent_inode.direct_slot_get(i);
+            if zone == 0 {
+                continue;
+            }
+
+            read_tfs_block(self.device.lock().as_mut(), zone, &mut buffer)?;
+
+            for i in 0..entries_per_block {
+                let offset = i * dir_entry_size;
+                let entry =
+                    unsafe { core::ptr::read(buffer[offset..].as_ptr() as *const DirEntry) };
+
+                if entry.inode == 0 {
+                    continue;
+                }
+
+                let entry_name = core::str::from_utf8(&entry.name)
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                if entry_name == name {
+                    return Ok(Some((zone, offset, entry.inode)));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn clear_dir_entry_slot(
+        &mut self,
+        parent_inode_num: u32,
+        zone: u32,
+        offset: usize,
+    ) -> Result<(), FsError> {
+        let mut parent_inode = self.read_inode(parent_inode_num).map_err(|_| InvalidInode)?;
+        let dir_entry_size = size_of::<DirEntry>();
+        let mut buf = [0u8; FS_BLOCK_SIZE];
+        read_tfs_block(self.device.lock().as_mut(), zone, &mut buf)?;
+        if offset + dir_entry_size > buf.len() {
+            return Err(FsError::InvalidPath);
+        }
+        buf[offset..offset + dir_entry_size].fill(0);
+        write_tfs_block(self.device.lock().as_mut(), zone, &buf)?;
+        if parent_inode.size >= dir_entry_size as u64 {
+            parent_inode.size -= dir_entry_size as u64;
+            self.write_inode(parent_inode_num, &parent_inode)
+                .map_err(|_| InvalidInode)?;
+        }
+        Ok(())
+    }
+
+    pub fn rename_entry(&mut self, old_path: &str, new_path: &str) -> Result<(), FsError> {
+        if old_path == new_path {
+            return Ok(());
+        }
+
+        let (old_parent_path, old_name) = Self::split_parent_and_name(old_path)?;
+        let (new_parent_path, new_name) = Self::split_parent_and_name(new_path)?;
+
+        if old_name.len() > 60 || new_name.len() > 60 {
+            return Err(FileNameTooLong);
+        }
+
+        let old_parent_inode_num = self.resolve_path(old_parent_path.as_str())?;
+        let new_parent_inode_num = self.resolve_path(new_parent_path.as_str())?;
+
+        let old_parent_inode = self.read_inode(old_parent_inode_num).map_err(|_| InvalidInode)?;
+        if !old_parent_inode.is_dir() {
+            return Err(FsError::InvalidPath);
+        }
+        let new_parent_inode = self.read_inode(new_parent_inode_num).map_err(|_| InvalidInode)?;
+        if !new_parent_inode.is_dir() {
+            return Err(FsError::InvalidPath);
+        }
+
+        let Some((old_zone, old_offset, old_inode_num)) =
+            self.find_dir_entry_slot(old_parent_inode_num, old_name.as_str())?
+        else {
+            return Err(FileNotFound);
+        };
+
+        let old_inode = self.read_inode(old_inode_num).map_err(|_| InvalidInode)?;
+        if old_inode.is_dir() && old_parent_inode_num != new_parent_inode_num {
+            return Err(FsError::NotSupported);
+        }
+
+        if let Some((_zone, _offset, existing_inode_num)) =
+            self.find_dir_entry_slot(new_parent_inode_num, new_name.as_str())?
+        {
+            if existing_inode_num != old_inode_num {
+                let existing_inode = self.read_inode(existing_inode_num).map_err(|_| InvalidInode)?;
+                if existing_inode.is_dir() {
+                    return Err(FileAlreadyExists);
+                }
+                self.remove_entry(new_path)?;
+            } else if old_parent_inode_num == new_parent_inode_num {
+                return Ok(());
+            } else {
+                return Err(FileAlreadyExists);
+            }
+        }
+
+        let mut name_bytes = [0u8; 60];
+        name_bytes[..new_name.len()].copy_from_slice(new_name.as_bytes());
+
+        if old_parent_inode_num == new_parent_inode_num {
+            let mut buf = [0u8; FS_BLOCK_SIZE];
+            read_tfs_block(self.device.lock().as_mut(), old_zone, &mut buf)?;
+            buf[old_offset + size_of::<u32>()..old_offset + size_of::<DirEntry>()]
+                .copy_from_slice(&name_bytes);
+            write_tfs_block(self.device.lock().as_mut(), old_zone, &buf)?;
+        } else {
+            self.create_dir_entry(new_parent_inode_num, new_name.as_str(), old_inode_num)
+                .map_err(|_| InvalidInode)?;
+            self.clear_dir_entry_slot(old_parent_inode_num, old_zone, old_offset)?;
+        }
+
+        self.shared.invalidate_all();
+        Ok(())
+    }
+
     pub fn read_file(&mut self, inode_num: u32) -> Result<Vec<u8>, &'static str> {
         let inode = self.read_inode(inode_num)?;
 
@@ -1659,6 +1811,10 @@ impl FileSystem for TwilightFs {
         }
     }
 
+    fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), ()> {
+        self.rename_entry(old_path, new_path).map_err(|_| ())
+    }
+
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
         if let Ok(inode) = self.resolve_path(path) {
             match self.list_dir(inode) {
@@ -1786,6 +1942,11 @@ impl FileSystem for TfsProxy {
     fn rmdir(&mut self, path: &str) -> Result<(), ()> {
         #[allow(static_mut_refs)]
         unsafe { MFS.get_unchecked().lock() }.rmdir(path)
+    }
+
+    fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.rename(old_path, new_path)
     }
 
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {

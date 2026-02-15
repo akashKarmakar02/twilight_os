@@ -1832,6 +1832,67 @@ pub fn chdir(path_ptr: usize) -> i64 {
     }
 }
 
+pub fn rename(old_path_ptr: usize, new_path_ptr: usize) -> i64 {
+    let Ok(old_path) = copy_cstr_from_user(UserPtr(old_path_ptr as *const u8), 4096) else {
+        return -(EFAULT as i64);
+    };
+    let Ok(new_path) = copy_cstr_from_user(UserPtr(new_path_ptr as *const u8), 4096) else {
+        return -(EFAULT as i64);
+    };
+
+    if old_path.is_empty() || new_path.is_empty() {
+        return -(ENOENT as i64);
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    let old_full_path = if old_path.starts_with('/') {
+        normalize_path(old_path.as_str())
+    } else {
+        normalize_path(&join_paths(process.pwd.as_str(), old_path.as_str()))
+    };
+    let new_full_path = if new_path.starts_with('/') {
+        normalize_path(new_path.as_str())
+    } else {
+        normalize_path(&join_paths(process.pwd.as_str(), new_path.as_str()))
+    };
+
+    if old_full_path == "/" || new_full_path == "/" {
+        return -(EINVAL as i64);
+    }
+    if old_full_path == new_full_path {
+        return 0;
+    }
+    if let Err(e) = check_encrypted_home_access(&old_full_path) {
+        return e;
+    }
+    if let Err(e) = check_encrypted_home_access(&new_full_path) {
+        return e;
+    }
+
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if fs.open(old_full_path.as_str()).is_err() {
+        return -(ENOENT as i64);
+    }
+
+    if fs.rename(old_full_path.as_str(), new_full_path.as_str()).is_ok() {
+        0
+    } else {
+        -(EIO as i64)
+    }
+}
+
 pub fn unlink(path_ptr: usize) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(path_ptr as *const u8), 4096) else {
         return -1;

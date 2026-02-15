@@ -202,6 +202,9 @@ pub trait FileSystem: Send + Sync + 'static {
     fn open(&mut self, path: &str) -> Result<VfsNode, ()>;
     fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()>;
     fn rmdir(&mut self, path: &str) -> Result<(), ()>;
+    fn rename(&mut self, _old_path: &str, _new_path: &str) -> Result<(), ()> {
+        Err(())
+    }
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()>;
     fn rm(&mut self, path: &str) -> Result<(), ()>;
     fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()>;
@@ -271,6 +274,16 @@ impl Vfs {
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
         guard.rmdir(rel)
+    }
+
+    pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), ()> {
+        let (old_rel, old_fs) = self.route(old_path).ok_or(())?;
+        let (new_rel, new_fs) = self.route(new_path).ok_or(())?;
+        if !Arc::ptr_eq(old_fs, new_fs) {
+            return Err(());
+        }
+        let mut guard = old_fs.lock();
+        guard.rename(old_rel, new_rel)
     }
 
     pub fn ls(&self, path: &str) -> Result<Vec<Metadata>, ()> {

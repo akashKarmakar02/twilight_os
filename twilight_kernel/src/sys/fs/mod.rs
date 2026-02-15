@@ -72,6 +72,10 @@ impl FileSystem for OffsetScopedTwilightFs {
         self.run_with_offset(|fs| fs.rmdir(path))
     }
 
+    fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), ()> {
+        self.run_with_offset(|fs| fs.rename(old_path, new_path))
+    }
+
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
         self.run_with_offset(|fs| fs.ls(path))
     }
