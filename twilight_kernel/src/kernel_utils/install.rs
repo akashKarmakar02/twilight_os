@@ -310,7 +310,7 @@ fn ensure_partition_table(
         0
     };
 
-    // v0.1 boot sector needs to be atleast 50MB (14/02/26)
+    // v0.1 boot sector needs to be atleast 50MB (14/02/26) so we will shrink this to 50mb so save space (TODO: we need to fix this in future)
     if boot_sectors > (50 * 1024 * 2) {
         entries[boot_slot.unwrap()].sectors = 50 * 1024 * 2;
         if mbr_manager.write_entries(&entries).is_err() {
@@ -324,7 +324,7 @@ fn ensure_partition_table(
                 boot_entry_clone.lba_start,
                 boot_sectors as u32,
             ));
-            println!("MBR: resized boot parition to 50mb");
+            println!("MBR: resized boot partition to 50mb");
         }
     }
 
