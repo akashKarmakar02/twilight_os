@@ -60,6 +60,13 @@ impl<'a> Mbr<'a> {
         }
     }
 
+    pub fn create_new(_buf: [u8; 512], dev: &'a mut (dyn BlockDeviceIO + 'static)) -> Self {
+        let mut fresh = [0u8; 512];
+        fresh[510] = MBR_SIGNATURE[0];
+        fresh[511] = MBR_SIGNATURE[1];
+        Self { buf: fresh, dev }
+    }
+
     pub fn get_entries(&self) -> [PartitionEntry; 4] {
         let mut entries = [PartitionEntry::empty(); 4];
 

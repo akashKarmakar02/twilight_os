@@ -282,8 +282,9 @@ fn ensure_partition_table(
         return Err("failed to read partition table");
     }
 
-    let Some(mut mbr_manager) = Mbr::new(mbr, device) else {
-        return Err("failed to read partition table");
+    let mut mbr_manager = match Mbr::new(mbr, device) {
+        Some(m) => m,
+        None => Mbr::create_new(mbr, device),
     };
 
     let mut entries = mbr_manager.get_entries();
@@ -306,10 +307,7 @@ fn ensure_partition_table(
     let mut boot_sectors = if let Some(entry) = boot_entry {
         entry.sectors as u64
     } else {
-        align_up_u64(
-            (RESERVED_BOOT_MB as u64 * 1024 * 1024) / partition::SECTOR_SIZE as u64,
-            PARTITION_ALIGNMENT_SECTORS as u64,
-        )
+        0
     };
 
     // v0.1 boot sector needs to be atleast 50MB (14/02/26)
