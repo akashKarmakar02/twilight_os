@@ -1,14 +1,20 @@
 use crate::driver::keyboard::keyboard_interrupt;
+use crate::driver::timer::pit::monotonic_ns_u64;
 use crate::driver::usb::interfaces::{
     HostController, InterruptTransfer, UsbDevice, UsbDriver, UsbError,
 };
 use crate::sys::memory::phys::PhysBuf;
 use alloc::boxed::Box;
 
+const KEY_REPEAT_INITIAL_DELAY_NS: u64 = 300_000_000; // 300ms
+const KEY_REPEAT_PERIOD_NS: u64 = 33_000_000; // ~30Hz
+
 pub struct KeyboardDriver {
     data_buf: Option<PhysBuf>,
     interrupt_handle: Option<Box<dyn InterruptTransfer>>,
     last_report: [u8; 8],
+    repeat_usage: u8,
+    repeat_next_ns: u64,
 }
 
 impl KeyboardDriver {
@@ -17,6 +23,8 @@ impl KeyboardDriver {
             data_buf: None,
             interrupt_handle: None,
             last_report: [0u8; 8],
+            repeat_usage: 0,
+            repeat_next_ns: 0,
         }
     }
 
@@ -73,6 +81,25 @@ impl KeyboardDriver {
             off += len;
         }
         None
+    }
+}
+
+#[inline]
+fn is_extended_usage(usage: u8) -> bool {
+    (0x49..=0x52).contains(&usage)
+}
+
+#[inline]
+fn send_usage_event(usage: u8, pressed: bool) {
+    if let Some(sc) = hid_usage_to_scancode(usage) {
+        if is_extended_usage(usage) {
+            keyboard_interrupt(0xE0);
+        }
+        if pressed {
+            keyboard_interrupt(sc);
+        } else {
+            keyboard_interrupt(sc | 0x80);
+        }
     }
 }
 
@@ -160,6 +187,7 @@ impl UsbDriver for KeyboardDriver {
                 // Byte 2..7: Keycodes (Usage ID)
                 let modifiers = report[0];
                 let keys = &report[2..8];
+                let now_ns = monotonic_ns_u64();
 
                 // Handle Modifiers
                 let old_modifiers = self.last_report[0];
@@ -205,31 +233,39 @@ impl UsbDriver for KeyboardDriver {
                 // Handle Keys
                 // Naive O(N^2) diff is fine for N=6
                 let old_keys = &self.last_report[2..8];
+                let mut newest_pressed: Option<u8> = None;
 
                 // Check for Released Keys (in Old but not New)
                 for &k in old_keys.iter() {
                     if k != 0 && !keys.contains(&k) {
-                        if let Some(sc) = hid_usage_to_scancode(k) {
-                            // Extended keys check
-                            if (0x49..=0x52).contains(&k) {
-                                keyboard_interrupt(0xE0);
-                            }
-                            // Break code: scancode + 0x80
-                            keyboard_interrupt(sc | 0x80);
+                        send_usage_event(k, false);
+                        if self.repeat_usage == k {
+                            self.repeat_usage = 0;
+                            self.repeat_next_ns = 0;
                         }
                     }
                 }
 
                 // Check for Pressed Keys (in New but not Old)
                 for &k in keys.iter() {
-                    if k != 0 && (k == 42 || !old_keys.contains(&k)) {
-                        if let Some(sc) = hid_usage_to_scancode(k) {
-                            // Extended keys check
-                            if (0x49..=0x52).contains(&k) {
-                                keyboard_interrupt(0xE0);
-                            }
-                            keyboard_interrupt(sc);
-                        }
+                    if k != 0 && !old_keys.contains(&k) {
+                        send_usage_event(k, true);
+                        newest_pressed = Some(k);
+                    }
+                }
+
+                // USB HID does not emit typematic repeats by itself. Synthesize repeats
+                // while key state remains unchanged so held keys behave like PS/2.
+                if let Some(k) = newest_pressed {
+                    self.repeat_usage = k;
+                    self.repeat_next_ns = now_ns.saturating_add(KEY_REPEAT_INITIAL_DELAY_NS);
+                } else if self.repeat_usage != 0 {
+                    if !keys.contains(&self.repeat_usage) {
+                        self.repeat_usage = 0;
+                        self.repeat_next_ns = 0;
+                    } else if now_ns >= self.repeat_next_ns {
+                        send_usage_event(self.repeat_usage, true);
+                        self.repeat_next_ns = now_ns.saturating_add(KEY_REPEAT_PERIOD_NS);
                     }
                 }
 
@@ -239,6 +275,9 @@ impl UsbDriver for KeyboardDriver {
                 let is_err = keys.iter().any(|&k| k == 0x01);
                 if !is_err {
                     self.last_report.copy_from_slice(&report);
+                } else {
+                    self.repeat_usage = 0;
+                    self.repeat_next_ns = 0;
                 }
             }
         }
