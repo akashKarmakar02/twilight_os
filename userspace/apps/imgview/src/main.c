@@ -3,14 +3,19 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <setjmp.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <termios.h>
 #include <unistd.h>
 #include <jpeglib.h>
 
@@ -18,6 +23,9 @@
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOGET_FSCREENINFO 0x4602
 #define FBIOPAN_DISPLAY 0x4606
+#define HUD_HEIGHT 28u
+#define VIEW_MARGIN_BOTTOM 10u
+#define HUD_BG_COLOR 0xFF0B1019
 
 struct fb_var_screeninfo {
     uint32_t xres;
@@ -61,6 +69,81 @@ typedef struct {
     uint32_t height;
     uint32_t *pixels; // ARGB8888
 } Image;
+
+enum viewer_key {
+    VK_BACKSPACE = 127,
+    VK_ARROW_LEFT = 1000,
+    VK_ARROW_RIGHT,
+    VK_ARROW_UP,
+    VK_ARROW_DOWN,
+};
+
+static struct termios g_orig_termios;
+static int g_raw_enabled = 0;
+
+static void disable_raw_mode(void) {
+    if (!g_raw_enabled) {
+        return;
+    }
+    (void)tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig_termios);
+    g_raw_enabled = 0;
+}
+
+static int enable_raw_mode(void) {
+    if (tcgetattr(STDIN_FILENO, &g_orig_termios) == -1) {
+        return -1;
+    }
+    struct termios raw = g_orig_termios;
+    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw.c_oflag &= ~(OPOST);
+    raw.c_cflag |= (CS8);
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 1;
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
+        return -1;
+    }
+    g_raw_enabled = 1;
+    atexit(disable_raw_mode);
+    return 0;
+}
+
+static int read_key(void) {
+    int nread;
+    unsigned char c;
+    while ((nread = (int)read(STDIN_FILENO, &c, 1)) != 1) {
+        if (nread == -1 && errno != EAGAIN) {
+            return -1;
+        }
+    }
+
+    if (c == '\x1b') {
+        unsigned char seq[3];
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+
+        if (seq[0] == '[') {
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+                if (seq[2] == '~') {
+                    switch (seq[1]) {
+                        case '1': return VK_ARROW_LEFT;
+                        case '4': return VK_ARROW_RIGHT;
+                    }
+                }
+            } else {
+                switch (seq[1]) {
+                    case 'A': return VK_ARROW_UP;
+                    case 'B': return VK_ARROW_DOWN;
+                    case 'C': return VK_ARROW_RIGHT;
+                    case 'D': return VK_ARROW_LEFT;
+                }
+            }
+        }
+        return '\x1b';
+    }
+    return c;
+}
 
 static void free_image(Image *img) {
     if (img && img->pixels) {
@@ -343,10 +426,168 @@ static int load_image(const char *path, Image *out) {
     return -1;
 }
 
+static int is_supported_image_name(const char *name) {
+    return ends_with_ci(name, ".bmp") || ends_with_ci(name, ".jpg") ||
+           ends_with_ci(name, ".jpeg");
+}
+
+static int cmp_name_ci(const void *a, const void *b) {
+    const char *const *pa = (const char *const *)a;
+    const char *const *pb = (const char *const *)b;
+    return strcasecmp(*pa, *pb);
+}
+
+static void free_image_list(char **items, size_t count) {
+    if (!items) return;
+    for (size_t i = 0; i < count; ++i) {
+        free(items[i]);
+    }
+    free(items);
+}
+
+// Returns:
+//   0 on success with at least one image
+//   1 if directory scan succeeded but no images were found
+//  -1 on error
+static int collect_images_from_cwd(char ***out_items, size_t *out_count) {
+    *out_items = NULL;
+    *out_count = 0;
+
+    DIR *dir = opendir(".");
+    if (!dir) {
+        perror("imgview: opendir");
+        return -1;
+    }
+
+    size_t cap = 0;
+    size_t len = 0;
+    char **items = NULL;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        if (name[0] == '.') {
+            continue;
+        }
+        if (!is_supported_image_name(name)) {
+            continue;
+        }
+
+        struct stat st;
+        if (stat(name, &st) != 0 || !S_ISREG(st.st_mode)) {
+            continue;
+        }
+
+        if (len == cap) {
+            size_t next_cap = cap ? cap * 2 : 8;
+            char **next = realloc(items, next_cap * sizeof(*next));
+            if (!next) {
+                closedir(dir);
+                free_image_list(items, len);
+                return -1;
+            }
+            items = next;
+            cap = next_cap;
+        }
+
+        items[len] = strdup(name);
+        if (!items[len]) {
+            closedir(dir);
+            free_image_list(items, len);
+            return -1;
+        }
+        len++;
+    }
+
+    closedir(dir);
+
+    if (len == 0) {
+        free(items);
+        return 1;
+    }
+
+    qsort(items, len, sizeof(*items), cmp_name_ci);
+    *out_items = items;
+    *out_count = len;
+    return 0;
+}
+
 static void clear_frame(uint32_t *fb, size_t count, uint32_t color) {
     for (size_t i = 0; i < count; ++i) {
         fb[i] = color;
     }
+}
+
+static void draw_rect(uint32_t *fb, uint32_t fb_w, uint32_t fb_h,
+                      uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+    if (x >= fb_w || y >= fb_h || w == 0 || h == 0) {
+        return;
+    }
+    uint32_t x2 = x + w;
+    uint32_t y2 = y + h;
+    if (x2 > fb_w) x2 = fb_w;
+    if (y2 > fb_h) y2 = fb_h;
+
+    for (uint32_t yy = y; yy < y2; ++yy) {
+        uint32_t *row = fb + (size_t)yy * fb_w;
+        for (uint32_t xx = x; xx < x2; ++xx) {
+            row[xx] = color;
+        }
+    }
+}
+
+static void draw_hud_background(uint32_t *fb, uint32_t fb_w, uint32_t fb_h) {
+    draw_rect(fb, fb_w, fb_h, 0, 0, fb_w, HUD_HEIGHT, HUD_BG_COLOR);
+}
+
+static void print_status_line(const char *fmt, ...) {
+    char line[640];
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    char out[700];
+    int n = snprintf(out, sizeof(out), "\x1b[H\x1b[2K%s", line);
+    if (n > 0) {
+        (void)write(STDOUT_FILENO, out, (size_t)n);
+    }
+}
+
+static void draw_loading_state(uint32_t *fb, uint32_t fb_w, uint32_t fb_h,
+                               size_t index, size_t total) {
+    clear_frame(fb, (size_t)fb_w * fb_h, 0xFF111723);
+    draw_hud_background(fb, fb_w, fb_h);
+
+    uint32_t bar_w = fb_w / 2;
+    if (bar_w < 64) bar_w = fb_w > 8 ? fb_w - 8 : fb_w;
+    uint32_t bar_h = 18;
+    uint32_t bar_x = (fb_w - bar_w) / 2;
+    uint32_t view_h = (fb_h > (HUD_HEIGHT + VIEW_MARGIN_BOTTOM))
+                          ? (fb_h - HUD_HEIGHT - VIEW_MARGIN_BOTTOM)
+                          : 1;
+    uint32_t bar_y = HUD_HEIGHT + ((view_h > bar_h) ? (view_h - bar_h) / 2 : 0);
+
+    draw_rect(fb, fb_w, fb_h, bar_x, bar_y, bar_w, bar_h, 0xFF2B3548);
+    if (total > 0) {
+        uint32_t fill_w = (uint32_t)(((index + 1) * (size_t)bar_w) / total);
+        if (fill_w > bar_w) fill_w = bar_w;
+        draw_rect(fb, fb_w, fb_h, bar_x, bar_y, fill_w, bar_h, 0xFF63D2FF);
+    }
+}
+
+static void draw_error_state(uint32_t *fb, uint32_t fb_w, uint32_t fb_h) {
+    clear_frame(fb, (size_t)fb_w * fb_h, 0xFF2B1111);
+    draw_hud_background(fb, fb_w, fb_h);
+    uint32_t box_w = fb_w / 3;
+    uint32_t box_h = fb_h / 12;
+    if (box_w < 40) box_w = fb_w > 8 ? fb_w - 8 : fb_w;
+    if (box_h < 8) box_h = 8;
+    uint32_t view_h = (fb_h > (HUD_HEIGHT + VIEW_MARGIN_BOTTOM))
+                          ? (fb_h - HUD_HEIGHT - VIEW_MARGIN_BOTTOM)
+                          : 1;
+    uint32_t box_y = HUD_HEIGHT + ((view_h > box_h) ? (view_h - box_h) / 2 : 0);
+    draw_rect(fb, fb_w, fb_h, (fb_w - box_w) / 2, box_y, box_w, box_h, 0xFFB03030);
 }
 
 // Nearest-neighbor scale + center
@@ -354,13 +595,18 @@ static void blit_image(uint32_t *fb, uint32_t fb_w, uint32_t fb_h,
                        const Image *img, uint32_t bg) {
     size_t total = (size_t)fb_w * (size_t)fb_h;
     clear_frame(fb, total, bg);
+    draw_hud_background(fb, fb_w, fb_h);
 
     if (img->width == 0 || img->height == 0) {
         return;
     }
 
+    uint32_t view_y = HUD_HEIGHT;
+    uint32_t view_h =
+        (fb_h > (HUD_HEIGHT + VIEW_MARGIN_BOTTOM)) ? (fb_h - HUD_HEIGHT - VIEW_MARGIN_BOTTOM) : 1;
+
     float sx = (float)fb_w / (float)img->width;
-    float sy = (float)fb_h / (float)img->height;
+    float sy = (float)view_h / (float)img->height;
     float scale = sx < sy ? sx : sy;
     if (scale <= 0.0f) {
         scale = 1.0f;
@@ -371,10 +617,10 @@ static void blit_image(uint32_t *fb, uint32_t fb_w, uint32_t fb_h,
     if (disp_w == 0) disp_w = 1;
     if (disp_h == 0) disp_h = 1;
     if (disp_w > fb_w) disp_w = fb_w;
-    if (disp_h > fb_h) disp_h = fb_h;
+    if (disp_h > view_h) disp_h = view_h;
 
     uint32_t off_x = (fb_w - disp_w) / 2;
-    uint32_t off_y = (fb_h - disp_h) / 2;
+    uint32_t off_y = view_y + ((view_h - disp_h) / 2);
 
     for (uint32_t dy = 0; dy < disp_h; ++dy) {
         uint32_t src_y = (uint32_t)(((uint64_t)dy * img->height) / disp_h);
@@ -389,20 +635,30 @@ static void blit_image(uint32_t *fb, uint32_t fb_w, uint32_t fb_h,
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <image.(bmp|jpg|jpeg)>\n", argv[0]);
-        return 1;
-    }
+    const char **image_paths = NULL;
+    size_t image_count = 0;
+    char **owned_paths = NULL;
 
-    Image img;
-    if (load_image(argv[1], &img) != 0) {
-        return 1;
+    if (argc < 2) {
+        size_t found_count = 0;
+        int rc = collect_images_from_cwd(&owned_paths, &found_count);
+        if (rc < 0) {
+            return 1;
+        }
+        if (rc > 0 || found_count == 0) {
+            fprintf(stderr, "imgview: no .bmp/.jpg/.jpeg images found in current directory\n");
+            return 1;
+        }
+        image_paths = (const char **)owned_paths;
+        image_count = found_count;
+    } else {
+        image_paths = (const char **)&argv[1];
+        image_count = (size_t)(argc - 1);
     }
 
     int fb = open(FB_PATH, O_RDWR);
     if (fb < 0) {
         perror("open /dev/fb0");
-        free_image(&img);
         return 1;
     }
 
@@ -412,7 +668,6 @@ int main(int argc, char **argv) {
         ioctl(fb, FBIOGET_FSCREENINFO, &fix) < 0) {
         perror("ioctl framebuffer");
         close(fb);
-        free_image(&img);
         return 1;
     }
 
@@ -423,7 +678,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "fb: reported buffer smaller than expected (%zu < %zu)\n",
                 frame_bytes, expected);
         close(fb);
-        free_image(&img);
         return 1;
     }
 
@@ -432,17 +686,82 @@ int main(int argc, char **argv) {
     if (frame == MAP_FAILED) {
         perror("mmap framebuffer");
         close(fb);
-        free_image(&img);
         return 1;
     }
 
-    blit_image(frame, var.xres, var.yres, &img, 0xFF0F1116);
-    if (ioctl(fb, FBIOPAN_DISPLAY, NULL) < 0) {
-        perror("fb flush");
+    if (enable_raw_mode() != 0) {
+        perror("termios");
+        munmap(frame, frame_bytes);
+        close(fb);
+        return 1;
     }
 
+    size_t current = 0;
+    ssize_t loaded_index = -1;
+    int running = 1;
+    Image img = {0};
+
+    print_status_line("imgview: %zu image(s). Use <- / -> to switch, q or Esc to quit.",
+                      image_count);
+
+    while (running) {
+        if ((ssize_t)current != loaded_index) {
+            draw_loading_state(frame, var.xres, var.yres, current, image_count);
+            (void)ioctl(fb, FBIOPAN_DISPLAY, NULL);
+
+            const char *path = image_paths[current];
+            print_status_line("imgview: loading [%zu/%zu] %s ...",
+                              current + 1, image_count, path);
+
+            free_image(&img);
+            if (load_image(path, &img) == 0) {
+                blit_image(frame, var.xres, var.yres, &img, 0xFF0F1116);
+                loaded_index = (ssize_t)current;
+                print_status_line("imgview: showing [%zu/%zu] %s",
+                                  current + 1, image_count, path);
+            } else {
+                draw_error_state(frame, var.xres, var.yres);
+                loaded_index = -1;
+                print_status_line("imgview: failed to load [%zu/%zu] %s",
+                                  current + 1, image_count, path);
+            }
+            (void)ioctl(fb, FBIOPAN_DISPLAY, NULL);
+        }
+
+        int key = read_key();
+        if (key < 0) {
+            continue;
+        }
+        switch (key) {
+            case 'q':
+            case 'Q':
+            case '\x1b':
+                running = 0;
+                break;
+            case 'l':
+            case 'L':
+            case 'n':
+            case 'N':
+            case VK_ARROW_RIGHT:
+                current = (current + 1) % image_count;
+                break;
+            case 'h':
+            case 'H':
+            case 'p':
+            case 'P':
+            case VK_ARROW_LEFT:
+                current = (current + image_count - 1) % image_count;
+                break;
+            default:
+                break;
+        }
+    }
+
+    (void)write(STDOUT_FILENO, "\x1b[H\x1b[2K\x1b[2;1H", 13);
+    disable_raw_mode();
     munmap(frame, frame_bytes);
     close(fb);
     free_image(&img);
+    free_image_list(owned_paths, image_count);
     return 0;
 }
