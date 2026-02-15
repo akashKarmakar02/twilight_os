@@ -160,7 +160,7 @@ impl UsbDriver for MouseDriver {
 
         // 5. Schedule Interrupt
         let buf_len = core::cmp::min(64usize, core::cmp::max(1usize, ep_mps as usize));
-        let buf = PhysBuf::new(buf_len);
+        let buf = PhysBuf::new_dma32(buf_len);
         let phys_addr = buf.addr();
         let interval = core::cmp::max(1u8, ep_interval);
 

@@ -9,7 +9,7 @@ use crate::driver::usb::xhci::xhci_regs::{
 };
 use crate::log;
 use crate::sys::memory::phys::PhysBuf;
-use crate::sys::memory::{PAGE_SIZE, map_mmio, phys_mem_offset};
+use crate::sys::memory::{PAGE_SIZE, map_mmio, memory_size, phys_mem_offset};
 use crate::sys::pci::DeviceConfig;
 use alloc::boxed::Box;
 use alloc::format;
@@ -71,6 +71,7 @@ const TRB_TYPE_CMD_COMPLETION_EVENT: u32 = 33;
 
 const TRB_CYCLE: u32 = 1 << 0;
 const TRB_TC: u32 = 1 << 1; // Toggle Cycle (Link TRB)
+const TRB_CHAIN: u32 = 1 << 4;
 const TRB_IOC: u32 = 1 << 5;
 const TRB_IDT: u32 = 1 << 6; // Immediate Data (Setup Stage)
 const TRB_DIR_IN: u32 = 1 << 16; // Data/Status Stage
@@ -91,6 +92,7 @@ struct ErstEntry {
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
+#[allow(dead_code)]
 struct XhciSlotState {
     port_index: usize,
     speed_psiv: u8,
@@ -156,6 +158,29 @@ fn endpoint_id(ep_num: u8, dir_in: bool) -> u8 {
     }
 }
 
+fn dma_range_in_ram(addr: u64, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let mem = memory_size() as u64;
+    let end = addr.saturating_add(len as u64).saturating_sub(1);
+    end < mem
+}
+
+fn log_dma_range(tag: &str, addr: u64, len: usize) {
+    let end = addr.saturating_add(len as u64).saturating_sub(1);
+    let mem = memory_size() as u64;
+    log!(
+        "XHCI DMA: {} phys={:#x}..{:#x} len={:#x} mem={:#x} in_ram={}",
+        tag,
+        addr,
+        end,
+        len,
+        mem,
+        dma_range_in_ram(addr, len)
+    );
+}
+
 #[allow(dead_code)]
 pub struct XhciDriver {
     controller_id: usize,
@@ -181,7 +206,7 @@ pub struct XhciDriver {
     /* HCSPARAMS2 */
     isochronous_scheduling_threshold: u8,
     erst_max: u8,
-    max_scratchpad_buffers: u8,
+    max_scratchpad_buffers: u16,
 
     /* HCCPARAMS1 */
     addr_64bit_capable: bool,
@@ -246,6 +271,18 @@ impl PciDeviceDriver for XhciDriver {
             }
             self.parse_capability_registers();
         }
+        log!(
+            "XHCI: caps ports={} slots={} intrs={} ac64={} csz={} ppc={} scratchpads={} mem={:#x} phys_off={:#x}",
+            self.max_ports,
+            self.max_device_slots,
+            self.max_interrupters,
+            self.addr_64bit_capable,
+            self.context_64byte,
+            self.port_power_control,
+            self.max_scratchpad_buffers,
+            memory_size(),
+            phys_mem_offset()
+        );
         self.port_status_cache = vec![0; self.max_ports as usize];
         self.init_dma_structs();
         self.enable_port_power();
@@ -381,7 +418,9 @@ impl XhciDriver {
         let hcs2 = unsafe { read_volatile(&(*cap).hcsparams2) };
         self.isochronous_scheduling_threshold = (hcs2 & 0xF) as u8;
         self.erst_max = ((hcs2 >> 4) & 0xF) as u8;
-        self.max_scratchpad_buffers = ((hcs2 >> 27) & 0x1F) as u8;
+        let sp_hi = ((hcs2 >> 21) & 0x1F) as u16;
+        let sp_lo = ((hcs2 >> 27) & 0x1F) as u16;
+        self.max_scratchpad_buffers = (sp_hi << 5) | sp_lo;
 
         /* HCCPARAMS1 */
         let hcc1 = unsafe { read_volatile(&(*cap).hccparams1) };
@@ -392,6 +431,14 @@ impl XhciDriver {
         self.port_indicators = (hcc1 & (1 << 4)) != 0;
         self.light_reset_capable = (hcc1 & (1 << 5)) != 0;
         self.extended_capabilities_offset = ((hcc1 >> 16) & 0xFFFF) << 2;
+
+        crate::log!(
+            "XHCI: raw caps hcs1={:#x} hcs2={:#x} hcc1={:#x} (csz_bit={})",
+            hcs1,
+            hcs2,
+            hcc1,
+            if self.context_64byte { 1 } else { 0 }
+        );
     }
 
     unsafe fn init_mmio(&mut self) -> bool {
@@ -431,7 +478,7 @@ impl XhciDriver {
 
     fn init_dma_structs(&mut self) {
         let dcbaa_entries = (self.max_device_slots as usize).saturating_add(1).max(1);
-        let mut dcbaa = PhysBuf::new(dcbaa_entries * size_of::<u64>());
+        let mut dcbaa = PhysBuf::new_dma32(dcbaa_entries * size_of::<u64>());
         dcbaa.fill(0);
 
         let scratchpad_count = self.max_scratchpad_buffers as usize;
@@ -439,11 +486,11 @@ impl XhciDriver {
         let mut scratchpad_buffers: Vec<PhysBuf> = Vec::new();
 
         if scratchpad_count > 0 {
-            let mut array = PhysBuf::new(scratchpad_count * size_of::<u64>());
+            let mut array = PhysBuf::new_dma32(scratchpad_count * size_of::<u64>());
             array.fill(0);
 
             for _ in 0..scratchpad_count {
-                scratchpad_buffers.push(PhysBuf::new(PAGE_SIZE));
+                scratchpad_buffers.push(PhysBuf::new_dma32(PAGE_SIZE));
             }
 
             unsafe {
@@ -466,11 +513,31 @@ impl XhciDriver {
         self.scratchpad_buffers = scratchpad_buffers;
 
         if let Some(ref dcbaa) = self.dcbaa {
+            log_dma_range("DCBAA", dcbaa.addr(), dcbaa.len());
+            if let Some(ref sp_array) = self.scratchpad_array {
+                log_dma_range("Scratchpad Array", sp_array.addr(), sp_array.len());
+            }
+            for (i, sp) in self.scratchpad_buffers.iter().enumerate().take(4) {
+                log_dma_range("Scratchpad Buffer", sp.addr(), sp.len());
+                if i == 3 && self.scratchpad_buffers.len() > 4 {
+                    log!(
+                        "XHCI DMA: {} additional scratchpad buffers omitted from log",
+                        self.scratchpad_buffers.len() - 4
+                    );
+                }
+            }
             unsafe {
-                write_volatile(&mut (*self.op_regs.as_ptr()).dcbaap, dcbaa.addr());
+                let dcbaap = dcbaa.addr();
+                write_volatile(&mut (*self.op_regs.as_ptr()).dcbaap, dcbaap);
                 write_volatile(
                     &mut (*self.op_regs.as_ptr()).config,
                     self.max_device_slots as u32,
+                );
+                let dcbaap_rb = read_volatile(&(*self.op_regs.as_ptr()).dcbaap);
+                log!(
+                    "XHCI: DCBAAP programmed={:#x} readback={:#x}",
+                    dcbaap,
+                    dcbaap_rb
                 );
             }
         }
@@ -532,8 +599,8 @@ impl XhciDriver {
         }
 
         unsafe {
-            // Start (we poll, so disable interrupts)
-            let cmd = USBCMD_RUN_STOP;
+            // Start (enable interrupts)
+            let cmd = USBCMD_RUN_STOP | USBCMD_INTE;
             write_volatile(&mut (*self.op_regs.as_ptr()).usbcmd, cmd);
         }
 
@@ -551,7 +618,7 @@ impl XhciDriver {
     fn init_rings(&mut self) -> bool {
         // Command ring (TRB array + link TRB at end)
         let trb_count = 256usize;
-        let mut cmd_ring = PhysBuf::new(trb_count * size_of::<Trb>());
+        let mut cmd_ring = PhysBuf::new_dma32(trb_count * size_of::<Trb>());
         cmd_ring.fill(0);
         let trbs = unsafe {
             core::slice::from_raw_parts_mut(cmd_ring.virt_addr().as_mut_ptr::<Trb>(), trb_count)
@@ -563,6 +630,7 @@ impl XhciDriver {
             d2: 0,
             d3: TRB_CYCLE | TRB_TC | (TRB_TYPE_LINK << TRB_TYPE_SHIFT),
         };
+        log_dma_range("Command Ring", ring_phys, trb_count * size_of::<Trb>());
 
         self.cmd_cycle = true;
         self.cmd_index = 0;
@@ -576,14 +644,15 @@ impl XhciDriver {
 
         // Event ring + ERST
         let event_count = 256usize;
-        let mut event_ring = PhysBuf::new(event_count * size_of::<Trb>());
+        let mut event_ring = PhysBuf::new_dma32(event_count * size_of::<Trb>());
         event_ring.fill(0);
         self.event_cycle = true;
         self.event_index = 0;
         let event_phys = event_ring.addr();
         self.event_ring = Some(event_ring);
+        log_dma_range("Event Ring", event_phys, event_count * size_of::<Trb>());
 
-        let mut erst = PhysBuf::new(size_of::<ErstEntry>());
+        let mut erst = PhysBuf::new_dma32(size_of::<ErstEntry>());
         erst.fill(0);
         unsafe {
             let e = erst.virt_addr().as_mut_ptr::<ErstEntry>();
@@ -593,6 +662,7 @@ impl XhciDriver {
         }
         let erst_phys = erst.addr();
         self.erst = Some(erst);
+        log_dma_range("ERST", erst_phys, size_of::<ErstEntry>());
 
         unsafe {
             let ir0 = &mut (*self.rt_regs.as_ptr()).ir[0];
@@ -600,8 +670,17 @@ impl XhciDriver {
             write_volatile(&mut ir0.erstsz, 1);
             write_volatile(&mut ir0.erstba, erst_phys & !0x3F);
             write_volatile(&mut ir0.erdp, event_phys & !0xF);
-            // IMAN.IE = bit1
-            write_volatile(&mut ir0.iman, 1 << 1);
+            // IMAN.IE = bit1, IP = bit0 (W1C)
+            write_volatile(&mut ir0.iman, (1 << 1) | (1 << 0));
+            let crcr_rb = read_volatile(&(*self.op_regs.as_ptr()).crcr);
+            let erstba_rb = read_volatile(&ir0.erstba);
+            let erdp_rb = read_volatile(&ir0.erdp);
+            log!(
+                "XHCI: CRCR readback={:#x} ERSTBA readback={:#x} ERDP readback={:#x}",
+                crcr_rb,
+                erstba_rb,
+                erdp_rb
+            );
         }
         true
     }
@@ -681,6 +760,22 @@ impl XhciDriver {
                 let cc = (trb.d2 >> 24) & 0xFF;
                 let slot_id = (trb.d3 >> 24) as u8;
                 let ep_id = ((trb.d3 >> 16) & 0x1F) as u8;
+                let trb_ptr = ((trb.d1 as u64) << 32) | (trb.d0 as u64);
+                crate::log!(
+                    "XHCI: Transfer Event cc={} slot={} epid={} trb_ptr={:#x}",
+                    cc,
+                    slot_id,
+                    ep_id,
+                    trb_ptr
+                );
+                if cc != 1 {
+                    crate::log!(
+                        "XHCI: Transfer Event error cc={} slot={} epid={}",
+                        cc,
+                        slot_id,
+                        ep_id
+                    );
+                }
 
                 if let Some(Some(st)) = self.slots.get(slot_id as usize) {
                     if let Some(Some(status)) = st.ep_transfers.get(ep_id as usize) {
@@ -765,30 +860,96 @@ impl XhciDriver {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 
-    fn wait_for_xfer(&mut self, slot_id: u8, ep_id: u8, timeout_ms: u64) -> Result<(), UsbError> {
-        self.last_xfer_seen = false;
-        let mut waited_us = 0u64;
-        let timeout_us = timeout_ms * 1000;
-        loop {
-            self.poll_event_ring();
-            if self.last_xfer_seen && self.last_xfer_slot == slot_id && self.last_xfer_epid == ep_id
-            {
-                if self.last_xfer_cc == 1 {
-                    return Ok(());
-                }
-                return Err(UsbError::UsbError(self.last_xfer_cc as u32));
+    pub fn handle_interrupt(&mut self) -> bool {
+        unsafe {
+            let sts = read_volatile(&(*self.op_regs.as_ptr()).usbsts);
+            let ir = &mut (*self.rt_regs.as_ptr()).ir[0];
+            let iman = read_volatile(&ir.iman);
+
+            // crate::serial_println!("XHCI INT: sts={:#x} iman={:#x}", sts, iman);
+
+            let mut handled = false;
+
+            if (sts & (1 << 3)) != 0 {
+                // EINT set
+                write_volatile(&mut (*self.op_regs.as_ptr()).usbsts, 1 << 3); // W1C
+                handled = true;
             }
-            if waited_us >= timeout_us {
-                crate::log!(
-                    "XHCI: wait_for_xfer timeout (slot {}, ep {})",
-                    slot_id,
-                    ep_id
-                );
-                return Err(UsbError::Timeout);
+
+            // Also check/clear IP bit in IMAN (bit 0)
+            if (iman & 1) != 0 {
+                write_volatile(&mut ir.iman, iman | 1); // W1C
+                handled = true;
             }
-            sleep_us(50);
-            waited_us += 50;
+
+            // Check Port Change Detect (bit 2)
+            if (sts & (1 << 2)) != 0 {
+                write_volatile(&mut (*self.op_regs.as_ptr()).usbsts, 1 << 2); // W1C
+                self.poll_ports();
+                handled = true;
+            }
+
+            if handled {
+                self.poll_event_ring();
+                return true;
+            }
         }
+        false
+    }
+
+    fn wait_for_xfer(&mut self, slot_id: u8, ep_id: u8, timeout_ms: u64) -> Result<(), UsbError> {
+        let ep_status = self
+            .slots
+            .get(slot_id as usize)
+            .and_then(|s| s.as_ref())
+            .and_then(|st| st.ep_transfers.get(ep_id as usize))
+            .and_then(|e| e.as_ref())
+            .cloned();
+
+        self.last_xfer_seen = false;
+        let timeout_us = timeout_ms * 1000;
+
+        // We must suppress interrupts during synchronous wait to avoid deadlock
+        // (ISR trying to take lock we already hold).
+        let result = x86_64::instructions::interrupts::without_interrupts(|| {
+            let mut waited_us = 0u64;
+            loop {
+                // Check if done
+                if let Some(status) = ep_status.as_ref() {
+                    let cc = status.swap(0, Ordering::SeqCst);
+                    if cc != 0 {
+                        if cc == 1 {
+                            return Ok(());
+                        }
+                        return Err(UsbError::UsbError(cc as u32));
+                    }
+                }
+                if self.last_xfer_seen
+                    && self.last_xfer_slot == slot_id
+                    && self.last_xfer_epid == ep_id
+                {
+                    if self.last_xfer_cc == 1 {
+                        return Ok(());
+                    }
+                    return Err(UsbError::UsbError(self.last_xfer_cc as u32));
+                }
+
+                if waited_us >= timeout_us {
+                    crate::log!(
+                        "XHCI: wait_for_xfer timeout (slot {}, ep {})",
+                        slot_id,
+                        ep_id
+                    );
+                    return Err(UsbError::Timeout);
+                }
+
+                // Poll manually (ISR is disabled)
+                self.poll_event_ring();
+                crate::driver::timer::pit::sleep_ns(10);
+                waited_us += 10;
+            }
+        });
+        result
     }
 
     fn control_transfer_ep0(
@@ -803,6 +964,12 @@ impl XhciDriver {
         };
 
         let ep_id = 1u8; // EP0
+        if st.ep_transfers[ep_id as usize].is_none() {
+            st.ep_transfers[ep_id as usize] = Some(Arc::new(AtomicU8::new(0)));
+        }
+        if let Some(status) = st.ep_transfers[ep_id as usize].as_ref() {
+            status.store(0, Ordering::SeqCst);
+        }
 
         let setup_d0 = u32::from_le_bytes([setup[0], setup[1], setup[2], setup[3]]);
         let setup_d1 = u32::from_le_bytes([setup[4], setup[5], setup[6], setup[7]]);
@@ -826,13 +993,13 @@ impl XhciDriver {
                 d0: setup_d0,
                 d1: setup_d1,
                 d2: 8,
-                d3: TRB_IDT | (TRB_TYPE_SETUP_STAGE << TRB_TYPE_SHIFT) | (trt << 16),
+                d3: TRB_IDT | TRB_CHAIN | (TRB_TYPE_SETUP_STAGE << TRB_TYPE_SHIFT) | (trt << 16),
             },
         );
 
         // Data stage
         let mut data_buf = if data_len > 0 {
-            Some(PhysBuf::new(data_len))
+            Some(PhysBuf::new_dma32(data_len))
         } else {
             None
         };
@@ -857,6 +1024,7 @@ impl XhciDriver {
                     d1: (p >> 32) as u32,
                     d2: (data_len as u32),
                     d3: (TRB_TYPE_DATA_STAGE << TRB_TYPE_SHIFT)
+                        | TRB_CHAIN
                         | if data_in { TRB_DIR_IN } else { 0 },
                 },
             );
@@ -879,8 +1047,8 @@ impl XhciDriver {
         );
 
         self.ring_doorbell_slot_ep(slot_id, ep_id);
-        // Increase timeout to 3000ms
-        self.wait_for_xfer(slot_id, ep_id, 3000)?;
+        // Increase timeout to 10000ms
+        self.wait_for_xfer(slot_id, ep_id, 10000)?;
 
         if data_in {
             if let (Some(src), Some(dst)) = (data_buf, data) {
@@ -943,7 +1111,8 @@ impl XhciDriver {
                 // Interface descriptor
                 if let Some((ifnum, class, subclass, protocol)) = current_if {
                     if class == 0x08 && subclass == 0x06 && protocol == 0x50 {
-                        if let (Some((bin, bin_mps)), Some((bout, bout_mps))) = (bulk_in, bulk_out) {
+                        if let (Some((bin, bin_mps)), Some((bout, bout_mps))) = (bulk_in, bulk_out)
+                        {
                             return Some(MscInterfaceInfo {
                                 config_value,
                                 interface: ifnum,
@@ -1083,8 +1252,8 @@ impl XhciDriver {
     fn configure_interrupt_in_endpoint(
         &mut self,
         slot_id: u8,
-        port_index: usize,
-        speed_psiv: u8,
+        _port_index: usize,
+        _speed_psiv: u8,
         ep_num: u8,
         max_packet: u8,
         interval: u8,
@@ -1093,23 +1262,34 @@ impl XhciDriver {
         let ep_id = endpoint_id(ep_num, true);
         let ctx_sz = self.context_size();
         let bytes = ctx_sz * (ep_id as usize + 2); // ICC + contexts up to ep_id
-        let mut input_ctx = PhysBuf::new(bytes);
+        let mut input_ctx = PhysBuf::new_dma32(bytes);
         input_ctx.fill(0);
         let ic_ptr = input_ctx.virt_addr().as_mut_ptr::<u8>();
 
         unsafe {
+            // Input Control Context: Add Context Flags
             *(ic_ptr.add(4) as *mut u32) = (1u32 << 0) | (1u32 << (ep_id as u32));
         }
 
-        // Slot context
+        // Copy existing output Slot/Endpoint contexts into the Input Context payload area.
+        if let Some(Some(st)) = self.slots.get(slot_id as usize) {
+            unsafe {
+                let out_ctx_src = st.dev_ctx.virt_addr().as_ptr::<u8>();
+                let in_ctx_dst = ic_ptr.add(ctx_sz); // input slot context begins after ICC
+                let copy_len = ctx_sz * (ep_id as usize + 1); // slot + EP contexts up to ep_id
+                core::ptr::copy_nonoverlapping(out_ctx_src, in_ctx_dst, copy_len);
+            }
+        }
+
+        // Slot context (preserve existing bits and only raise Context Entries if needed)
         let slot_off = ctx_sz;
         unsafe {
             let sc = ic_ptr.add(slot_off) as *mut u32;
-            let speed_field = (speed_psiv as u32 & 0xF) << 20;
-            let entries = (ep_id as u32) << 27;
-            sc.add(0).write_volatile(speed_field | entries);
-            sc.add(1)
-                .write_volatile(((port_index as u32 + 1) & 0xFF) << 16);
+            let mut sc_d0 = sc.add(0).read_volatile();
+            let current_entries = (sc_d0 >> 27) & 0x1F;
+            let wanted_entries = core::cmp::max(current_entries, ep_id as u32);
+            sc_d0 = (sc_d0 & !(0x1F << 27)) | (wanted_entries << 27);
+            sc.add(0).write_volatile(sc_d0);
         }
 
         // Endpoint context
@@ -1119,12 +1299,21 @@ impl XhciDriver {
             let ec = ic_ptr.add(ep_off) as *mut u32;
             ec.add(0).write_volatile(interval_field);
             let ep_type = EP_TYPE_INTR_IN << 3; // interrupt IN
+            let cerr = 3u32 << 1; // Recommended for non-isoch endpoints
             ec.add(1)
-                .write_volatile(ep_type | ((max_packet as u32) << 16));
+                .write_volatile(cerr | ep_type | ((max_packet as u32) << 16));
             // dword2/3: TR Dequeue Pointer (16-byte aligned), DCS is bit0 of the low dword
             ec.add(2).write_volatile(((ring_phys as u32) & !0xF) | 1);
             ec.add(3).write_volatile((ring_phys >> 32) as u32);
             ec.add(4).write_volatile(8);
+            let in_d2 = ec.add(2).read_volatile();
+            let in_d3 = ec.add(3).read_volatile();
+            log!(
+                "XHCI: intr input ep{} ctx tr_deq_lo={:#x} tr_deq_hi={:#x}",
+                ep_id,
+                in_d2,
+                in_d3
+            );
         }
 
         self.last_cmd_seen = false;
@@ -1140,6 +1329,24 @@ impl XhciDriver {
             self.poll_event_ring();
             if self.last_cmd_seen {
                 if self.last_cmd_cc == 1 {
+                    if let Some(Some(st)) = self.slots.get(slot_id as usize) {
+                        unsafe {
+                            let dev_ptr = st.dev_ctx.virt_addr().as_mut_ptr::<u8>();
+                            let ep_ctx = dev_ptr.add(ctx_sz * ep_id as usize) as *mut u32;
+                            let out_d0 = ep_ctx.add(0).read_volatile();
+                            let out_d1 = ep_ctx.add(1).read_volatile();
+                            let out_d2 = ep_ctx.add(2).read_volatile();
+                            let out_d3 = ep_ctx.add(3).read_volatile();
+                            log!(
+                                "XHCI: intr output ep{} ctx d0={:#x} d1={:#x} tr_deq={:#x}:{:#x}",
+                                ep_id,
+                                out_d0,
+                                out_d1,
+                                out_d2,
+                                out_d3
+                            );
+                        }
+                    }
                     return Ok(());
                 }
                 return Err(UsbError::UsbError(self.last_cmd_cc as u32));
@@ -1151,7 +1358,7 @@ impl XhciDriver {
 
     fn create_transfer_ring(&self) -> XhciEndpointRing {
         let trb_count = 256usize;
-        let mut ring = PhysBuf::new(trb_count * size_of::<Trb>());
+        let mut ring = PhysBuf::new_dma32(trb_count * size_of::<Trb>());
         ring.fill(0);
         let ring_phys = ring.addr();
         unsafe {
@@ -1174,8 +1381,8 @@ impl XhciDriver {
     fn configure_bulk_endpoint(
         &mut self,
         slot_id: u8,
-        port_index: usize,
-        speed_psiv: u8,
+        _port_index: usize,
+        _speed_psiv: u8,
         ep_num: u8,
         dir_in: bool,
         max_packet: u16,
@@ -1184,23 +1391,34 @@ impl XhciDriver {
         let ep_id = endpoint_id(ep_num, dir_in);
         let ctx_sz = self.context_size();
         let bytes = ctx_sz * (ep_id as usize + 2); // ICC + contexts up to ep_id
-        let mut input_ctx = PhysBuf::new(bytes);
+        let mut input_ctx = PhysBuf::new_dma32(bytes);
         input_ctx.fill(0);
         let ic_ptr = input_ctx.virt_addr().as_mut_ptr::<u8>();
 
         unsafe {
+            // Input Control Context: Add Context Flags
             *(ic_ptr.add(4) as *mut u32) = (1u32 << 0) | (1u32 << (ep_id as u32));
         }
 
-        // Slot context
+        // Copy existing output Slot/Endpoint contexts into the Input Context payload area.
+        if let Some(Some(st)) = self.slots.get(slot_id as usize) {
+            unsafe {
+                let out_ctx_src = st.dev_ctx.virt_addr().as_ptr::<u8>();
+                let in_ctx_dst = ic_ptr.add(ctx_sz); // input slot context begins after ICC
+                let copy_len = ctx_sz * (ep_id as usize + 1); // slot + EP contexts up to ep_id
+                core::ptr::copy_nonoverlapping(out_ctx_src, in_ctx_dst, copy_len);
+            }
+        }
+
+        // Slot context (preserve existing bits and only raise Context Entries if needed)
         let slot_off = ctx_sz;
         unsafe {
             let sc = ic_ptr.add(slot_off) as *mut u32;
-            let speed_field = (speed_psiv as u32 & 0xF) << 20;
-            let entries = (ep_id as u32) << 27;
-            sc.add(0).write_volatile(speed_field | entries);
-            sc.add(1)
-                .write_volatile(((port_index as u32 + 1) & 0xFF) << 16);
+            let mut sc_d0 = sc.add(0).read_volatile();
+            let current_entries = (sc_d0 >> 27) & 0x1F;
+            let wanted_entries = core::cmp::max(current_entries, ep_id as u32);
+            sc_d0 = (sc_d0 & !(0x1F << 27)) | (wanted_entries << 27);
+            sc.add(0).write_volatile(sc_d0);
         }
 
         // Endpoint context
@@ -1213,8 +1431,9 @@ impl XhciDriver {
             } else {
                 EP_TYPE_BULK_OUT
             } << 3;
+            let cerr = 3u32 << 1; // Recommended for non-isoch endpoints
             ec.add(1)
-                .write_volatile(ep_type | ((max_packet as u32) << 16));
+                .write_volatile(cerr | ep_type | ((max_packet as u32) << 16));
             ec.add(2).write_volatile(((ring_phys as u32) & !0xF) | 1);
             ec.add(3).write_volatile((ring_phys >> 32) as u32);
             ec.add(4).write_volatile(8);
@@ -1271,19 +1490,16 @@ impl XhciDriver {
         let ring_state = self.create_transfer_ring();
         let ring_phys = ring_state.ring.addr();
         self.configure_bulk_endpoint(
-            slot_id,
-            port_index,
-            speed_psiv,
-            ep_num,
-            dir_in,
-            max_packet,
-            ring_phys,
+            slot_id, port_index, speed_psiv, ep_num, dir_in, max_packet, ring_phys,
         )?;
 
         let Some(Some(st)) = self.slots.get_mut(slot_id as usize) else {
             return Err(UsbError::InvalidDevice);
         };
         st.ep_rings[ep_id as usize] = Some(ring_state);
+        if st.ep_transfers[ep_id as usize].is_none() {
+            st.ep_transfers[ep_id as usize] = Some(Arc::new(AtomicU8::new(0)));
+        }
 
         Ok(ep_id)
     }
@@ -1304,10 +1520,13 @@ impl XhciDriver {
         let ring_state = st.ep_rings[ep_id as usize]
             .as_mut()
             .ok_or(UsbError::InvalidDevice)?;
+        if let Some(status) = st.ep_transfers[ep_id as usize].as_ref() {
+            status.store(0, Ordering::SeqCst);
+        }
 
         let data_len = data.len();
         let mut data_buf = if data_len > 0 {
-            Some(PhysBuf::new(data_len))
+            Some(PhysBuf::new_dma32(data_len))
         } else {
             None
         };
@@ -1347,7 +1566,7 @@ impl XhciDriver {
         }
 
         self.ring_doorbell_slot_ep(slot_id, ep_id);
-        self.wait_for_xfer(slot_id, ep_id, 3000)?;
+        self.wait_for_xfer(slot_id, ep_id, 10000)?;
 
         if dir_in {
             if let Some(src) = data_buf {
@@ -1445,7 +1664,11 @@ impl XhciDriver {
         let info = Self::parse_msc_interface(&cfg).ok_or(UsbError::InvalidDevice)?;
 
         // Set Configuration
-        let cfg_val = if info.config_value == 0 { 1 } else { info.config_value };
+        let cfg_val = if info.config_value == 0 {
+            1
+        } else {
+            info.config_value
+        };
         let setup = [0x00, 0x09, cfg_val, 0x00, 0x00, 0x00, 0x00, 0x00];
         self.control_transfer_ep0(slot_id, setup, None, false)?;
 
@@ -1579,13 +1802,7 @@ impl XhciDriver {
         if data_len > 0 {
             if let Some(buf) = data {
                 if data_in {
-                    self.bulk_transfer(
-                        info.slot_id,
-                        info.bulk_in_ep,
-                        true,
-                        info.bulk_in_mps,
-                        buf,
-                    )?;
+                    self.bulk_transfer(info.slot_id, info.bulk_in_ep, true, info.bulk_in_mps, buf)?;
                 } else {
                     self.bulk_transfer(
                         info.slot_id,
@@ -1771,16 +1988,20 @@ impl XhciDriver {
             ((portsc & PORTSC_SPEED_MASK) >> PORTSC_SPEED_SHIFT) as u8
         };
 
-        // Device context: slot ctx + ep0 ctx (2 contexts)
-        let dev_ctx_bytes = ctx_sz * 2;
-        let mut dev_ctx = PhysBuf::new(dev_ctx_bytes);
+        // Device context in memory must hold Slot Context + endpoint contexts.
+        // Allocate the full context array (index 0..31) to avoid leaving higher
+        // endpoint contexts as uninitialized garbage when endpoints are later configured.
+        let dev_ctx_bytes = ctx_sz * 32;
+        let mut dev_ctx = PhysBuf::new_dma32(dev_ctx_bytes);
         dev_ctx.fill(0);
+        log_dma_range("Address Device Context", dev_ctx.addr(), dev_ctx_bytes);
 
         // EP0 transfer ring
         let trb_count = 256usize;
-        let mut ep0_ring = PhysBuf::new(trb_count * size_of::<Trb>());
+        let mut ep0_ring = PhysBuf::new_dma32(trb_count * size_of::<Trb>());
         ep0_ring.fill(0);
         let ep0_phys = ep0_ring.addr();
+        log_dma_range("Address EP0 Ring", ep0_phys, trb_count * size_of::<Trb>());
         let ep0_trbs = unsafe {
             core::slice::from_raw_parts_mut(ep0_ring.virt_addr().as_mut_ptr::<Trb>(), trb_count)
         };
@@ -1795,13 +2016,14 @@ impl XhciDriver {
 
         // Input context: ICC + slot ctx + ep0 ctx (3 contexts)
         let input_ctx_bytes = ctx_sz * 3;
-        let mut input_ctx = PhysBuf::new(input_ctx_bytes);
+        let mut input_ctx = PhysBuf::new_dma32(input_ctx_bytes);
         input_ctx.fill(0);
+        log_dma_range("Address Input Context", input_ctx.addr(), input_ctx_bytes);
         let ic_ptr = input_ctx.virt_addr().as_mut_ptr::<u8>();
 
         // Input Control Context
         unsafe {
-            // drop flags @ 0, add flags @ 4
+            // Input Control Context: Add Context Flags for Slot + EP0
             *(ic_ptr.add(4) as *mut u32) = 0b11;
         }
 
@@ -1828,12 +2050,20 @@ impl XhciDriver {
             let ec = ic_ptr.add(ep0_off) as *mut u32;
             // dword1: EP type in bits 3..5, max packet in bits 16..31
             let ep_type = EP_TYPE_CONTROL << 3; // control
-            ec.add(1).write_volatile(ep_type | (max_packet << 16));
+            let cerr = 3u32 << 1; // Recommended for non-isoch endpoints
+            ec.add(1).write_volatile(cerr | ep_type | (max_packet << 16));
             // dword2/3: TR Dequeue Pointer (16-byte aligned), DCS is bit0 of the low dword
             ec.add(2).write_volatile(((ep0_phys as u32) & !0xF) | 1);
             ec.add(3).write_volatile((ep0_phys >> 32) as u32);
             // dword4: average TRB length
             ec.add(4).write_volatile(8);
+            let ep0_d2 = ec.add(2).read_volatile();
+            let ep0_d3 = ec.add(3).read_volatile();
+            log!(
+                "XHCI: address input ep0 ctx tr_deq_lo={:#x} tr_deq_hi={:#x}",
+                ep0_d2,
+                ep0_d3
+            );
         }
 
         // Write DCBAA[slot] = dev_ctx phys
@@ -1872,6 +2102,31 @@ impl XhciDriver {
                         ep_rings: (0..32).map(|_| None).collect(),
                         ep_transfers: vec![None; 32],
                     });
+                    if let Some(Some(st)) = self.slots.get_mut(slot_id as usize) {
+                        st.ep_transfers[1] = Some(Arc::new(AtomicU8::new(0)));
+                        unsafe {
+                            let dev_ptr = st.dev_ctx.virt_addr().as_mut_ptr::<u8>();
+                            let ep0_ctx_ptr_csz = dev_ptr.add(ctx_sz) as *mut u32;
+                            let out_d2 = ep0_ctx_ptr_csz.add(2).read_volatile();
+                            let out_d3 = ep0_ctx_ptr_csz.add(3).read_volatile();
+                            let ep0_ctx_ptr_32 = dev_ptr.add(32) as *mut u32;
+                            let out32_d2 = ep0_ctx_ptr_32.add(2).read_volatile();
+                            let out32_d3 = ep0_ctx_ptr_32.add(3).read_volatile();
+                            let ep0_ctx_ptr_64 = dev_ptr.add(64) as *mut u32;
+                            let out64_d2 = ep0_ctx_ptr_64.add(2).read_volatile();
+                            let out64_d3 = ep0_ctx_ptr_64.add(3).read_volatile();
+                            log!(
+                                "XHCI: address output ep0 ctx(csz={}) tr_deq_lo={:#x} tr_deq_hi={:#x} alt32={:#x}:{:#x} alt64={:#x}:{:#x}",
+                                ctx_sz,
+                                out_d2,
+                                out_d3,
+                                out32_d2,
+                                out32_d3,
+                                out64_d2,
+                                out64_d3
+                            );
+                        }
+                    }
                 }
                 return ok;
             }
@@ -2053,9 +2308,11 @@ impl HostController for XhciDriver {
 
         // Transfer ring
         let trb_count = 256usize;
-        let mut ring = PhysBuf::new(trb_count * size_of::<Trb>());
+        let mut ring = PhysBuf::new_dma32(trb_count * size_of::<Trb>());
         ring.fill(0);
         let ring_phys = ring.addr();
+        log_dma_range("Interrupt Endpoint Ring", ring_phys, trb_count * size_of::<Trb>());
+        log_dma_range("Interrupt Endpoint Buffer", buf_phys, len);
         unsafe {
             let trbs =
                 core::slice::from_raw_parts_mut(ring.virt_addr().as_mut_ptr::<Trb>(), trb_count);
@@ -2136,6 +2393,16 @@ impl XhciInterruptInTransfer {
         if self.ring_index >= last {
             self.ring_index = 0;
             self.ring_cycle = !self.ring_cycle;
+            unsafe {
+                let trbs = core::slice::from_raw_parts_mut(
+                    self.ring.virt_addr().as_mut_ptr::<Trb>(),
+                    trb_count,
+                );
+                // Keep Link TRB cycle in sync with the producer cycle on wrap.
+                trbs[last].d3 =
+                    (trbs[last].d3 & !TRB_CYCLE) | if self.ring_cycle { TRB_CYCLE } else { 0 };
+            }
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         }
         trb.d3 = (trb.d3 & !TRB_CYCLE) | if self.ring_cycle { TRB_CYCLE } else { 0 };
 

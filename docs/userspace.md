@@ -17,7 +17,7 @@ Executables are copied into `rootfs/bin` and marked executable.
 
 ## Bundled apps
 `userspace/apps` currently contains:
-`bc`, `bmp`, `cat`, `chip8`, `clear`, `cp`, `curl`, `date`, `diskbench`, `echo`, `grep`, `head`, `hello`, `httpd`, `init`, `iotest`, `logind`, `ls`, `mkdir`, `poweroff`, `reboot`, `rm`, `rmdir`, `sleep`, `tail`, `tcc`, `touch`, `tpy`, `tsh`, `twifetch`, `uname`, `vi`, `wc`.
+`bc`, `imgview`, `cat`, `chip8`, `clear`, `cp`, `curl`, `date`, `diskbench`, `echo`, `grep`, `head`, `hello`, `httpd`, `init`, `iotest`, `logind`, `ls`, `mkdir`, `poweroff`, `reboot`, `rm`, `rmdir`, `sleep`, `tail`, `tcc`, `touch`, `tpy`, `tsh`, `twifetch`, `uname`, `vi`, `wc`.
 
 ## Adding a new app
 1. Create a new directory under `userspace/apps/<name>`.

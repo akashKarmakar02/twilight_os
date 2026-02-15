@@ -7,7 +7,7 @@ pub mod superblock;
 
 use crate::driver;
 use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
-use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO};
+use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO, UsbBlkHandle};
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::fs::MFS;
 use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
@@ -142,6 +142,24 @@ fn detect_twilight_partition_blk_dev() -> Option<PartitionEntry> {
     #[allow(static_mut_refs)]
     let dev = unsafe { BLOCK_DEVICE.as_mut().unwrap() };
     if dev.read(0, &mut sector).is_err() {
+        return None;
+    }
+
+    if !partition::has_signature(&sector) {
+        return None;
+    }
+
+    let entries = partition::decode_entries(&sector);
+    partition::find_entry(&entries, TWILIGHT_PARTITION_TYPE)
+}
+
+fn detect_twilight_partition_on_device(device: &mut dyn BlockDeviceIO) -> Option<PartitionEntry> {
+    if device.block_size() != 512 {
+        return None;
+    }
+
+    let mut sector = [0u8; 512];
+    if device.read(0, &mut sector).is_err() {
         return None;
     }
 
@@ -463,6 +481,129 @@ impl TwilightFs {
             device: device_arc,
             shared: Arc::new(TwilightFsShared::new()),
         })
+    }
+
+    pub fn check_usb_blk() -> Result<Self, &'static str> {
+        let mut device = UsbBlkHandle;
+        if device.block_size() == 0 || device.block_count() == 0 {
+            return Err("USB block device not available");
+        }
+
+        if let Some(entry) = detect_twilight_partition_on_device(&mut device) {
+            set_fs_block_offset_lba(entry.lba_start);
+        } else {
+            set_fs_block_offset_bytes(0);
+        }
+
+        let mut buf = [0u8; FS_BLOCK_SIZE];
+        if read_tfs_block(&mut device, 0, &mut buf).is_err() {
+            return Err("Failed to read USB Twilight FS superblock");
+        }
+
+        let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
+        if !sb.is_valid() {
+            return Err("Invalid Twilight FS superblock magic on USB");
+        }
+
+        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(UsbBlkHandle);
+        let device_arc = Arc::new(Mutex::new(device_box));
+
+        let mut fs = TwilightFs {
+            superblock: sb,
+            device: device_arc,
+            shared: Arc::new(TwilightFsShared::new()),
+        };
+        fs.validate_root_inode()?;
+        Ok(fs)
+    }
+
+    pub fn format_usb_blk() -> Result<Self, &'static str> {
+        let mut device = UsbBlkHandle;
+        let block_size = device.block_size();
+        let block_count = device.block_count();
+        if block_size == 0 || block_count == 0 {
+            return Err("USB block device not available");
+        }
+
+        let total_sectors = block_count.min(u32::MAX as usize) as u32;
+        if total_sectors <= 4096 {
+            return Err("USB device too small");
+        }
+
+        let (partition_start_lba, partition_sectors) = if block_size == 512 {
+            if let Some(entry) = detect_twilight_partition_on_device(&mut device) {
+                (entry.lba_start, entry.sectors)
+            } else {
+                let mut mbr = [0u8; 512];
+                let start_lba = 2048u32;
+                if total_sectors <= start_lba + 2048 {
+                    return Err("USB device too small for partitioned TwilightFS");
+                }
+                let sectors = total_sectors - start_lba;
+                let mut entries = [PartitionEntry::empty(); 4];
+                entries[0] =
+                    PartitionEntry::new(0x00, TWILIGHT_PARTITION_TYPE, start_lba, sectors);
+                partition::encode_entries(&mut mbr, &entries);
+                partition::write_signature(&mut mbr);
+                device
+                    .write(0, &mbr)
+                    .map_err(|_| "Failed to write USB partition table")?;
+                (start_lba, sectors)
+            }
+        } else {
+            (0, total_sectors)
+        };
+
+        set_fs_block_offset_lba(partition_start_lba);
+        let sb = Superblock::write(&mut device, partition_sectors)?;
+        let zero = [0u8; FS_BLOCK_SIZE];
+        for block in 1..sb.first_data_zone {
+            write_tfs_block(&mut device, block, &zero)
+                .map_err(|_| "Failed to clear USB TwilightFS metadata")?;
+        }
+
+        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(UsbBlkHandle);
+        let device_arc = Arc::new(Mutex::new(device_box));
+
+        let mut fs = TwilightFs {
+            superblock: sb,
+            device: device_arc,
+            shared: Arc::new(TwilightFsShared::new()),
+        };
+        fs.initialize_root_inode()?;
+        Ok(fs)
+    }
+
+    fn validate_root_inode(&mut self) -> Result<(), &'static str> {
+        let root_inode = self
+            .read_inode(1)
+            .map_err(|_| "Failed to read USB TwilightFS root inode")?;
+        if !root_inode.is_dir() {
+            return Err("USB TwilightFS root inode is invalid");
+        }
+        Ok(())
+    }
+
+    fn initialize_root_inode(&mut self) -> Result<(), &'static str> {
+        let root_inode_num = self
+            .allocate_inode()
+            .map_err(|_| "Failed to allocate USB TwilightFS root inode")?
+            + 1;
+        if root_inode_num != 1 {
+            return Err("Unexpected USB TwilightFS root inode number");
+        }
+
+        let root_zone = self
+            .allocate_zone()
+            .map_err(|_| "Failed to allocate USB TwilightFS root directory zone")?;
+        let mut root_inode = Inode::new_dir(CMOS::new().unix_time(), 0o755);
+        root_inode.direct_slot_set(0, root_zone);
+
+        self.write_inode(root_inode_num, &root_inode)?;
+        self.create_dir_entry(root_inode_num, ".", root_inode_num)?;
+        self.create_dir_entry(root_inode_num, "..", root_inode_num)?;
+        self.shared.invalidate_all();
+        Ok(())
     }
 
     pub fn allocate_zone(&mut self) -> Result<u32, TfsError> {

@@ -162,6 +162,7 @@ impl AtaPerfCounters {
     }
 }
 
+#[allow(dead_code)]
 struct PerfLogState {
     last_ts: f64,
     last_read_bytes: u64,

@@ -1,20 +1,20 @@
 #![allow(unused_assignments)]
 use crate::driver::disk::BlockDeviceIO;
 use crate::driver::timer::cmos::CMOS;
-use crate::{print, serial_println};
 use crate::println;
 use crate::sys::fs::init;
+use crate::sys::fs::mbr::Mbr;
 use crate::sys::fs::partition::{self};
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::sys::fs::twilight_fs::inode::Inode;
 use crate::sys::fs::vfs::VFS;
+use crate::{print, serial_println};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp;
 use lazy_static::lazy_static;
 use spin::mutex::Mutex;
-use crate::sys::fs::mbr::Mbr;
 
 lazy_static! {
     pub static ref INITRAMFS: Mutex<CpioIterator> = Mutex::new(CpioIterator::default());
@@ -298,7 +298,7 @@ fn ensure_partition_table(
 
     let min_twilight = MIN_TWILIGHT_SECTORS as u64;
 
-    let mut boot_start = if let Some(entry) = boot_entry {
+    let boot_start = if let Some(entry) = boot_entry {
         entry.lba_start as u64
     } else {
         PARTITION_ALIGNMENT_SECTORS as u64
@@ -314,24 +314,23 @@ fn ensure_partition_table(
 
     // v0.1 boot sector needs to be atleast 50MB (14/02/26)
     if boot_sectors > (50 * 1024 * 2) {
-        entries[boot_slot.unwrap()].sectors = 50*1024*2;
+        entries[boot_slot.unwrap()].sectors = 50 * 1024 * 2;
         if mbr_manager.write_entries(&entries).is_err() {
             return Err("failed to write partition table");
         } else {
-            boot_sectors = 50 * 1024*2;
+            boot_sectors = 50 * 1024 * 2;
             let boot_entry_clone = entries[boot_slot.unwrap()];
             boot_entry = Some(crate::fs::mbr::PartitionEntry::new(
                 boot_entry_clone.status,
                 boot_entry_clone.partition_type,
                 boot_entry_clone.lba_start,
-                boot_sectors as u32
+                boot_sectors as u32,
             ));
             println!("MBR: resized boot parition to 50mb");
         }
     }
 
-    if let Some(entry) = twilight_entry {
-
+    if let Some(_entry) = twilight_entry {
     } else {
         let mut start = align_up_u64(
             boot_start + boot_sectors,

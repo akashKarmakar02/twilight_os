@@ -113,11 +113,13 @@ impl DevFs {
             VfsNode::new(dummy_blockdev(), disk0_meta, Arc::new(RwLock::new(Disk0))),
         ));
 
-        let disk1_meta = Metadata::blk(13, "disk1", usb_disk_size_bytes().unwrap_or(0));
-        devices.push((
-            "disk1".to_string(),
-            VfsNode::new(dummy_blockdev(), disk1_meta, Arc::new(RwLock::new(Disk1))),
-        ));
+        if usb_disk_size_bytes().is_some() {
+            let disk1_meta = Metadata::blk(13, "disk1", usb_disk_size_bytes().unwrap_or(0));
+            devices.push((
+                "disk1".to_string(),
+                VfsNode::new(dummy_blockdev(), disk1_meta, Arc::new(RwLock::new(Disk1))),
+            ));
+        }
 
         DevFs {
             file_structure: devices,
@@ -184,6 +186,10 @@ impl FileSystem for DevFs {
                 if let Some(sz) = disk_size_bytes() {
                     out.metadata.size = sz;
                 }
+            } else if rel == "disk1" {
+                if let Some(sz) = usb_disk_size_bytes() {
+                    out.metadata.size = sz;
+                }
             }
             return Ok(out);
         }
@@ -240,6 +246,10 @@ impl FileSystem for DevFs {
             let mut out = node.metadata.clone();
             if rel == "disk0" {
                 if let Some(sz) = disk_size_bytes() {
+                    out.size = sz;
+                }
+            } else if rel == "disk1" {
+                if let Some(sz) = usb_disk_size_bytes() {
                     out.size = sz;
                 }
             }

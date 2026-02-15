@@ -242,9 +242,10 @@ pub fn init(
 
     // Mask PIT (IRQ0) to prevent double ticks
     unsafe {
-        arch::x86_64::idt::PICS
-            .lock()
-            .write_masks(0b11111001, 0b00101111);
+        let mut pics = arch::x86_64::idt::PICS.lock();
+        let masks = pics.read_masks();
+        // Preserve all dynamically unmasked IRQs (e.g. UHCI IRQ10) and only mask IRQ0.
+        pics.write_masks(masks[0] | 0x01, masks[1]);
     }
 
     kernel_utils::dhcp::main();

@@ -14,6 +14,52 @@ pub const BLOCK_SIZE: usize = 2048;
 pub static mut BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
 pub static mut USB_BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
 
+pub struct UsbBlkHandle;
+
+impl UsbBlkHandle {
+    fn with_dev<R>(f: impl FnOnce(&mut dyn BlockDeviceIO) -> Result<R, ()>) -> Result<R, ()> {
+        #[allow(static_mut_refs)]
+        unsafe {
+            match USB_BLOCK_DEVICE.as_mut() {
+                Some(dev) => f(*dev),
+                None => Err(()),
+            }
+        }
+    }
+}
+
+impl BlockDeviceIO for UsbBlkHandle {
+    fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.read(addr, buf))
+    }
+
+    fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.write(addr, buf))
+    }
+
+    fn block_size(&self) -> usize {
+        #[allow(static_mut_refs)]
+        unsafe {
+            USB_BLOCK_DEVICE.as_ref().map(|dev| dev.block_size()).unwrap_or(0)
+        }
+    }
+
+    fn block_count(&self) -> usize {
+        #[allow(static_mut_refs)]
+        unsafe {
+            USB_BLOCK_DEVICE.as_ref().map(|dev| dev.block_count()).unwrap_or(0)
+        }
+    }
+
+    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.read_blocks(start_addr, buf))
+    }
+
+    fn write_blocks(&mut self, start_addr: u32, buf: &[u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.write_blocks(start_addr, buf))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AtaImpl {
     Pio,
@@ -70,6 +116,7 @@ pub trait BlockDeviceIO: Send + Sync + 'static {
 }
 
 const ATA_CACHE_SIZE: usize = 512;
+const ATA_CACHE_SMALL_IO_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct AtaBlockDevice {
@@ -180,17 +227,27 @@ impl AtaBlockDevice {
         let h = self.hash(block_addr);
         self.cache[h] = None;
     }
+
+    fn clear_cache(&mut self) {
+        for entry in self.cache.iter_mut() {
+            *entry = None;
+        }
+    }
 }
 
 impl BlockDeviceIO for AtaBlockDevice {
     fn read(&mut self, block_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
-        if let Some(cached) = self.cached_block(block_addr) {
-            buf.copy_from_slice(cached);
-            return Ok(());
+        if buf.len() == self.block_size() {
+            if let Some(cached) = self.cached_block(block_addr) {
+                buf.copy_from_slice(cached);
+                return Ok(());
+            }
         }
 
         self.dev.read(block_addr, buf)?;
-        self.set_cached_block(block_addr, buf);
+        if buf.len() == self.block_size() {
+            self.set_cached_block(block_addr, buf);
+        }
         Ok(())
     }
 
@@ -217,8 +274,11 @@ impl BlockDeviceIO for AtaBlockDevice {
             return Err(());
         }
         self.dev.read(start_addr, buf)?;
-        for (idx, chunk) in buf.chunks(block_size).enumerate() {
-            self.set_cached_block(start_addr + idx as u32, chunk);
+        // Avoid per-sector Vec allocations on large streaming reads.
+        if buf.len() <= ATA_CACHE_SMALL_IO_BYTES {
+            for (idx, chunk) in buf.chunks(block_size).enumerate() {
+                self.set_cached_block(start_addr + idx as u32, chunk);
+            }
         }
         Ok(())
     }
@@ -232,8 +292,13 @@ impl BlockDeviceIO for AtaBlockDevice {
             return Err(());
         }
         self.dev.write(start_addr, buf)?;
-        for idx in 0..(buf.len() / block_size) {
-            self.unset_cached_block(start_addr + idx as u32);
+        // Large writes: invalidate whole cache once (faster, safe).
+        if buf.len() > ATA_CACHE_SMALL_IO_BYTES {
+            self.clear_cache();
+        } else {
+            for idx in 0..(buf.len() / block_size) {
+                self.unset_cached_block(start_addr + idx as u32);
+            }
         }
         Ok(())
     }

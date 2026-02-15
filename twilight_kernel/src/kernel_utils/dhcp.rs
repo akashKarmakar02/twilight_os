@@ -58,7 +58,7 @@ pub fn main() {
 
             if let Some(delay) = iface.poll_delay(time, &sockets) {
                 let d = (delay.total_micros() as f64) / 10000.0;
-                sleep(d.min(0.1)); // 0.1 seconds = 100 ms
+                sleep(d.min(0.001)); // 0.1 seconds = 100 ms
             }
         }
     }

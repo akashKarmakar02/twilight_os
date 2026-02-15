@@ -28,21 +28,50 @@ pub struct UHci {
     async_qh: PhysBuf,   // one QH used for control transfers during enumeration
 
     // Generic Driver Support
-    drivers: alloc::vec::Vec<alloc::boxed::Box<dyn UsbDriver>>,
+    drivers: alloc::vec::Vec<Box<dyn UsbDriver>>,
     interrupt_root: u32,
 }
 
 unsafe impl Send for UHci {}
 unsafe impl Sync for UHci {}
 
-#[allow(dead_code)]
-#[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct UhciTD {
     pub link_ptr: u32,
     pub ctrl_status: u32,
     pub token: u32,
     pub buffer_ptr: u32,
+}
+
+impl UHci {
+    pub fn handle_interrupt(&mut self) -> bool {
+        unsafe {
+            let status = self.usb_status.read();
+            // Linux uhci_hcd treats "no bits" or only HCHalted as not ours.
+            if status == 0 || status == USBSTS_HCHALTED {
+                return false;
+            }
+            let w1c = status & USBSTS_W1C_MASK;
+            if w1c != 0 {
+                self.usb_status.write(w1c);
+            }
+
+            if (status & USBSTS_HCHALTED) != 0 {
+                log!("UHCI({:#x}): controller halted (USBSTS={:#x})", self.io_base, status);
+            } else if (status & (USBSTS_USBERRINT | USBSTS_HSE | USBSTS_HC_PROCESS_ERR)) != 0 {
+                log!("UHCI({:#x}): interrupt error status={:#x}", self.io_base, status);
+            }
+
+            return (status
+                & (USBSTS_USBINT
+                    | USBSTS_USBERRINT
+                    | USBSTS_RESUME_DETECT
+                    | USBSTS_HSE
+                    | USBSTS_HC_PROCESS_ERR
+                    | USBSTS_HCHALTED))
+                != 0;
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -76,7 +105,14 @@ const USBCMD_HCRESET: u16 = 1 << 1;
 const USBCMD_CONFIGURE_FLAG: u16 = 1 << 6;
 const USBCMD_MAX_PACKET_64: u16 = 1 << 7;
 
+const USBSTS_USBINT: u16 = 1 << 0;
+const USBSTS_USBERRINT: u16 = 1 << 1;
+const USBSTS_RESUME_DETECT: u16 = 1 << 2;
+const USBSTS_HSE: u16 = 1 << 3;
+const USBSTS_HC_PROCESS_ERR: u16 = 1 << 4;
 const USBSTS_HCHALTED: u16 = 1 << 5;
+const USBSTS_W1C_MASK: u16 =
+    USBSTS_USBINT | USBSTS_USBERRINT | USBSTS_RESUME_DETECT | USBSTS_HSE | USBSTS_HC_PROCESS_ERR;
 
 const PORTSC_CCS: u16 = 1 << 0;
 const PORTSC_CSC: u16 = 1 << 1;
@@ -100,6 +136,11 @@ const TD_STATUS_LS: u32 = 1 << 26;
 const TD_STATUS_ERRCNT_SHIFT: u32 = 27;
 const TD_STATUS_SPD: u32 = 1 << 29;
 const TD_STATUS_STALLED: u32 = 1 << 22;
+const TD_STATUS_BITSTUFF: u32 = 1 << 17;
+const TD_STATUS_CRC_TIMEOUT: u32 = 1 << 18;
+const TD_STATUS_BABBLE: u32 = 1 << 20;
+const TD_STATUS_DATABUF: u32 = 1 << 21;
+const TD_TOKEN_TOGGLE: u32 = 1 << 19;
 
 #[inline(always)]
 fn sleep_us(us: u64) {
@@ -222,6 +263,7 @@ impl UHci {
 
         // Start
         unsafe {
+            self.usb_interrupt.write(0xF); // Enable all interrupts (Timeout, Resume, IOC, Short Packet)
             self.usb_cmd
                 .write(USBCMD_RUN_STOP | USBCMD_CONFIGURE_FLAG | USBCMD_MAX_PACKET_64);
         }
@@ -1165,6 +1207,8 @@ impl HostController for UHci {
             qh_ptr,
             td_ptr,
             td_phys,
+            data_toggle: false,
+            last_poll_had_error: false,
         }))
     }
 }
@@ -1174,13 +1218,29 @@ struct UhciInterruptTransfer {
     qh_ptr: *mut UhciQH,
     td_ptr: *mut UhciTD,
     td_phys: u32,
+    data_toggle: bool,
+    last_poll_had_error: bool,
 }
 
 impl InterruptTransfer for UhciInterruptTransfer {
     fn poll(&mut self) -> bool {
         let td = unsafe { self.td_ptr.read_volatile() };
         // If Active bit (Bit 23) is 0, transfer complete.
-        (td.ctrl_status & TD_STATUS_ACTIVE) == 0
+        if (td.ctrl_status & TD_STATUS_ACTIVE) != 0 {
+            return false;
+        }
+
+        let hard_errors = td.ctrl_status
+            & (TD_STATUS_STALLED
+                | TD_STATUS_BITSTUFF
+                | TD_STATUS_CRC_TIMEOUT
+                | TD_STATUS_BABBLE
+                | TD_STATUS_DATABUF);
+        self.last_poll_had_error = hard_errors != 0;
+        if self.last_poll_had_error {
+            log!("UHCI: interrupt TD error status={:#x}", td.ctrl_status);
+        }
+        true
     }
 
     fn ack(&mut self) {
@@ -1204,11 +1264,13 @@ impl InterruptTransfer for UhciInterruptTransfer {
             | (3u32 << TD_STATUS_ERRCNT_SHIFT)
             | TD_STATUS_IOC
             | keep;
-        // Don't touch buffer_ptr or token (unless toggle flipping needed)
-        // Toggle: The QH automatically updates toggle in overlay.
-        // But we are re-using the same TD.
-        // If we re-use TD, we should check if we need to flip toggle in Token?
-        // Boot mouse typically is tolerant.
+        td.token = (td.token & !TD_TOKEN_TOGGLE)
+            | if self.data_toggle { TD_TOKEN_TOGGLE } else { 0 };
+        // Keep buffer pointer intact and reprogram token toggle from software state.
+        if !self.last_poll_had_error {
+            self.data_toggle = !self.data_toggle;
+        }
+        self.last_poll_had_error = false;
         unsafe {
             self.td_ptr.write_volatile(td);
         }

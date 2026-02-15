@@ -9,7 +9,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use lazy_static::lazy_static;
-use pc_keyboard::{DecodedKey, HandleControl, KeyCode, KeyEvent as PcKeyEvent, KeyState, Keyboard, ScancodeSet1, layouts};
+use pc_keyboard::{
+    DecodedKey, HandleControl, KeyCode, KeyEvent as PcKeyEvent, KeyState, Keyboard, ScancodeSet1,
+    layouts,
+};
 use spin::{Mutex, RwLock};
 
 pub mod ps2;
@@ -366,7 +369,10 @@ pub fn keyboard_interrupt(scancode: u8) {
                         put_char_in_tty(0x13);
                     }
                     if ps2_keyboard_state.is_ctrl_pressed && character == 'c' {
-                        put_char_in_tty(0x03);
+                        drop(ps2_keyboard_state);
+                        drop(keyboard);
+                        crate::sys::proc::exit(0);
+                        unreachable!()
                     }
                     if character == '\t' {
                         put_char_in_tty(b' ');

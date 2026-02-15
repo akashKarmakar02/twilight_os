@@ -25,18 +25,28 @@ impl BlockDeviceIO for UsbMscBlockDevice {
         if buf.len() != self.block_size as usize {
             return Err(());
         }
-        let mut xhci = super::XHCI_DEVICES.lock();
-        let hc = xhci.get_mut(self.controller_id).ok_or(())?;
-        hc.msc_read(self.msc_index, lba, buf).map_err(|_| ())
+        #[allow(static_mut_refs)]
+        if unsafe { !super::XHCI_DEVICES.get().is_some() } {
+            let xhci =  unsafe { super::XHCI_DEVICES.get_mut_unchecked() };
+            let hc = xhci.get_mut(self.controller_id).ok_or(())?;
+            hc.msc_read(self.msc_index, lba, buf).map_err(|_| ())
+        } else {
+            Ok(())
+        }
     }
 
     fn write(&mut self, lba: u32, buf: &[u8]) -> Result<(), ()> {
         if buf.len() != self.block_size as usize {
             return Err(());
         }
-        let mut xhci = super::XHCI_DEVICES.lock();
-        let hc = xhci.get_mut(self.controller_id).ok_or(())?;
-        hc.msc_write(self.msc_index, lba, buf).map_err(|_| ())
+        #[allow(static_mut_refs)]
+        if unsafe { !super::XHCI_DEVICES.get().is_some() } {
+            let mut xhci = unsafe { super::XHCI_DEVICES.get_mut_unchecked() };
+            let hc = xhci.get_mut(self.controller_id).ok_or(())?;
+            hc.msc_write(self.msc_index, lba, buf).map_err(|_| ())
+        }else {
+            Ok(())
+        }
     }
 
     fn block_size(&self) -> usize {
