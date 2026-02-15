@@ -26,15 +26,17 @@ It currently supports x86_64 architecture, with future plans for ARM/RISC-V.
 - **Dynamic Binaries**: Full ELF shared object (`.so`) and dynamic executable support.
 - **Scripting**: `tpy`, a Python-like interpreter for rapid scripting.
 - **Shell & Utilities**: `tsh` (shell) with pipes/redirection, `grep`, `cat`, `ls`, `curl`, `vi` (modal editor).
+- **Terminal Signals**: Ctrl+C (`SIGINT`) handling is supported for interactive userspace workflows.
 - **Init System**: A modern `init` system capable of service management (`logind`, `httpd`).
 
 ### Kernel & Core
 - **Language**: Written in pure Rust (no standard library).
-- **Filesystem**: **TwilightFS** (TFS) - a custom, resilient filesystem with hot-file caching and efficient directory lookups. Also supports FAT16 (`/boot`) and VFS mount points.
+- **Filesystem**: **TwilightFS** (TFS) - a custom, resilient filesystem with hot-file caching, efficient directory lookups, and encrypted home directory support. Also supports FAT16 (`/boot`) and VFS mount points.
 - **Networking**: Custom network stack (TCP/UDP, DHCP, DNS) with drivers for RTL8139 and PCNET. Use `curl` to fetch pages!
 - **Tasks**: Cooperative multitasking with an executor for async kernel tasks.
 - **Drivers**:
     - **Storage**: ATA/IDE and VirtIO Block devices.
+    - **USB**: UHCI controller support.
     - **Input**: PS/2 Keyboard & Mouse (`/dev/input/mice`).
     - **Display**: UEFI Framebuffer (`/dev/fb0`).
     - **Time**: RTC and CMOS support.
