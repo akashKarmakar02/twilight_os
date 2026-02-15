@@ -308,13 +308,13 @@ pub fn irq_vector(irq: u8) -> u8 {
 }
 
 fn dispatch_irq(irq: u8) {
-    if irq < 16 {
-        if let Some(h) = IRQ_HANDLERS.lock()[irq as usize] {
-            h();
-        }
-    }
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(irq));
+    }
+    if irq < 16 {
+        if let Some(h) = { IRQ_HANDLERS.lock()[irq as usize] } {
+            h();
+        }
     }
 }
 

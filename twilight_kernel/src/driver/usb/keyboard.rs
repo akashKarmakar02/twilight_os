@@ -144,96 +144,102 @@ impl UsbDriver for KeyboardDriver {
     fn poll(&mut self) {
         if let Some(handle) = self.interrupt_handle.as_mut() {
             if handle.poll() {
+                let mut report = [0u8; 8];
                 if let Some(buf) = self.data_buf.as_ref() {
-                    // USB Boot Keyboard Report:
-                    // Byte 0: Modifiers
-                    // Byte 1: Reserved
-                    // Byte 2..7: Keycodes (Usage ID)
+                    report.copy_from_slice(&buf[0..8]);
+                } else {
+                    handle.ack();
+                    return;
+                }
 
-                    let modifiers = buf[0];
-                    let keys = &buf[2..8];
+                handle.ack();
 
-                    // Handle Modifiers
-                    let old_modifiers = self.last_report[0];
-                    let mod_diff = modifiers ^ old_modifiers;
+                // USB Boot Keyboard Report:
+                // Byte 0: Modifiers
+                // Byte 1: Reserved
+                // Byte 2..7: Keycodes (Usage ID)
+                let modifiers = report[0];
+                let keys = &report[2..8];
 
-                    if mod_diff != 0 {
-                        // Bit 0: LCtrl (0xE0, 0x14 - Set 1?? No, just mapping)
-                        // PS/2 Set 1 Scancodes for modifiers:
-                        // LCtrl: 0x1D
-                        // LShift: 0x2A
-                        // LAlt: 0x38
-                        // LGUI: 0xE0 0x5B (Scancode Set 1 Extended) -> Complex, let's stick to basics
-                        // RCtrl: 0xE0 0x1D
-                        // RShift: 0x36
-                        // RAlt: 0xE0 0x38
-                        // RGUI: 0xE0 0x5C
+                // Handle Modifiers
+                let old_modifiers = self.last_report[0];
+                let mod_diff = modifiers ^ old_modifiers;
 
-                        // Helper to send make/break
-                        let send_mod = |bit: u8, scancode: u8, is_ext: bool| {
-                            if (mod_diff & (1 << bit)) != 0 {
-                                let pressed = (modifiers & (1 << bit)) != 0;
-                                if is_ext {
-                                    keyboard_interrupt(0xE0);
-                                }
-                                if pressed {
-                                    keyboard_interrupt(scancode);
-                                } else {
-                                    keyboard_interrupt(scancode | 0x80);
-                                }
+                if mod_diff != 0 {
+                    // Bit 0: LCtrl (0xE0, 0x14 - Set 1?? No, just mapping)
+                    // PS/2 Set 1 Scancodes for modifiers:
+                    // LCtrl: 0x1D
+                    // LShift: 0x2A
+                    // LAlt: 0x38
+                    // LGUI: 0xE0 0x5B (Scancode Set 1 Extended) -> Complex, let's stick to basics
+                    // RCtrl: 0xE0 0x1D
+                    // RShift: 0x36
+                    // RAlt: 0xE0 0x38
+                    // RGUI: 0xE0 0x5C
+
+                    // Helper to send make/break
+                    let send_mod = |bit: u8, scancode: u8, is_ext: bool| {
+                        if (mod_diff & (1 << bit)) != 0 {
+                            let pressed = (modifiers & (1 << bit)) != 0;
+                            if is_ext {
+                                keyboard_interrupt(0xE0);
                             }
-                        };
-
-                        send_mod(0, 0x1D, false); // LCtrl
-                        send_mod(1, 0x2A, false); // LShift
-                        send_mod(2, 0x38, false); // LAlt
-                        send_mod(3, 0x5B, true); // LGUI
-                        send_mod(4, 0x1D, true); // RCtrl
-                        send_mod(5, 0x36, false); // RShift
-                        send_mod(6, 0x38, true); // RAlt
-                        send_mod(7, 0x5C, true); // RGUI
-                    }
-
-                    // Handle Keys
-                    // Naive O(N^2) diff is fine for N=6
-                    let old_keys = &self.last_report[2..8];
-
-                    // Check for Released Keys (in Old but not New)
-                    for &k in old_keys.iter() {
-                        if k != 0 && !keys.contains(&k) {
-                            if let Some(sc) = hid_usage_to_scancode(k) {
-                                // Extended keys check
-                                if (0x49..=0x52).contains(&k) {
-                                    keyboard_interrupt(0xE0);
-                                }
-                                // Break code: scancode + 0x80
-                                keyboard_interrupt(sc | 0x80);
+                            if pressed {
+                                keyboard_interrupt(scancode);
+                            } else {
+                                keyboard_interrupt(scancode | 0x80);
                             }
                         }
-                    }
+                    };
 
-                    // Check for Pressed Keys (in New but not Old)
-                    for &k in keys.iter() {
-                        if k != 0 && (k == 42 || !old_keys.contains(&k)) {
-                            if let Some(sc) = hid_usage_to_scancode(k) {
-                                // Extended keys check
-                                if (0x49..=0x52).contains(&k) {
-                                    keyboard_interrupt(0xE0);
-                                }
-                                keyboard_interrupt(sc);
+                    send_mod(0, 0x1D, false); // LCtrl
+                    send_mod(1, 0x2A, false); // LShift
+                    send_mod(2, 0x38, false); // LAlt
+                    send_mod(3, 0x5B, true); // LGUI
+                    send_mod(4, 0x1D, true); // RCtrl
+                    send_mod(5, 0x36, false); // RShift
+                    send_mod(6, 0x38, true); // RAlt
+                    send_mod(7, 0x5C, true); // RGUI
+                }
+
+                // Handle Keys
+                // Naive O(N^2) diff is fine for N=6
+                let old_keys = &self.last_report[2..8];
+
+                // Check for Released Keys (in Old but not New)
+                for &k in old_keys.iter() {
+                    if k != 0 && !keys.contains(&k) {
+                        if let Some(sc) = hid_usage_to_scancode(k) {
+                            // Extended keys check
+                            if (0x49..=0x52).contains(&k) {
+                                keyboard_interrupt(0xE0);
                             }
+                            // Break code: scancode + 0x80
+                            keyboard_interrupt(sc | 0x80);
                         }
-                    }
-
-                    // Store report
-                    // Only if it's not an error status (USB sends all 1s for error sometimes)
-                    // Usage ID 01 is ErrorRollOver.
-                    let is_err = keys.iter().any(|&k| k == 0x01);
-                    if !is_err {
-                        self.last_report.copy_from_slice(&buf[0..8]);
                     }
                 }
-                handle.ack();
+
+                // Check for Pressed Keys (in New but not Old)
+                for &k in keys.iter() {
+                    if k != 0 && (k == 42 || !old_keys.contains(&k)) {
+                        if let Some(sc) = hid_usage_to_scancode(k) {
+                            // Extended keys check
+                            if (0x49..=0x52).contains(&k) {
+                                keyboard_interrupt(0xE0);
+                            }
+                            keyboard_interrupt(sc);
+                        }
+                    }
+                }
+
+                // Store report
+                // Only if it's not an error status (USB sends all 1s for error sometimes)
+                // Usage ID 01 is ErrorRollOver.
+                let is_err = keys.iter().any(|&k| k == 0x01);
+                if !is_err {
+                    self.last_report.copy_from_slice(&report);
+                }
             }
         }
     }
