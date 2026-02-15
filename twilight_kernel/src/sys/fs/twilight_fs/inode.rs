@@ -1,3 +1,4 @@
+use crate::sys;
 use crate::sys::fs::twilight_fs::{
     TwilightFsShared, read_tfs_block, read_tfs_blocks, write_tfs_block,
 };
@@ -9,33 +10,196 @@ use alloc::vec::Vec;
 use spin::Mutex;
 use twilight_common::syscall::types::{EIO, EISDIR};
 
-#[allow(dead_code)]
+pub const MODE_TYPE_MASK: u16 = 0xF000; // you can define your own layout
+pub const MODE_PERM_MASK: u16 = 0x01FF; // rwxrwxrwx
+pub const MODE_DIR: u16 = 0o040000;
+pub const MODE_FILE: u16 = 0o100000;
+
+pub type InodeFlags = u32;
+pub const IFLAG_IMMUTABLE: InodeFlags = 1 << 0;
+pub const IFLAG_APPEND: InodeFlags = 1 << 1;
+pub const IFLAG_ENCRYPTED: InodeFlags = 1 << 2;
+pub const IFLAG_INLINE_DATA: InodeFlags = 1 << 3; // inline symlink/small file
+pub const IFLAG_DIR_INDEXED: InodeFlags = 1 << 4; // has dir hash index block
+pub const IFLAG_HAS_XATTR: InodeFlags = 1 << 5;
+
 #[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
-    File,
-    Directory,
-    Symlink,
-    BlockDevice,
-    CharacterDevice,
-    Socket,
-    Pipe,
+    File = 1,
+    Directory = 2,
+    Symlink = 3,
+    BlockDevice = 4,
+    CharacterDevice = 5,
+    Socket = 6,
+    Pipe = 7,
 }
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
+pub struct Extent32 {
+    pub start_block: u32, // physical start block
+    pub block_len: u32,   // length in blocks
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+pub struct XattrBlockHeader {
+    pub magic: u32, // e.g. "XATR"
+    pub used_bytes: u16,
+    pub count: u16,
+    pub checksum: u32, // checksum over header+payload (excluding this field if you want)
+                       // followed by TLVs
+                       // [key_len:u16][val_len:u16][key_bytes][val_bytes]...
+}
+
+pub const INODE_INLINE_BYTES: usize = 64;
+
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
 pub struct Inode {
-    pub mode: u16,
+    // permissions + type (POSIX-ish)
+    pub mode: u16, // includes type bits + permission bits
     pub nlinks: u16,
     pub uid: u32,
     pub gid: u32,
+
+    // size & timestamps
     pub size: u64,
-    pub access_time: u32,
-    pub modified_time: u32,
-    pub created_time: u32,
-    pub zones: [u32; 7],
-    pub indirect_zones: u32,
-    pub double_indirect_zones: u32,
-    pub triple_indirect_zones: u32,
+    pub access_time: u64,
+    pub modified_time: u64,
+    pub change_time: u64,
+    pub created_time: u64, // creation time (nice to have)
+
+    // inode metadata
+    pub flags: InodeFlags,
+    pub generation: u64, // bump when inode changes (useful for key derivation/consistency)
+
+    // xattrs
+    pub xattr_block: u32, // 0 = none
+    pub _pad0: u32,
+
+    // data mapping:
+    // - if IFLAG_INLINE_DATA: `inline_data` holds payload (symlink target or small file)
+    // - else: direct extents + indirect extent lists
+    pub direct: [Extent32; 6], // a few direct extents
+    pub indirect: u32,         // block containing Extent32[]
+    pub double_indirect: u32,  // block containing u32[] -> indirect blocks
+    pub triple_indirect: u32,
+
+    // inline payload area (used only when IFLAG_INLINE_DATA set)
+    pub inline_data: [u8; INODE_INLINE_BYTES],
+
+    // inode checksum (optional; if metadata csum feature enabled)
+    pub inode_checksum: u32,
+    pub _pad1: u32,
+}
+
+impl Inode {
+    pub const DIRECT_SLOT_COUNT: usize = 6;
+
+    fn base(mode: u16, now: u64) -> Self {
+        let user_id = sys::proc::user::get_uid();
+        let g_id = sys::proc::user::get_gid();
+        Self {
+            mode,
+            nlinks: 1,
+            uid: user_id as u32,
+            gid: g_id as u32,
+            size: 0,
+            access_time: now,
+            modified_time: now,
+            change_time: now,
+            created_time: now,
+            flags: 0,
+            generation: 0,
+            xattr_block: 0,
+            _pad0: 0,
+            direct: [Extent32 {
+                start_block: 0,
+                block_len: 0,
+            }; Self::DIRECT_SLOT_COUNT],
+            indirect: 0,
+            double_indirect: 0,
+            triple_indirect: 0,
+            inline_data: [0; INODE_INLINE_BYTES],
+            inode_checksum: 0,
+            _pad1: 0,
+        }
+    }
+
+    pub fn new_file(now: u64, perms: u16) -> Self {
+        Self::base(MODE_FILE | (perms & MODE_PERM_MASK), now)
+    }
+
+    pub fn new_dir(now: u64, perms: u16) -> Self {
+        let mut inode = Self::base(MODE_DIR | (perms & MODE_PERM_MASK), now);
+        inode.nlinks = 2;
+        inode
+    }
+
+    #[inline]
+    pub fn is_dir(&self) -> bool {
+        (self.mode & MODE_TYPE_MASK) == MODE_DIR
+    }
+
+    #[inline]
+    pub fn is_file(&self) -> bool {
+        (self.mode & MODE_TYPE_MASK) == MODE_FILE
+    }
+
+    #[inline]
+    pub fn direct_slot_get(&self, index: usize) -> u32 {
+        if index >= Self::DIRECT_SLOT_COUNT {
+            return 0;
+        }
+
+        let extent = self.direct[index];
+        if extent.block_len == 0 {
+            0
+        } else {
+            extent.start_block
+        }
+    }
+
+    #[inline]
+    pub fn direct_slot_set(&mut self, index: usize, zone: u32) {
+        if index >= Self::DIRECT_SLOT_COUNT {
+            return;
+        }
+
+        self.direct[index] = if zone == 0 {
+            Extent32 {
+                start_block: 0,
+                block_len: 0,
+            }
+        } else {
+            Extent32 {
+                start_block: zone,
+                block_len: 1,
+            }
+        };
+    }
+
+    #[inline]
+    pub fn single_indirect_get(&self) -> u32 {
+        self.indirect
+    }
+
+    #[inline]
+    pub fn single_indirect_set(&mut self, zone: u32) {
+        self.indirect = zone;
+    }
+
+    #[inline]
+    pub fn double_indirect_get(&self) -> u32 {
+        self.double_indirect
+    }
+
+    #[inline]
+    pub fn double_indirect_set(&mut self, zone: u32) {
+        self.double_indirect = zone;
+    }
 }
 
 pub(crate) struct TFSVfsNode {
@@ -80,64 +244,10 @@ impl VfsNodeOps for TFSVfsNode {
 
         let mut remaining = max_to_read;
         let mut written = 0;
-
-        // Collect all relevant zones first
-        // We will just read block by block for now if not cached, but we can optimize this later if needed.
-        // For now, the big win is read_all_file which is used for caching.
-        // However, we should at least try to batch reads if the request is large.
-
-        // Simpler implementation: iterate blocks, identify contiguous runs, read them.
-        let start_block = lba / block_size;
-        let end_block = (lba + remaining + block_size - 1) / block_size;
-
-        let mut zones = Vec::new(); // (block_idx, zone_id)
-
-        // 1. Direct zones
-        for i in 0..7 {
-            if i >= start_block && i < end_block {
-                zones.push((i, self.inode.zones[i]));
-            }
-        }
-
-        // 2. Indirect zones
-        if self.inode.indirect_zones != 0 && end_block > 7 {
-            let mut indirect_buf = [0u8; 2048];
-            if read_tfs_block(
-                device.lock().as_mut(),
-                self.inode.indirect_zones,
-                &mut indirect_buf,
-            )
-            .is_ok()
-            {
-                let entries = block_size / 4;
-                for i in 0..entries {
-                    let logical_block = 7 + i;
-                    if logical_block >= start_block && logical_block < end_block {
-                        let z = u32::from_le_bytes(
-                            indirect_buf[i * 4..(i + 1) * 4].try_into().unwrap(),
-                        );
-                        zones.push((logical_block, z));
-                    }
-                }
-            }
-        }
-
-        // 3. Double indirect (simplified: read one by one if hit, or just fallback)
-        // For double indirect implementation, it's complex to gather all.
-        // We will fallback to single block read loop for double indirect for now or just keep using the loop below
-        // but optimized for the gathered zones.
-
-        // Let's stick to the original logic but optimized for the direct/indirect parts which covers most files.
-        // Actually, to avoid complexity and regressions in this critical path,
-        // I will implement a "contiguous read" logic only when we are NOT using the cache
-        // and the request spans multiple blocks.
-
-        // ... Reverting to the logic of "iterate and coalesce" ...
-
         let mut buffer = [0u8; 2048];
 
         // We will iterate logically.
-        let mut logic_block = start_block;
+        let mut logic_block = lba / block_size;
         let mut current_offset_in_block = lba % block_size;
 
         while remaining > 0 {
@@ -154,6 +264,8 @@ impl VfsNodeOps for TFSVfsNode {
             if let Err(_) = read_tfs_block(device.lock().as_mut(), zone, &mut buffer) {
                 return Err(());
             }
+
+            self.apply_crypto(zone as u64, &mut buffer);
 
             let available = block_size - current_offset_in_block;
             let to_copy = core::cmp::min(remaining, available);
@@ -177,7 +289,10 @@ impl VfsNodeOps for TFSVfsNode {
         let mut bytes_written: usize = 0;
         let mut remaining: usize = data.len();
         let mut pos: usize = lba;
-        let mut direct_zones = self.inode.zones;
+        let mut direct_zones = [0u32; Inode::DIRECT_SLOT_COUNT];
+        for (i, slot) in direct_zones.iter_mut().enumerate() {
+            *slot = self.inode.direct_slot_get(i);
+        }
 
         // ---- direct blocks ----
         while remaining > 0 {
@@ -207,10 +322,15 @@ impl VfsNodeOps for TFSVfsNode {
                 if read_tfs_block(device.lock().as_mut(), zone, &mut buffer).is_err() {
                     return Err(());
                 }
+                // Decrypt existing content to allow correct partial update
+                self.apply_crypto(zone as u64, &mut buffer);
             }
 
             buffer[offset_in_block..offset_in_block + copy_size]
                 .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
+
+            // Encrypt before writing back
+            self.apply_crypto(zone as u64, &mut buffer);
 
             if write_tfs_block(device.lock().as_mut(), zone, &buffer).is_err() {
                 return Err(());
@@ -226,9 +346,9 @@ impl VfsNodeOps for TFSVfsNode {
             let ind_cap = (BLOCK_SIZE / 4) - 1;
             let direct_blocks = direct_zones.len();
 
-            if self.inode.indirect_zones == 0 {
+            if self.inode.single_indirect_get() == 0 {
                 let zone = self.ctx.lock().alloc_zone().unwrap();
-                self.inode.indirect_zones = zone;
+                self.inode.single_indirect_set(zone);
                 let zero_block = [0u8; BLOCK_SIZE];
                 if write_tfs_block(device.lock().as_mut(), zone, &zero_block).is_err() {
                     return Err(());
@@ -238,7 +358,7 @@ impl VfsNodeOps for TFSVfsNode {
             let mut indirect_block = [0u8; BLOCK_SIZE];
             if read_tfs_block(
                 device.lock().as_mut(),
-                self.inode.indirect_zones,
+                self.inode.single_indirect_get(),
                 &mut indirect_block,
             )
             .is_err()
@@ -290,11 +410,13 @@ impl VfsNodeOps for TFSVfsNode {
                     if read_tfs_block(device.lock().as_mut(), zone, &mut buffer).is_err() {
                         return Err(());
                     }
+                    self.apply_crypto(zone as u64, &mut buffer);
                 }
 
                 buffer[offset_in_block..offset_in_block + copy_size]
                     .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
 
+                self.apply_crypto(zone as u64, &mut buffer);
                 if write_tfs_block(device.lock().as_mut(), zone, &buffer).is_err() {
                     return Err(());
                 }
@@ -307,7 +429,7 @@ impl VfsNodeOps for TFSVfsNode {
             if indirect_dirty {
                 if write_tfs_block(
                     device.lock().as_mut(),
-                    self.inode.indirect_zones,
+                    self.inode.single_indirect_get(),
                     &indirect_block,
                 )
                 .is_err()
@@ -332,12 +454,13 @@ impl VfsNodeOps for TFSVfsNode {
                 (0, 0)
             };
 
-            if self.inode.double_indirect_zones == 0 {
-                self.inode.double_indirect_zones = self.ctx.lock().alloc_zone().unwrap();
+            if self.inode.double_indirect_get() == 0 {
+                self.inode
+                    .double_indirect_set(self.ctx.lock().alloc_zone().unwrap());
                 let zero_block = [0u8; BLOCK_SIZE];
                 if let Err(_) = write_tfs_block(
                     device.lock().as_mut(),
-                    self.inode.double_indirect_zones,
+                    self.inode.double_indirect_get(),
                     &zero_block,
                 ) {
                     return Err(());
@@ -347,7 +470,7 @@ impl VfsNodeOps for TFSVfsNode {
             let mut double_indirect_block = [0u8; BLOCK_SIZE];
             if let Err(_) = read_tfs_block(
                 device.lock().as_mut(),
-                self.inode.double_indirect_zones,
+                self.inode.double_indirect_get(),
                 &mut double_indirect_block,
             ) {
                 return Err(());
@@ -443,11 +566,13 @@ impl VfsNodeOps for TFSVfsNode {
                         if let Err(_) = read_tfs_block(device.lock().as_mut(), zone, &mut buffer) {
                             return Err(());
                         }
+                        self.apply_crypto(zone as u64, &mut buffer);
                     }
 
                     buffer[offset_in_block..offset_in_block + copy_size]
                         .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
 
+                    self.apply_crypto(zone as u64, &mut buffer);
                     if let Err(_) = write_tfs_block(device.lock().as_mut(), zone, &buffer) {
                         return Err(());
                     }
@@ -468,7 +593,7 @@ impl VfsNodeOps for TFSVfsNode {
             // store updated double indirect root
             if let Err(_) = write_tfs_block(
                 device.lock().as_mut(),
-                self.inode.double_indirect_zones,
+                self.inode.double_indirect_get(),
                 &double_indirect_block,
             ) {
                 return Err(());
@@ -479,7 +604,9 @@ impl VfsNodeOps for TFSVfsNode {
         if end_pos > self.inode.size as usize {
             self.inode.size = end_pos as u64;
         }
-        self.inode.zones = direct_zones;
+        for (i, zone) in direct_zones.iter().copied().enumerate() {
+            self.inode.direct_slot_set(i, zone);
+        }
         self.ctx
             .lock()
             .write_inode_twilight(self.inode_no, self.inode)
@@ -498,7 +625,7 @@ impl VfsNodeOps for TFSVfsNode {
     }
 
     fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
-        if self.inode.mode == 0o040777 {
+        if self.inode.is_dir() {
             return Ok(-EISDIR);
         }
         if self
@@ -546,24 +673,68 @@ impl VfsNodeOps for TFSVfsNode {
 }
 
 impl TFSVfsNode {
-    fn get_zone(&self, device: &mut BlockDev, logical_block: usize) -> Result<u32, ()> {
-        let block_size = 2048;
-        if logical_block < 7 {
-            return Ok(self.inode.zones[logical_block]);
+    fn is_encrypted(&self) -> bool {
+        (self.inode.flags & IFLAG_ENCRYPTED) != 0
+    }
+
+    fn get_encryption_key(&self) -> Option<[u8; 32]> {
+        if !self.is_encrypted() {
+            return None;
         }
 
-        let indirect_start = 7;
+        let current_uid = crate::sys::proc::user::get_uid() as u32;
+        if current_uid != 0 && current_uid != self.inode.uid {
+            return None;
+        }
+
+        crate::sys::syscall::crypto::get_user_key(self.inode.uid)
+    }
+
+    fn apply_crypto(&self, block_idx: u64, buf: &mut [u8]) {
+        use chacha20::ChaCha20;
+        use chacha20::cipher::{KeyIvInit, StreamCipher};
+
+        if let Some(key) = self.get_encryption_key() {
+            // Nonce generation: hash(inode) ^ block_index
+            // Simple approach: nonces should be 12 bytes (96 bits).
+            // We use inode_no (32-bit) and block_idx (64-bit).
+
+            let mut nonce = [0u8; 12];
+            nonce[0..4].copy_from_slice(&self.inode_no.to_le_bytes());
+            nonce[4..12].copy_from_slice(&block_idx.to_le_bytes());
+
+            let key_arr = key.into();
+            let nonce_arr = nonce.into();
+
+            let mut cipher = ChaCha20::new(&key_arr, &nonce_arr);
+            cipher.apply_keystream(buf);
+        }
+    }
+}
+
+impl TFSVfsNode {
+    fn get_zone(&self, device: &mut BlockDev, logical_block: usize) -> Result<u32, ()> {
+        let block_size = 2048;
+        if logical_block < Inode::DIRECT_SLOT_COUNT {
+            return Ok(self.inode.direct_slot_get(logical_block));
+        }
+
+        let indirect_start = Inode::DIRECT_SLOT_COUNT;
         let indirect_entries = block_size / 4; // 512
 
         if logical_block < indirect_start + indirect_entries {
-            if self.inode.indirect_zones == 0 {
+            if self.inode.single_indirect_get() == 0 {
                 return Ok(0);
             }
             let idx = logical_block - indirect_start;
             // Cache this? For now read it.
             let mut buf = [0u8; 2048];
-            read_tfs_block(device.lock().as_mut(), self.inode.indirect_zones, &mut buf)
-                .map_err(|_| ())?;
+            read_tfs_block(
+                device.lock().as_mut(),
+                self.inode.single_indirect_get(),
+                &mut buf,
+            )
+            .map_err(|_| ())?;
             return Ok(u32::from_le_bytes(
                 buf[idx * 4..(idx + 1) * 4].try_into().unwrap(),
             ));
@@ -573,7 +744,7 @@ impl TFSVfsNode {
         let double_entries = indirect_entries * indirect_entries; // 512 * 512
 
         if logical_block < double_start + double_entries {
-            if self.inode.double_indirect_zones == 0 {
+            if self.inode.double_indirect_get() == 0 {
                 return Ok(0);
             }
             let rel = logical_block - double_start;
@@ -583,7 +754,7 @@ impl TFSVfsNode {
             let mut buf = [0u8; 2048];
             read_tfs_block(
                 device.lock().as_mut(),
-                self.inode.double_indirect_zones,
+                self.inode.double_indirect_get(),
                 &mut buf,
             )
             .map_err(|_| ())?;
@@ -621,9 +792,8 @@ impl TFSVfsNode {
         // Gather all zones
 
         // 1. Direct
-        let direct_zones =
-            unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.inode.zones)) };
-        for zone in direct_zones {
+        for i in 0..Inode::DIRECT_SLOT_COUNT {
+            let zone = self.inode.direct_slot_get(i);
             if zone == 0 {
                 break;
             }
@@ -631,9 +801,15 @@ impl TFSVfsNode {
         }
 
         // 2. Indirect
-        if self.inode.indirect_zones != 0 {
+        if self.inode.single_indirect_get() != 0 {
             let mut buf = [0u8; 2048];
-            if read_tfs_block(device.lock().as_mut(), self.inode.indirect_zones, &mut buf).is_ok() {
+            if read_tfs_block(
+                device.lock().as_mut(),
+                self.inode.single_indirect_get(),
+                &mut buf,
+            )
+            .is_ok()
+            {
                 for i in 0..(block_size / 4) {
                     let z = u32::from_le_bytes(buf[i * 4..(i + 1) * 4].try_into().unwrap());
                     if z == 0 {
@@ -645,11 +821,11 @@ impl TFSVfsNode {
         }
 
         // 3. Double indirect (simplified: read one by one to gather zones)
-        if self.inode.double_indirect_zones != 0 {
+        if self.inode.double_indirect_get() != 0 {
             let mut buf1 = [0u8; 2048];
             if read_tfs_block(
                 device.lock().as_mut(),
-                self.inode.double_indirect_zones,
+                self.inode.double_indirect_get(),
                 &mut buf1,
             )
             .is_ok()
@@ -700,6 +876,11 @@ impl TFSVfsNode {
                 &mut temp_buf[..bytes_to_read],
             ) {
                 return Err(());
+            }
+            for j in 0..run_len {
+                let start = j * block_size;
+                let end = start + block_size;
+                self.apply_crypto(zones[z_i + j] as u64, &mut temp_buf[start..end]);
             }
 
             let bytes_to_copy = core::cmp::min(bytes_to_read, file_size - offset);

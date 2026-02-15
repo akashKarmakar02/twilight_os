@@ -1,3 +1,5 @@
+pub mod crypto;
+pub mod fs_attr;
 pub(crate) mod memory;
 pub mod service;
 mod utils;
@@ -53,6 +55,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_CLOSE => service::close(arg1 as i32),
         SYS_STAT => service::stat(arg1 as usize, arg2 as usize),
         SYS_FSTAT => service::fstat(arg1 as usize, arg2 as usize),
+        SYS_LSTAT => service::lstat(arg1 as usize, arg2 as usize),
         SYS_POLL => service::poll(arg1 as usize, arg2 as usize, arg3 as isize),
         SYS_LSEEK => service::lseek(arg1 as usize, arg2, arg3 as u8),
         SYS_MMAP => memory::mmap(
@@ -132,11 +135,16 @@ pub extern "sysv64" fn syscall_handler(
         SYS_UNAME => service::uname(arg1 as usize),
         SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
         SYS_CHDIR => service::chdir(arg1 as usize),
+        SYS_RENAME => service::rename(arg1 as usize, arg2 as usize),
         SYS_MKDIR => service::mkdir(arg1 as usize, arg2 as usize),
         SYS_RMDIR => service::rmdir(arg1 as usize),
         SYS_UNLINK => service::unlink(arg1 as usize),
+        SYS_GETUID => service::geteuid(),
+        SYS_GETGID => service::getegid(),
         SYS_SET_UID => service::setuid(arg1),
+        SYS_SET_GID => service::setgid(arg1),
         SYS_GET_EUID => service::geteuid(),
+        SYS_GET_EGID => service::getegid(),
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
         SYS_GET_TID => crate::sys::proc::id() as i64,
         SYS_TIME => {
@@ -272,6 +280,18 @@ pub extern "sysv64" fn syscall_handler(
             crate::kernel_utils::install::main();
             0
         }
+        // SYS_PPOLL
+        271 => service::ppoll(
+            arg1 as usize,
+            arg2 as usize,
+            arg3 as usize,
+            arg4 as usize,
+            arg5 as usize,
+        ),
+        // SYS_ADD_USER_KEY
+        448 => crypto::sys_add_user_key(arg1 as u32, arg2 as *const u8, arg3 as usize) as i64,
+        // SYS_SET_FILE_ATTR
+        449 => fs_attr::sys_set_file_attr(arg1 as *const u8, arg2 as u32, arg3 as u32) as i64,
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
             -(ENOSYS as i64)

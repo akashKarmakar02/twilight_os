@@ -4,23 +4,31 @@ use crate::driver::usb::xhci::XhciDriver;
 use crate::log;
 use crate::sys::pci::{PCI_DEVICES, lookup_device_name};
 use alloc::vec::Vec;
-use lazy_static::lazy_static;
-use spin::Mutex;
+use spin::Once;
 
 pub mod hid;
 pub mod interfaces;
 pub mod keyboard;
 pub mod manager;
+pub mod msc;
 mod uhci;
 pub mod usb_ids;
 mod xhci;
 
-lazy_static! {
-    static ref UCHI_DEVICES: Mutex<Vec<UHci>> = Mutex::new(Vec::new());
-    static ref XHCI_DEVICES: Mutex<Vec<XhciDriver>> = Mutex::new(Vec::new());
-}
+static mut UCHI_DEVICES: Once<Vec<UHci>> = Once::new();
+static mut XHCI_DEVICES: Once<Vec<XhciDriver>> = Once::new();
 
 pub fn init() {
+    unsafe {
+        #[allow(static_mut_refs)]
+        if UCHI_DEVICES.get().is_none() {
+            UCHI_DEVICES.call_once(|| Vec::new());
+        }
+        #[allow(static_mut_refs)]
+        if XHCI_DEVICES.get().is_none() {
+            XHCI_DEVICES.call_once(|| Vec::new());
+        }
+    }
     // UHCI Initialization
     {
         let devices = PCI_DEVICES.lock();
@@ -53,7 +61,17 @@ pub fn init() {
 
                 let mut uhci = UHci::new(io_base);
                 uhci.list();
-                UCHI_DEVICES.lock().push(uhci);
+                // One-shot recovery pass: a boot keyboard may complete its first IN TD
+                // before IRQ registration. Re-arm once so runtime keypresses can continue.
+                if uhci.handle_interrupt() {
+                    uhci.poll_drivers();
+                }
+                #[allow(static_mut_refs)]
+                unsafe { UCHI_DEVICES.get_mut_unchecked() }.push(uhci);
+
+                let irq = dev.interrupt_line;
+                log!("UHCI: Registering IRQ {} handler", irq);
+                let _ = crate::arch::x86_64::idt::register_irq_handler(irq, usb_irq_handler);
             }
         }
     }
@@ -72,11 +90,21 @@ pub fn init() {
                 dev.function
             );
 
+            let bus_master_before = (dev.command & (1 << 2)) != 0;
+            dev.enable_bus_mastering();
+
             // Get MMIO Base Address (BAR0)
             let base_addr = dev.mem_base().as_u64();
-            log!("XHCI MMIO Base: {:#x}", base_addr);
+            log!(
+                "XHCI MMIO Base: {:#x}; PCI bus master before init={}",
+                base_addr,
+                bus_master_before
+            );
 
+            #[allow(static_mut_refs)]
+            let controller_id = unsafe { XHCI_DEVICES.get().unwrap_unchecked() }.len();
             let mut xhci = XhciDriver::new(base_addr);
+            xhci.set_controller_id(controller_id);
             if !xhci.init_device() {
                 log!("XHCI: Failed to initialize device");
                 continue;
@@ -87,20 +115,55 @@ pub fn init() {
 
             // Note: In a real implementation we would call xhci.init_device(), start_device(), etc.
             // For now, let's store it.
-            XHCI_DEVICES.lock().push(xhci);
+            #[allow(static_mut_refs)]
+            unsafe { XHCI_DEVICES.get_mut_unchecked() }.push(xhci);
+
+            // Register IRQ
+            let irq = dev.interrupt_line;
+            log!("XHCI: Registering IRQ {} handler", irq);
+            let _ = crate::arch::x86_64::idt::register_irq_handler(irq, usb_irq_handler);
         }
     }
 }
 
 pub fn poll_all_drivers() {
-    let mut uhci = UCHI_DEVICES.lock();
-    for hc in uhci.iter_mut() {
-        hc.poll_drivers();
-    }
+    // unsafe {
+    //     #[allow(static_mut_refs)]
+    //     if let Some(uhci) = UCHI_DEVICES.get_mut() {
+    //         for hc in uhci.iter_mut() {
+    //             if hc.handle_interrupt() {
+    //                 hc.poll_drivers();
+    //             }
+    //         }
+    //     }
+    //     #[allow(static_mut_refs)]
+    //     if let Some(xhci) = XHCI_DEVICES.get_mut() {
+    //         for hc in xhci.iter_mut() {
+    //             if hc.handle_interrupt() {
+    //                 hc.poll_drivers();
+    //             }
+    //         }
+    //     }
+    // }
+}
 
-    let mut xhci = XHCI_DEVICES.lock();
-    for hc in xhci.iter_mut() {
-        hc.poll_ports();
-        hc.poll_drivers();
+pub fn usb_irq_handler() {
+    unsafe {
+        #[allow(static_mut_refs)]
+        if let Some(uhci) = UCHI_DEVICES.get_mut() {
+            for hc in uhci.iter_mut() {
+                if hc.handle_interrupt() {
+                    hc.poll_drivers();
+                }
+            }
+        }
+        #[allow(static_mut_refs)]
+        if let Some(xhci) = XHCI_DEVICES.get_mut() {
+            for hc in xhci.iter_mut() {
+                if hc.handle_interrupt() {
+                    hc.poll_drivers();
+                }
+            }
+        }
     }
 }

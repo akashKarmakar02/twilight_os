@@ -135,6 +135,10 @@ fn main() -> io::Result<()> {
         }
     }
 
+    // Build standalone vi submodule at userspace/vi and install as /bin/vi.
+    // This runs after apps/ to ensure the submodule binary wins if both exist.
+    build_vi_submodule(out_bin_dir)?;
+
     println!("\nAll done.");
     Ok(())
 }
@@ -405,4 +409,51 @@ fn apply_ccache_env(cmd: &mut Command) {
 
     cmd.env("CCACHE_DIR", ccache_dir);
     cmd.env("CCACHE_TEMPDIR", ccache_tmpdir);
+}
+
+fn build_vi_submodule(out_bin_dir: &Path) -> io::Result<()> {
+    let vi_dir = Path::new("vi");
+    if !vi_dir.exists() {
+        return Ok(());
+    }
+
+    if !(vi_dir.join("Makefile").exists() || vi_dir.join("makefile").exists()) {
+        println!(
+            "userspace/vi exists but has no Makefile; skipping standalone vi build"
+        );
+        return Ok(());
+    }
+
+    println!("\n=== Building standalone app: vi (submodule) ===");
+    println!("Running make -C vi with CC=musl-gcc");
+
+    let mut cmd = Command::new("make");
+    cmd.arg("-C")
+        .arg(vi_dir)
+        .arg("DEBUG=")
+        .env("CC", "musl-gcc");
+    apply_ccache_env(&mut cmd);
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "standalone userspace/vi make failed",
+        ));
+    }
+
+    let src = vi_dir.join("vi");
+    if !src.exists() || !src.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "userspace/vi build did not produce ./vi/vi",
+        ));
+    }
+
+    let dst = out_bin_dir.join("vi");
+    println!("Copying {} -> {}", src.display(), dst.display());
+    fs::copy(&src, &dst)?;
+    let mut perms = fs::metadata(&dst)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&dst, perms)?;
+    Ok(())
 }

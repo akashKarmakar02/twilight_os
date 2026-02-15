@@ -147,6 +147,8 @@ impl InitramfsFs {
             file_type,
             size,
             created_time: 0,
+            uid: 0,
+            gid: 0,
             access_time: 0,
             modified_time: 0,
         })

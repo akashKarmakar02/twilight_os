@@ -1,6 +1,6 @@
 use crate::driver::disk::BlockDeviceIO;
-use crate::sys::fs::twilight_fs::inode::Inode;
 use crate::sys::fs::twilight_fs::TfsError;
+use crate::sys::fs::twilight_fs::inode::Inode;
 use crate::sys::proc::Process;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -42,6 +42,8 @@ pub enum VfsError {
 #[derive(Debug, Clone)]
 pub struct Metadata {
     pub ino: u32,
+    pub uid: u32,
+    pub gid: u32,
     pub name: String,
     pub file_type: FileType,
     pub size: usize,
@@ -54,6 +56,8 @@ impl Metadata {
     pub(crate) fn dir(ino: u32, name: &str) -> Self {
         Metadata {
             ino,
+            uid: 0,
+            gid: 0,
             name: name.into(),
             file_type: FileType::Dir,
             size: 0,
@@ -66,6 +70,8 @@ impl Metadata {
         Metadata {
             ino,
             name: name.into(),
+            gid: 0,
+            uid: 0,
             file_type: FileType::CharDevice,
             size: 0,
             access_time: 0,
@@ -80,6 +86,8 @@ impl Metadata {
             file_type: FileType::BlockDevice,
             size,
             access_time: 0,
+            uid: 0,
+            gid: 0,
             created_time: 0,
             modified_time: 0,
         }
@@ -194,10 +202,19 @@ pub trait FileSystem: Send + Sync + 'static {
     fn open(&mut self, path: &str) -> Result<VfsNode, ()>;
     fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()>;
     fn rmdir(&mut self, path: &str) -> Result<(), ()>;
+    fn rename(&mut self, _old_path: &str, _new_path: &str) -> Result<(), ()> {
+        Err(())
+    }
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()>;
     fn rm(&mut self, path: &str) -> Result<(), ()>;
     fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()>;
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()>;
+    fn set_attr(&mut self, _path: &str, _attr: u32, _value: u32) -> Result<(), ()> {
+        Err(())
+    }
+    fn get_attr(&mut self, _path: &str, _attr: u32) -> Result<u32, ()> {
+        Err(())
+    }
 }
 
 pub struct Vfs {
@@ -234,7 +251,7 @@ impl Vfs {
     fn route<'a>(&self, path: &'a str) -> Option<(&'a str, &Arc<Mutex<dyn FileSystem>>)> {
         self.mount_points
             .iter()
-            .find(|(p, _)| path.starts_with(*p))
+            .find(|(p, _)| path.starts_with(*p) || ((path == ".") && (*p == "/")))
             .map(|(prefix, fs)| {
                 let rel = &path[prefix.len()..];
                 (if rel.is_empty() { "/" } else { rel }, fs)
@@ -259,6 +276,16 @@ impl Vfs {
         guard.rmdir(rel)
     }
 
+    pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), ()> {
+        let (old_rel, old_fs) = self.route(old_path).ok_or(())?;
+        let (new_rel, new_fs) = self.route(new_path).ok_or(())?;
+        if !Arc::ptr_eq(old_fs, new_fs) {
+            return Err(());
+        }
+        let mut guard = old_fs.lock();
+        guard.rename(old_rel, new_rel)
+    }
+
     pub fn ls(&self, path: &str) -> Result<Vec<Metadata>, ()> {
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
@@ -281,5 +308,17 @@ impl Vfs {
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
         guard.metadata(rel)
+    }
+
+    pub fn set_attr(&self, path: &str, attr: u32, value: u32) -> Result<(), ()> {
+        let (rel, fs) = self.route(path).ok_or(())?;
+        let mut guard = fs.lock();
+        guard.set_attr(rel, attr, value)
+    }
+
+    pub fn get_attr(&self, path: &str, attr: u32) -> Result<u32, ()> {
+        let (rel, fs) = self.route(path).ok_or(())?;
+        let mut guard = fs.lock();
+        guard.get_attr(rel, attr)
     }
 }

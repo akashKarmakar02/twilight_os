@@ -59,7 +59,18 @@ lazy_static! {
             idt[0xFD].set_handler_addr(VirtAddr::new(apic_timer_preempt_isr as u64));
         }
         idt[interrupt_index(1)].set_handler_fn(keyboard_interrupt_handler);
+        idt[interrupt_index(2)].set_handler_fn(irq_handler_2);
+        idt[interrupt_index(3)].set_handler_fn(irq_handler_3);
+        idt[interrupt_index(4)].set_handler_fn(irq_handler_4);
+        idt[interrupt_index(5)].set_handler_fn(irq_handler_5);
+        idt[interrupt_index(6)].set_handler_fn(irq_handler_6);
+        idt[interrupt_index(7)].set_handler_fn(irq_handler_7);
+        idt[interrupt_index(8)].set_handler_fn(irq_handler_8);
+        idt[interrupt_index(9)].set_handler_fn(irq_handler_9);
+        idt[interrupt_index(10)].set_handler_fn(irq_handler_10);
+        idt[interrupt_index(11)].set_handler_fn(irq_handler_11);
         idt[interrupt_index(12)].set_handler_fn(mouse_interrupt_handler);
+        idt[interrupt_index(13)].set_handler_fn(irq_handler_13);
         idt[interrupt_index(14)].set_handler_fn(ide_primary_interrupt_handler);
         idt[interrupt_index(15)].set_handler_fn(ide_secondary_interrupt_handler);
         idt
@@ -276,6 +287,19 @@ pub fn register_irq_handler(irq: u8, handler: fn()) -> Result<(), ()> {
         return Err(());
     }
     IRQ_HANDLERS.lock()[irq as usize] = Some(handler);
+
+    // Unmask the IRQ in PIC
+    unsafe {
+        let mut pics = PICS.lock();
+        let halves = pics.read_masks();
+        let mut masks = (halves[0] as u16) | ((halves[1] as u16) << 8);
+        masks &= !(1 << irq);
+        if irq >= 8 {
+            // Ensure the PIC2 cascade line (IRQ2 on PIC1) is also unmasked.
+            masks &= !(1 << 2);
+        }
+        pics.write_masks(masks as u8, (masks >> 8) as u8);
+    }
     Ok(())
 }
 
@@ -284,13 +308,13 @@ pub fn irq_vector(irq: u8) -> u8 {
 }
 
 fn dispatch_irq(irq: u8) {
-    if irq < 16 {
-        if let Some(h) = IRQ_HANDLERS.lock()[irq as usize] {
-            h();
-        }
-    }
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(irq));
+    }
+    if irq < 16 {
+        if let Some(h) = { IRQ_HANDLERS.lock()[irq as usize] } {
+            h();
+        }
     }
 }
 
@@ -456,11 +480,11 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
     let scancode: u8 = unsafe { port.read() };
 
-    keyboard_interrupt(scancode);
-
     unsafe {
         PICS.lock().notify_end_of_interrupt(interrupt_index(1));
     }
+
+    keyboard_interrupt(scancode);
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
@@ -482,4 +506,48 @@ extern "x86-interrupt" fn ide_primary_interrupt_handler(_stack_frame: InterruptS
 
 extern "x86-interrupt" fn ide_secondary_interrupt_handler(_stack_frame: InterruptStackFrame) {
     dispatch_irq(15);
+}
+
+extern "x86-interrupt" fn irq_handler_2(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(2);
+}
+
+extern "x86-interrupt" fn irq_handler_3(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(3);
+}
+
+extern "x86-interrupt" fn irq_handler_4(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(4);
+}
+
+extern "x86-interrupt" fn irq_handler_5(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(5);
+}
+
+extern "x86-interrupt" fn irq_handler_6(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(6);
+}
+
+extern "x86-interrupt" fn irq_handler_7(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(7);
+}
+
+extern "x86-interrupt" fn irq_handler_8(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(8);
+}
+
+extern "x86-interrupt" fn irq_handler_9(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(9);
+}
+
+extern "x86-interrupt" fn irq_handler_10(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(10);
+}
+
+extern "x86-interrupt" fn irq_handler_11(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(11);
+}
+
+extern "x86-interrupt" fn irq_handler_13(_stack_frame: InterruptStackFrame) {
+    dispatch_irq(13);
 }

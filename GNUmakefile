@@ -91,16 +91,26 @@ run-blk-bios: $(IMAGE_NAME).iso
 		echo "Creating hdd.img..."; \
 		qemu-img create -f raw hdd.img 1G; \
 	fi
+	@if [ ! -f usb.img ]; then \
+		echo "Creating usb.img..."; \
+		qemu-img create -f raw usb.img 100M; \
+	fi
 	qemu-system-$(KARCH) \
 		-m 1024 \
 		-smp 4 \
 		-boot d \
   		-netdev user,id=net0,hostfwd=tcp::8000-:80 \
   		-device rtl8139,netdev=net0 \
+		-device qemu-xhci \
 		-cdrom $(IMAGE_NAME).iso \
   		-drive file=hdd.img,if=none,format=raw,id=vd0 \
   		-device virtio-blk-pci,drive=vd0 \
-		-serial stdio
+		-drive file=usb.img,if=none,format=raw,id=usb0 \
+		-device usb-storage,drive=usb0 \
+		-serial stdio \
+		-d int,guest_errors,unimp \
+	  	-D qemu.log \
+		-vga std
 
 .PHONY: run-aarch64
 run-aarch64: ovmf/ovmf-code-$(KARCH).fd ovmf/ovmf-vars-$(KARCH).fd $(IMAGE_NAME).iso
@@ -198,9 +208,9 @@ run-bios: $(IMAGE_NAME).iso
 run-hdd-bios: $(IMAGE_NAME).hdd
 	qemu-system-$(KARCH) \
 		-m 1024 \
-		-device qemu-xhci,id=xhci \
-		-device usb-kbd,bus=xhci.0 \
-		-device usb-mouse,bus=xhci.0 \
+		-device piix3-usb-uhci,id=uhci \
+		-device usb-kbd,bus=uhci.0 \
+		-device usb-mouse,bus=uhci.0 \
 		-netdev user,id=net0,hostfwd=tcp::8000-:80 -device rtl8139,netdev=net0 \
 		-smp 4 \
 		-hda $(IMAGE_NAME).hdd \
@@ -291,7 +301,7 @@ endif
 
 $(IMAGE_NAME).hdd: limine/limine kernel userspace cpio
 	rm -f $(IMAGE_NAME).hdd
-	dd if=/dev/zero bs=1M count=0 seek=100 of=$(IMAGE_NAME).hdd
+	dd if=/dev/zero bs=1M count=0 seek=200 of=$(IMAGE_NAME).hdd
 	PATH=$$PATH:/usr/sbin:/sbin sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00 -m 1
 	./limine/limine bios-install $(IMAGE_NAME).hdd
 ifeq ($(KARCH),x86_64)

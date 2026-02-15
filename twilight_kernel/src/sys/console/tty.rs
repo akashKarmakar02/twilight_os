@@ -2,6 +2,7 @@
 
 use crate::arch::x86_64::halt;
 use crate::driver::keyboard::KeyboardListener;
+use crate::driver::timer::pit::uptime_duration;
 use crate::sys::console::TTY;
 use crate::sys::console::framebuffer::FramebufferTerminal;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
@@ -208,6 +209,178 @@ impl Tty {
         matches!(b, b'\n' | b'\r' | 0x08 | 0x7F)
     }
 
+    #[inline]
+    fn pop_input_now(&self) -> Option<u8> {
+        self.input_buffer.lock().pop_front()
+    }
+
+    #[inline]
+    fn pop_input_blocking(&self) -> u8 {
+        loop {
+            if let Some(c) = self.pop_input_now() {
+                return c;
+            }
+            halt();
+        }
+    }
+
+    #[inline]
+    fn elapsed_ms_since(start: core::time::Duration) -> u64 {
+        let now = uptime_duration();
+        let elapsed = now.checked_sub(start).unwrap_or_default();
+        elapsed
+            .as_secs()
+            .saturating_mul(1000)
+            .saturating_add((elapsed.subsec_nanos() as u64) / 1_000_000)
+    }
+
+    #[inline]
+    fn canonicalize_input(&self, mut c: u8) -> u8 {
+        if self.icrnl && c == b'\r' {
+            c = b'\n';
+        }
+        c
+    }
+
+    fn read_canonical(&self, buf: &mut [u8]) -> usize {
+        let mut i = 0;
+
+        while i < buf.len() {
+            let c = self.canonicalize_input(self.pop_input_blocking());
+
+            if c == self.termios.c_cc[VEOF] {
+                // Canonical VEOF: return pending line (or 0 if empty).
+                break;
+            }
+
+            match c {
+                0x08 | 0x7F => {
+                    if i > 0 {
+                        i -= 1;
+                        if self.echo {
+                            crate::print!("\x08 \x08");
+                        }
+                    }
+                }
+                _ => {
+                    buf[i] = c;
+                    i += 1;
+
+                    // Keep line advancement on Enter in canonical mode even
+                    // when ECHO is disabled (e.g., password prompts).
+                    if c == b'\n' {
+                        crate::print!("\n");
+                    } else if self.echo {
+                        crate::print!("{}", c as char);
+                    }
+
+                    if c == b'\n' {
+                        break;
+                    }
+                }
+            }
+        }
+
+        i
+    }
+
+    fn read_noncanonical(&self, buf: &mut [u8]) -> usize {
+        if buf.is_empty() {
+            return 0;
+        }
+
+        let mut i = 0usize;
+        let vmin = self.vmin as usize;
+        let vtime_ms = (self.vtime as u64) * 100;
+
+        // Case A: MIN=0, TIME=0 -> immediate, return available bytes (possibly 0).
+        if vmin == 0 && vtime_ms == 0 {
+            while i < buf.len() {
+                let Some(c) = self.pop_input_now() else { break };
+                let c = self.canonicalize_input(c);
+                buf[i] = c;
+                i += 1;
+                if self.echo {
+                    crate::print!("{}", c as char);
+                }
+            }
+            return i;
+        }
+
+        // Case B: MIN=0, TIME>0 -> wait up to TIME for first byte, then return.
+        if vmin == 0 {
+            let start = uptime_duration();
+            loop {
+                if let Some(c) = self.pop_input_now() {
+                    let c = self.canonicalize_input(c);
+                    buf[i] = c;
+                    i += 1;
+                    if self.echo {
+                        crate::print!("{}", c as char);
+                    }
+                    // Drain any currently available bytes without blocking.
+                    while i < buf.len() {
+                        let Some(c) = self.pop_input_now() else { break };
+                        let c = self.canonicalize_input(c);
+                        buf[i] = c;
+                        i += 1;
+                        if self.echo {
+                            crate::print!("{}", c as char);
+                        }
+                    }
+                    return i;
+                }
+
+                if Self::elapsed_ms_since(start) >= vtime_ms {
+                    return 0;
+                }
+                halt();
+            }
+        }
+
+        // Case C: MIN>0, TIME=0 -> block until MIN bytes.
+        if vtime_ms == 0 {
+            while i < buf.len() && i < vmin {
+                let c = self.canonicalize_input(self.pop_input_blocking());
+                buf[i] = c;
+                i += 1;
+                if self.echo {
+                    crate::print!("{}", c as char);
+                }
+            }
+            return i;
+        }
+
+        // Case D: MIN>0, TIME>0 -> inter-byte timeout after first byte.
+        let first = self.canonicalize_input(self.pop_input_blocking());
+        buf[i] = first;
+        i += 1;
+        if self.echo {
+            crate::print!("{}", first as char);
+        }
+        let mut deadline_start = uptime_duration();
+
+        while i < buf.len() && i < vmin {
+            if let Some(c) = self.pop_input_now() {
+                let c = self.canonicalize_input(c);
+                buf[i] = c;
+                i += 1;
+                if self.echo {
+                    crate::print!("{}", c as char);
+                }
+                deadline_start = uptime_duration();
+                continue;
+            }
+
+            if Self::elapsed_ms_since(deadline_start) >= vtime_ms {
+                break;
+            }
+            halt();
+        }
+
+        i
+    }
+
     fn write_bytes_ansi(&mut self, data: &[u8]) {
         for &b in data {
             self.ansi_feed(b);
@@ -397,15 +570,16 @@ impl Tty {
     fn apply_termios(&mut self) {
         // Echo on/off
         self.echo = (self.termios.c_lflag & LFLAG_ECHO) != 0;
+        self.icanon = (self.termios.c_lflag & LFLAG_ICANON) != 0;
+        self.isig = (self.termios.c_lflag & LFLAG_ISIG) != 0;
+        self.ixon = (self.termios.c_iflag & IFLAG_IXON) != 0;
+        self.icrnl = (self.termios.c_iflag & IFLAG_ICRNL) != 0;
+        self.o_post = (self.termios.c_oflag & OFLAG_OPOST) != 0;
+        self.onlcr = (self.termios.c_oflag & OFLAG_ONLCR) != 0;
 
         // Cache VMIN / VTIME (used only when ICANON is OFF)
         self.vmin = self.termios.c_cc[VMIN];
         self.vtime = self.termios.c_cc[VTIME];
-
-        // TODO (optional but recommended):
-        // - Store booleans for ICANON/ISIG/IEXTEN and handle in read path
-        // - Honor ICRNL (map CR->NL on input) and IXON (^S/^Q) in read path
-        // - Honor OPOST/ONLCR in write path (you already mostly do raw out)
     }
 
     fn apply_sgr(&mut self, params: &str) {
@@ -554,6 +728,8 @@ impl Tty {
                 i += 1;
             }
         }
+        // Lazy cursor: ensure cursor is visible after batch write
+        self.term.refresh_cursor();
     }
 }
 
@@ -604,74 +780,34 @@ impl KeyboardListener for Tty {
 
 impl VfsNodeOps for Tty {
     fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
-        let mut i = 0;
-
-        loop {
-            let c = loop {
-                if self.input_buffer.lock().is_empty() {
-                    halt();
-                } else {
-                    unsafe {
-                        break self.input_buffer.lock().pop_front().unwrap_unchecked();
-                    };
-                }
-            };
-            buf[i] = c;
-            i += 1;
-            if !self.is_raw_mode() {
-                *self.read_to_count.lock() += 1;
-            }
-
-            match c {
-                b'\n' => {
-                    if !self.is_raw_mode() {
-                        *self.read_to_count.lock() = 0;
-                    }
-                    crate::print!("\n");
-                    break;
-                }
-                0x08 | 0x7F => {
-                    if i > 0 {
-                        if buf.len() > 1 {
-                            i -= 1;
-                        }
-
-                        if !self.is_raw_mode() {
-                            if *self.read_to_count.lock() > 1 {
-                                *self.read_to_count.lock() -= 2;
-                                crate::print!("{}", c as char);
-                                if buf.len() > 1 {
-                                    i -= 1;
-                                }
-                            } else {
-                                *self.read_to_count.lock() -= 1;
-                            }
-                        }
-                    }
-
-                    if i >= buf.len() {
-                        break;
-                    }
-                }
-                _ => {
-                    if self.echo {
-                        crate::print!("{}", c as char);
-                    }
-                    if i >= buf.len() {
-                        break;
-                    }
-                }
-            }
+        if buf.is_empty() {
+            return Ok(0);
         }
 
-        // Return exactly the number of bytes we placed into `buf`. Returning a
-        // larger count confuses stdio's internal buffer and causes "phantom"
-        // bytes to be seen by userspace (e.g., tsh reading an extra char).
-        Ok(i)
+        if self.icanon {
+            Ok(self.read_canonical(buf))
+        } else {
+            Ok(self.read_noncanonical(buf))
+        }
     }
 
     fn write(&mut self, _device: &mut BlockDev, _lba: usize, data: &[u8]) -> Result<(), ()> {
-        self.write_bytes_ansi(data);
+        if self.o_post && self.onlcr {
+            let mut expanded = Vec::with_capacity(data.len().saturating_add(16));
+            let mut prev_cr = false;
+            for &b in data {
+                if b == b'\n' && !prev_cr {
+                    expanded.push(b'\r');
+                    expanded.push(b'\n');
+                } else {
+                    expanded.push(b);
+                }
+                prev_cr = b == b'\r';
+            }
+            self.write_bytes_ansi(expanded.as_slice());
+        } else {
+            self.write_bytes_ansi(data);
+        }
         Ok(())
     }
 
@@ -689,7 +825,8 @@ impl VfsNodeOps for Tty {
 
                 unsafe {
                     let winsize = &mut *winsize_ptr;
-                    winsize.ws_row = (self.term.height / 16) as u16;
+                    // Jitter fix: Report one less row so apps don't print newline on last line and scroll
+                    winsize.ws_row = ((self.term.height / 16).saturating_sub(1)) as u16;
                     winsize.ws_col = (self.term.width / 8) as u16;
                     winsize.ws_xpixel = self.term.width as u16;
                     winsize.ws_ypixel = self.term.height as u16;
@@ -714,6 +851,9 @@ impl VfsNodeOps for Tty {
                 // Install and apply
                 self.termios = newt;
                 self.apply_termios();
+                if cmd == IOCTL_TCSETSF {
+                    self.input_buffer.lock().clear();
+                }
             }
             _ => {
                 return Ok(0);

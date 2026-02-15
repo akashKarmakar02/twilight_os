@@ -97,7 +97,7 @@ impl TwilightFrameBuffer {
     }
 
     #[inline]
-    fn pixels_mut(&mut self) -> &mut [u32] {
+    pub fn pixels_mut(&mut self) -> &mut [u32] {
         unsafe { slice::from_raw_parts_mut(self.pixel_ptr, self.pixel_len) }
     }
 
@@ -149,9 +149,7 @@ impl TwilightFrameBuffer {
     }
 
     pub fn sync_full(&mut self) {
-        let pixel_data = unsafe {
-            slice::from_raw_parts(self.pixel_ptr, self.pixel_len)
-        };
+        let pixel_data = unsafe { slice::from_raw_parts(self.pixel_ptr, self.pixel_len) };
         self.video_buf.copy_from_slice(pixel_data);
     }
 
@@ -188,26 +186,28 @@ impl TwilightFrameBuffer {
 
         if scroll >= h {
             self.clear_buf(fill_color);
+            self.sync_full();
             return;
         }
 
+        // 1. Move data in RAM Backbuffer (fast)
+        // We can use copy_within because we are copying from higher index (src) to lower index (dst),
+        // so we are not overwriting data we haven't read yet assuming forward iteration,
+        // but copy_within handles overlap correctly.
+        let count = (h - scroll) * w;
         let src_start = scroll * w;
         let dst_start = 0;
 
-        // SAFER copy: use a manual copy to avoid overlap issues with copy_within
-        for i in 0..(h - scroll) * w {
-            let val = self.video_buf[src_start + i];
-            if val != 0 {}
-            self.video_buf[dst_start + i] = self.video_buf[src_start + i];
-        }
+        // Safety: pixels_mut() returns a slice to the backbuffer which is normal RAM.
+        self.pixels_mut()
+            .copy_within(src_start..src_start + count, dst_start);
 
-        // Fill the bottom cleared area
+        // 2. Fill the bottom cleared area in RAM
         let fill_start = (h - scroll) * w;
-        self.video_buf[fill_start..].fill(fill_color);
+        self.pixels_mut()[fill_start..].fill(fill_color);
 
-        // Create a temporary copy to avoid the borrow conflict
-        let video_buf_copy = unsafe { core::slice::from_raw_parts(self.video_buf.as_ptr(), self.video_buf.len()) };
-        self.pixels_mut().copy_from_slice(&video_buf_copy);
+        // 3. Sync RAM to VRAM (Write-only to VRAM, fast burst write usually)
+        self.sync_full();
     }
 
     /// Scroll the framebuffer content down by `lines` pixels.
@@ -467,12 +467,7 @@ fn uptime_ms() -> u64 {
 }
 
 impl VfsNodeOps for TwilightFrameBuffer {
-    fn read(
-        &self,
-        _device: &mut BlockDev,
-        offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<usize, ()> {
+    fn read(&self, _device: &mut BlockDev, offset: usize, buffer: &mut [u8]) -> Result<usize, ()> {
         if buffer.len() % 4 != 0 {
             return Err(());
         }
@@ -486,7 +481,8 @@ impl VfsNodeOps for TwilightFrameBuffer {
         }
 
         let src = &self.video_buf[start..end];
-        let dst = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u32, words) };
+        let dst =
+            unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u32, words) };
         dst.copy_from_slice(src);
 
         Ok(buffer.len())
@@ -497,9 +493,8 @@ impl VfsNodeOps for TwilightFrameBuffer {
             return Err(());
         }
 
-        let buf_u32 = unsafe {
-            core::slice::from_raw_parts(buffer.as_ptr() as *const u32, buffer.len() / 4)
-        };
+        let buf_u32 =
+            unsafe { core::slice::from_raw_parts(buffer.as_ptr() as *const u32, buffer.len() / 4) };
 
         // `offset` is provided in pixel units by console + /dev/fb0 writers.
         let start = offset;

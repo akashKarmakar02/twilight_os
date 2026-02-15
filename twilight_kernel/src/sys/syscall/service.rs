@@ -2,15 +2,16 @@ use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
 use crate::driver::disk::ata::IO;
 use crate::driver::disk::dummy_blockdev;
 use crate::driver::timer::pit::uptime;
-use crate::sys::console::{DIR, get_tty};
+use crate::sys::console::get_tty;
 use crate::sys::fs::pipe::{IOCTL_PIPE_GET_ERRNO, IOCTL_PIPE_GET_LAST_WRITE, make_pipe_nodes};
 use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
 use crate::sys::kmsg::IOCTL_KMSG_GET_HEAD;
 use crate::sys::net::socket::{SocketFile, tcp::TcpSocket, udp::UdpSocket};
 use crate::sys::proc::{FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, USER_STACK_SIZE};
+use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
 use crate::task::executor::halt;
-use crate::{logger, print, serial_println, sys};
+use crate::{logger, print, sys};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -72,17 +73,60 @@ fn normalize_path(p: &str) -> String {
     }
 }
 
+fn home_root_for_path(path: &str) -> Option<String> {
+    if !path.starts_with("/home/") {
+        return None;
+    }
+    let rest = &path["/home/".len()..];
+    let user = rest.split('/').next().unwrap_or("");
+    if user.is_empty() {
+        return None;
+    }
+    Some(format!("/home/{}", user))
+}
+
+fn check_encrypted_home_access(path: &str) -> Result<(), i64> {
+    let Some(home_root) = home_root_for_path(path) else {
+        return Ok(());
+    };
+
+    #[allow(static_mut_refs)]
+    let encrypted = match unsafe { VFS.get_mut().get_attr(&home_root, IFLAG_ENCRYPTED) } {
+        Ok(v) => (v & IFLAG_ENCRYPTED) != 0,
+        Err(_) => false,
+    };
+    if !encrypted {
+        return Ok(());
+    }
+
+    let current_uid = sys::proc::user::get_uid() as u32;
+    if current_uid == 0 {
+        return Ok(());
+    }
+
+    #[allow(static_mut_refs)]
+    let home_meta = match unsafe { VFS.get_mut().metadata(&home_root) } {
+        Ok(meta) => meta,
+        Err(_) => return Ok(()),
+    };
+    if home_meta.uid == current_uid {
+        Ok(())
+    } else {
+        Err(-(EACCES as i64))
+    }
+}
+
 #[inline(always)]
-fn fill_stat_from_meta(out: &mut Stat, meta: &crate::sys::fs::vfs::Metadata) {
+fn fill_stat_from_meta(out: &mut Stat, meta: &sys::fs::vfs::Metadata) {
     out.st_size = meta.size as i64;
     out.st_mode = match meta.file_type {
-        FileType::File => 0o100644,        // regular file: rw-r--r--
+        FileType::File => 0o100666,        // regular file: rw-rw-rw-
         FileType::Dir => 0o040755,         // directory: rwxr-xr-x
         FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
         FileType::BlockDevice => 0o060660, // block device: rw-rw----
     };
-    out.st_uid = 0;
-    out.st_gid = 0;
+    out.st_uid = meta.uid;
+    out.st_gid = meta.gid;
     out.st_ino = meta.ino as u64;
     out.st_nlink = 1;
     out.st_rdev = 0;
@@ -786,6 +830,9 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
             Err(e) => return e as i64,
         }
     };
+    if let Err(e) = check_encrypted_home_access(&full_path) {
+        return e;
+    }
 
     // Try open existing
     let mut existed = true;
@@ -803,7 +850,6 @@ pub fn openat(dirfd: i32, path: &str, flags: i32, mode: u32) -> i64 {
                     return -(ENOTDIR as i64);
                 }
             } else {
-                serial_println!("{}", full_path);
                 return -(ENOENT as i64);
             }
 
@@ -1426,6 +1472,9 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
         }
         OpenFileKind::Socket(_) => return -(ENOTDIR as i64),
     }
+    if let Err(e) = check_encrypted_home_access(&file.path) {
+        return e;
+    }
 
     // Read directory entries from VFS (adjust API if yours differs)
     #[allow(static_mut_refs)]
@@ -1521,19 +1570,26 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
 
 pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     let file_name_ptr = UserPtr(file_name_ptr as *const u8);
-    let Ok(mut file_path) = copy_cstr_from_user(file_name_ptr, 4096) else {
+    let Ok(file_path) = copy_cstr_from_user(file_name_ptr, 4096) else {
         return -1;
     };
 
-    if file_path.starts_with("./") {
-        #[allow(static_mut_refs)]
-        let pwd = unsafe { DIR.as_str() };
-        let calnonical_pwd = if pwd.ends_with("/") {
-            pwd.to_string()
-        } else {
-            format!("{}/", pwd)
-        };
-        file_path = file_path.replace("./", &calnonical_pwd.as_str());
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(sys::proc::id())
+            .unwrap()
+    };
+
+    let file_path = if file_path.starts_with('/') {
+        normalize_path(file_path.as_str())
+    } else {
+        normalize_path(&join_paths(process.pwd.as_str(), file_path.as_str()))
+    };
+    if let Err(e) = check_encrypted_home_access(file_path.as_str()) {
+        return e;
     }
 
     #[allow(static_mut_refs)]
@@ -1547,6 +1603,12 @@ pub(crate) fn stat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
     0
 }
 
+pub(crate) fn lstat(file_name_ptr: usize, stat_ptr: usize) -> i64 {
+    // TwilightFS currently does not expose distinct symlink metadata semantics here,
+    // so lstat behaves the same as stat for now.
+    stat(file_name_ptr, stat_ptr)
+}
+
 pub fn access(path_ptr: usize, _mode: i32) -> i64 {
     let path_ptr = UserPtr(path_ptr as *const u8);
     let Ok(path) = copy_cstr_from_user(path_ptr, 4096) else {
@@ -1554,7 +1616,31 @@ pub fn access(path_ptr: usize, _mode: i32) -> i64 {
     };
 
     #[allow(static_mut_refs)]
-    match unsafe { VFS.get_mut().metadata(path.trim()) } {
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    // AT_FDCWD is -100
+    let full_path = if path.starts_with('/') {
+        normalize_path(path.trim())
+    } else {
+        match base_for_dirfd(process, -100) {
+            Ok(base) => normalize_path(&join_paths(&base, path.trim())),
+            Err(e) => return e as i64,
+        }
+    };
+    if let Err(e) = check_encrypted_home_access(&full_path) {
+        return e;
+    }
+
+    #[allow(static_mut_refs)]
+    match unsafe { VFS.get_mut().metadata(&full_path) } {
         Ok(_) => 0,
         Err(_) => -(ENOENT as i64),
     }
@@ -1588,6 +1674,9 @@ pub fn newfstatat(dirfd: i32, pathname_ptr: usize, stat_ptr: usize, _flags: i32)
             Err(e) => return e as i64,
         }
     };
+    if let Err(e) = check_encrypted_home_access(&full_path) {
+        return e;
+    }
 
     #[allow(static_mut_refs)]
     let Ok(meta) = (unsafe { VFS.get_mut().metadata(&full_path) }) else {
@@ -1656,17 +1745,17 @@ pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
 
                 user_stat.st_size = metadata.size as i64;
                 user_stat.st_mode = match metadata.file_type {
-                    FileType::File => 0o100644,
+                    FileType::File => 0o100666,
                     FileType::Dir => 0o040755,
                     FileType::CharDevice => 0o020666,
                     FileType::BlockDevice => 0o060660,
                 };
-                user_stat.st_uid = 0;
-                user_stat.st_gid = 0;
+                user_stat.st_uid = node.metadata.uid;
+                user_stat.st_gid = node.metadata.gid;
                 user_stat.st_ino = metadata.ino as u64;
                 user_stat.st_nlink = 1;
                 user_stat.st_rdev = 0;
-                user_stat.st_blksize = 4096;
+                user_stat.st_blksize = 2048;
                 user_stat.st_blocks = ((metadata.size as u64 + 511) / 512) as i64;
                 user_stat.st_atim = Timespec {
                     tv_sec: metadata.access_time as i64,
@@ -1717,6 +1806,7 @@ pub fn getcwd(buf_ptr: usize, buf_len: usize) -> i64 {
             .unwrap()
     };
 
+    buf.fill(0);
     let cwd = proc.pwd.as_str();
     let cwd_bytes = cwd.as_bytes();
     buf[..cwd_bytes.len()].copy_from_slice(cwd_bytes);
@@ -1738,34 +1828,14 @@ pub fn chdir(path_ptr: usize) -> i64 {
             .unwrap()
     };
 
-    let dir_path = if path.starts_with("./") || !path.starts_with("/") {
-        #[allow(static_mut_refs)]
-        let pwd = process.pwd.as_str();
-        let calnonical_pwd = if pwd.ends_with("/") {
-            pwd.to_string()
-        } else {
-            format!("{}/", pwd)
-        };
-        format!("{}{}", calnonical_pwd, path.replace("./", ""))
+    let dir_path = if path.starts_with('/') {
+        normalize_path(path.as_str())
     } else {
-        path
+        normalize_path(&join_paths(process.pwd.as_str(), path.as_str()))
     };
-
-    let dir_path = if dir_path.ends_with("..") {
-        let parts = dir_path.split("/");
-        let mut vec = parts.collect::<Vec<&str>>();
-
-        vec.pop();
-        vec.pop();
-
-        if vec.is_empty() || (vec[0] == "" && vec.len() == 1) {
-            "/".to_string()
-        } else {
-            vec.join("/")
-        }
-    } else {
-        dir_path
-    };
+    if let Err(e) = check_encrypted_home_access(&dir_path) {
+        return e;
+    }
 
     #[allow(static_mut_refs)]
     let fs = unsafe { VFS.get_mut() };
@@ -1779,6 +1849,67 @@ pub fn chdir(path_ptr: usize) -> i64 {
         0
     } else {
         -1
+    }
+}
+
+pub fn rename(old_path_ptr: usize, new_path_ptr: usize) -> i64 {
+    let Ok(old_path) = copy_cstr_from_user(UserPtr(old_path_ptr as *const u8), 4096) else {
+        return -(EFAULT as i64);
+    };
+    let Ok(new_path) = copy_cstr_from_user(UserPtr(new_path_ptr as *const u8), 4096) else {
+        return -(EFAULT as i64);
+    };
+
+    if old_path.is_empty() || new_path.is_empty() {
+        return -(ENOENT as i64);
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_option = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_option else {
+        return -(ESRCH as i64);
+    };
+
+    let old_full_path = if old_path.starts_with('/') {
+        normalize_path(old_path.as_str())
+    } else {
+        normalize_path(&join_paths(process.pwd.as_str(), old_path.as_str()))
+    };
+    let new_full_path = if new_path.starts_with('/') {
+        normalize_path(new_path.as_str())
+    } else {
+        normalize_path(&join_paths(process.pwd.as_str(), new_path.as_str()))
+    };
+
+    if old_full_path == "/" || new_full_path == "/" {
+        return -(EINVAL as i64);
+    }
+    if old_full_path == new_full_path {
+        return 0;
+    }
+    if let Err(e) = check_encrypted_home_access(&old_full_path) {
+        return e;
+    }
+    if let Err(e) = check_encrypted_home_access(&new_full_path) {
+        return e;
+    }
+
+    #[allow(static_mut_refs)]
+    let fs = unsafe { VFS.get_mut() };
+
+    if fs.open(old_full_path.as_str()).is_err() {
+        return -(ENOENT as i64);
+    }
+
+    if fs.rename(old_full_path.as_str(), new_full_path.as_str()).is_ok() {
+        0
+    } else {
+        -(EIO as i64)
     }
 }
 
@@ -2194,6 +2325,15 @@ pub fn geteuid() -> i64 {
     sys::proc::user::get_uid() as i64
 }
 
+pub fn setgid(gid: u64) -> i64 {
+    sys::proc::user::set_gid(gid as usize);
+    0
+}
+
+pub fn getegid() -> i64 {
+    sys::proc::user::get_gid() as i64
+}
+
 fn poll_fd_set(fds: &mut [PollFd], process: &mut Process) -> Result<usize, i64> {
     let mut ready_count = 0;
 
@@ -2326,6 +2466,78 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
         }
 
         halt();
+
+        ready = match poll_fd_set(fds, process) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+
+        if ready > 0 {
+            return ready as i64;
+        }
+    }
+}
+
+pub fn ppoll(
+    fds_ptr: usize,
+    nfds: usize,
+    tmo_p: usize,
+    _sigmask_ptr: usize,
+    _sigsetsize: usize,
+) -> i64 {
+    if nfds == 0 {
+        return 0;
+    }
+    if fds_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let fds = unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds) };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let mut ready = match poll_fd_set(fds, process) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    if ready > 0 {
+        return ready as i64;
+    }
+
+    let deadline = if tmo_p != 0 {
+        let ts_ptr = tmo_p as *const Timespec;
+        let ts = unsafe { &*ts_ptr };
+        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
+            return 0;
+        }
+        let now = uptime();
+        let dur = (ts.tv_sec as f64) + (ts.tv_nsec as f64) / 1_000_000_000.0;
+        Some(now + dur)
+    } else {
+        None
+    };
+
+    loop {
+        if let Some(limit) = deadline {
+            if uptime() >= limit {
+                return 0;
+            }
+        }
+
+        halt();
+
+        // Check for signals here if we implemented them?
+        // But for now just poll fds.
 
         ready = match poll_fd_set(fds, process) {
             Ok(n) => n,

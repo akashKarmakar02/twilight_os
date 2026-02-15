@@ -191,6 +191,8 @@ pub fn make_pipe_nodes(nonblock: bool) -> (VfsNode, VfsNode) {
     let meta_r = Metadata {
         ino: ino_r,
         name: "pipe".into(),
+        uid: 0,
+        gid: 0,
         file_type: FileType::CharDevice,
         size: 0,
         created_time: 0,
@@ -201,6 +203,8 @@ pub fn make_pipe_nodes(nonblock: bool) -> (VfsNode, VfsNode) {
         ino: ino_w,
         name: "pipe".into(),
         file_type: FileType::CharDevice,
+        uid: 0,
+        gid: 0,
         size: 0,
         created_time: 0,
         access_time: 0,

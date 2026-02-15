@@ -8,14 +8,19 @@ mod procfs;
 pub mod ram_fs;
 pub mod twilight_fs;
 pub mod vfs;
+pub mod mbr;
 
+use crate::driver::disk::USB_BLOCK_DEVICE;
 use crate::println;
 use crate::sys::fs::devfs::DevFs;
 use crate::sys::fs::fat16::{Fat16Fs, detect_fat16_partition};
 use crate::sys::fs::procfs::ProcFs;
 use crate::sys::fs::ram_fs::InitramfsFs;
-use crate::sys::fs::twilight_fs::{TfsProxy, TwilightFs};
+use crate::sys::fs::twilight_fs::{
+    TfsProxy, TwilightFs, fs_block_offset_bytes, set_fs_block_offset_bytes,
+};
 use crate::sys::fs::vfs::VFS;
+use crate::sys::fs::vfs::{FileSystem, Metadata, VfsNode};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -36,8 +41,69 @@ pub enum VfsError {
     IoError,
 }
 
+struct OffsetScopedTwilightFs {
+    fs: TwilightFs,
+    offset_bytes: usize,
+}
+
+impl OffsetScopedTwilightFs {
+    fn run_with_offset<T>(
+        &mut self,
+        f: impl FnOnce(&mut TwilightFs) -> Result<T, ()>,
+    ) -> Result<T, ()> {
+        let old = fs_block_offset_bytes();
+        set_fs_block_offset_bytes(self.offset_bytes);
+        let out = f(&mut self.fs);
+        set_fs_block_offset_bytes(old);
+        out
+    }
+}
+
+impl FileSystem for OffsetScopedTwilightFs {
+    fn open(&mut self, path: &str) -> Result<VfsNode, ()> {
+        self.run_with_offset(|fs| fs.open(path))
+    }
+
+    fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
+        self.run_with_offset(|fs| fs.mkdir(parent_dir, path))
+    }
+
+    fn rmdir(&mut self, path: &str) -> Result<(), ()> {
+        self.run_with_offset(|fs| fs.rmdir(path))
+    }
+
+    fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), ()> {
+        self.run_with_offset(|fs| fs.rename(old_path, new_path))
+    }
+
+    fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
+        self.run_with_offset(|fs| fs.ls(path))
+    }
+
+    fn rm(&mut self, path: &str) -> Result<(), ()> {
+        self.run_with_offset(|fs| fs.rm(path))
+    }
+
+    fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
+        self.run_with_offset(|fs| fs.touch(parent_path, filename))
+    }
+
+    fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
+        self.run_with_offset(|fs| fs.metadata(path))
+    }
+}
+
 pub fn init(show_log: bool) {
     let uptime = crate::driver::timer::pit::uptime();
+    for _ in 0..16 {
+        #[allow(static_mut_refs)]
+        let usb_ready = unsafe { USB_BLOCK_DEVICE.is_some() };
+        if usb_ready {
+            break;
+        }
+        crate::driver::usb::poll_all_drivers();
+    }
+
     for bus in 0..2 {
         for dsk in 0..2 {
             try_mount_boot(bus, dsk, show_log);
@@ -64,6 +130,7 @@ pub fn init(show_log: bool) {
                     VFS.get_mut()
                         .mount("/proc", Arc::new(Mutex::new(ProcFs::new())));
                 }
+                try_init_usb_storage(show_log);
                 try_mount_boot(bus, dsk, show_log);
                 if show_log {
                     println!(
@@ -99,6 +166,7 @@ pub fn init(show_log: bool) {
             VFS.get_mut()
                 .mount("/proc", Arc::new(Mutex::new(ProcFs::new())));
         }
+        try_init_usb_storage(show_log);
         if show_log {
             println!(
                 "\x1b[93m[{:.6}]\x1b[0m TwilightFS Superblock found in Virtio Block Device",
@@ -118,6 +186,7 @@ pub fn init(show_log: bool) {
         VFS.get_mut()
             .mount("/proc", Arc::new(Mutex::new(ProcFs::new())));
     }
+    try_init_usb_storage(show_log);
     println!(
         "\x1b[93m[{:.6}]\x1b[0m No TwilightFS Superblock found",
         uptime
@@ -126,6 +195,83 @@ pub fn init(show_log: bool) {
     // because harddisk does not have a file system use rootfs
     // TODO: this is messy fix it later
     try_mount_rootfs();
+}
+
+fn try_init_usb_storage(show_log: bool) -> bool {
+    #[allow(static_mut_refs)]
+    let usb_ready = unsafe { USB_BLOCK_DEVICE.is_some() };
+    if !usb_ready {
+        return false;
+    }
+
+    let old_offset = fs_block_offset_bytes();
+    let mut mount_target: Option<(TwilightFs, usize)> = None;
+
+    let result = match TwilightFs::check_usb_blk() {
+        Ok(fs) => {
+            mount_target = Some((fs, fs_block_offset_bytes()));
+            true
+        }
+        Err(_) => match TwilightFs::format_usb_blk() {
+            Ok(fs) => {
+                mount_target = Some((fs, fs_block_offset_bytes()));
+                if show_log {
+                    println!(
+                        "\x1b[93m[{:.6}]\x1b[0m USB storage initialized with TwilightFS at /dev/disk1",
+                        crate::driver::timer::pit::uptime()
+                    );
+                }
+                true
+            }
+            Err(err) => {
+                if show_log {
+                    println!(
+                        "\x1b[93m[{:.6}]\x1b[0m USB storage init skipped: {}",
+                        crate::driver::timer::pit::uptime(),
+                        err
+                    );
+                }
+                false
+            }
+        },
+    };
+
+    set_fs_block_offset_bytes(old_offset);
+
+    if let Some((fs, offset_bytes)) = mount_target.take() {
+        #[allow(static_mut_refs)]
+        let mounted = unsafe {
+            VFS.get_mut()
+                .mount_points
+                .iter()
+                .any(|(prefix, _)| *prefix == "/mnt/usb")
+        };
+
+        if !mounted {
+            #[allow(static_mut_refs)]
+            unsafe {
+                if VFS.get_mut().metadata("/mnt").is_err() {
+                    let _ = VFS.get_mut().mkdir("/", "mnt");
+                }
+                if VFS.get_mut().metadata("/mnt/usb").is_err() {
+                    let _ = VFS.get_mut().mkdir("/mnt", "usb");
+                }
+                VFS.get_mut().mount(
+                    "/mnt/usb",
+                    Arc::new(Mutex::new(OffsetScopedTwilightFs { fs, offset_bytes })),
+                );
+            }
+        }
+
+        if show_log {
+            println!(
+                "\x1b[93m[{:.6}]\x1b[0m USB storage mounted at /mnt/usb",
+                crate::driver::timer::pit::uptime()
+            );
+        }
+    };
+
+    result
 }
 
 fn try_mount_rootfs() {

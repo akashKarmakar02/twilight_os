@@ -371,6 +371,8 @@ impl FileSystem for Fat16Fs {
             size: entry.size as usize,
             name: entry.name.clone(),
             ino: 0,
+            uid: 0,
+            gid: 0,
             access_time: 0,
             created_time: 0,
             modified_time: 0,
@@ -407,6 +409,8 @@ impl FileSystem for Fat16Fs {
                 size: entry.size as usize,
                 name: entry.name,
                 ino: 0,
+                uid: 0,
+                gid: 0,
                 access_time: 0,
                 created_time: 0,
                 modified_time: 0,
@@ -430,6 +434,8 @@ impl FileSystem for Fat16Fs {
             } else {
                 FileType::File
             },
+            uid: 0,
+            gid: 0,
             size: entry.size as usize,
             name: entry.name,
             ino: 0,
