@@ -1206,7 +1206,7 @@ pub fn uname(ptr: usize) -> i64 {
             fill(&mut uname_s.sysname, "TwilightOS");
             fill(&mut uname_s.nodename, "twilight");
             fill(&mut uname_s.release, "0.1.0-testing-build.x86_64");
-            fill(&mut uname_s.version, "#1 NON-SMP 26-10-2025");
+            fill(&mut uname_s.version, "#1 NON-SMP 16-02-2026");
             fill(&mut uname_s.machine, "x86_64");
             fill(&mut uname_s.domainname, "(none)");
         }
