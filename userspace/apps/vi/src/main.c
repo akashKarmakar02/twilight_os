@@ -154,6 +154,16 @@ void enableRawMode() {
 }
 
 int editorReadKey() {
+  static char pending[8];
+  static int pending_len = 0;
+
+  if (pending_len > 0) {
+    int out = (unsigned char)pending[0];
+    memmove(pending, pending + 1, pending_len - 1);
+    pending_len--;
+    return out;
+  }
+
   int nread;
   char c;
   while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
@@ -163,9 +173,21 @@ int editorReadKey() {
     char seq[3];
     if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
     if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+
+    /* If this isn't a CSI/SS3 escape sequence, preserve bytes for next reads. */
+    if (seq[0] != '[' && seq[0] != 'O') {
+      if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[0];
+      if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[1];
+      return '\x1b';
+    }
+
     if (seq[0] == '[') {
       if (seq[1] >= '0' && seq[1] <= '9') {
-        if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+        if (read(STDIN_FILENO, &seq[2], 1) != 1) {
+          if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[0];
+          if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[1];
+          return '\x1b';
+        }
         if (seq[2] == '~') {
           switch (seq[1]) {
             case '1': return HOME_KEY;
@@ -177,6 +199,10 @@ int editorReadKey() {
             case '8': return END_KEY;
           }
         }
+        if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[0];
+        if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[1];
+        if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[2];
+        return '\x1b';
       } else {
         switch (seq[1]) {
           case 'A': return ARROW_UP;
@@ -186,12 +212,18 @@ int editorReadKey() {
           case 'H': return HOME_KEY;
           case 'F': return END_KEY;
         }
+        if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[0];
+        if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[1];
+        return '\x1b';
       }
     } else if (seq[0] == 'O') {
       switch (seq[1]) {
         case 'H': return HOME_KEY;
         case 'F': return END_KEY;
       }
+      if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[0];
+      if (pending_len < (int)sizeof(pending)) pending[pending_len++] = seq[1];
+      return '\x1b';
     }
     return '\x1b';
   } else {
