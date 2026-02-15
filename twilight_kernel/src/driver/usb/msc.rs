@@ -26,7 +26,7 @@ impl BlockDeviceIO for UsbMscBlockDevice {
             return Err(());
         }
         #[allow(static_mut_refs)]
-        if unsafe { !super::XHCI_DEVICES.get().is_some() } {
+        if unsafe { super::XHCI_DEVICES.get().is_some() } {
             let xhci =  unsafe { super::XHCI_DEVICES.get_mut_unchecked() };
             let hc = xhci.get_mut(self.controller_id).ok_or(())?;
             hc.msc_read(self.msc_index, lba, buf).map_err(|_| ())
