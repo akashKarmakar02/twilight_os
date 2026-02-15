@@ -371,6 +371,7 @@ fn ensure_partition_table(
                 entry.partition_type = partition::TWILIGHT_PARTITION_TYPE;
                 entry.lba_start = twilight_entry_val.lba_start;
                 entry.status = twilight_entry_val.status;
+                break;
             }
         }
 
