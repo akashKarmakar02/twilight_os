@@ -10,6 +10,7 @@ rootfs.cpio
 hdd.img
 twilight-os.hdd
 qemu.log
+usb.img
 
 /userspace/target
 /userspace/twilight_c.a
