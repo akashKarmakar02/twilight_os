@@ -24,35 +24,34 @@ It currently supports x86_64 architecture, with future plans for ARM/RISC-V.
 ### Userspace & Tooling
 - **Native C Compilation**: Includes `tcc` (Tiny C Compiler) to compile and run C programs directly within the OS.
 - **Dynamic Binaries**: Full ELF shared object (`.so`) and dynamic executable support.
-- **Scripting**: `tpy`, a Python-like interpreter for rapid scripting.
+- **Scripting**: `tpy`, a Python-like interpreter (vibe coded because i don't know if porting python will work without clone and futex syscall).
 - **Shell & Utilities**: `tsh` (shell) with pipes/redirection, `grep`, `cat`, `ls`, `curl`, `vi` (modal editor).
 - **Terminal Signals**: Ctrl+C (`SIGINT`) handling is supported for interactive userspace workflows.
-- **Init System**: A modern `init` system capable of service management (`logind`, `httpd`).
+- **Init System**: A simple `init` system capable of service management (`logind`).
 
 ### Kernel & Core
 - **Language**: Written in pure Rust (no standard library).
-- **Filesystem**: **TwilightFS** (TFS) - a custom, resilient filesystem with hot-file caching, efficient directory lookups, and encrypted home directory support. Also supports FAT16 (`/boot`) and VFS mount points.
-- **Networking**: Custom network stack (TCP/UDP, DHCP, DNS) with drivers for RTL8139 and PCNET. Use `curl` to fetch pages!
-- **Tasks**: Cooperative multitasking with an executor for async kernel tasks.
+- **Filesystem**: **TwilightFS** (TFS) - a custom, bitmap-based filesystem with hot-file caching, efficient directory lookups, and encrypted home directory support. Also supports FAT16 (`/boot`) and VFS mount points(don' work /boot mount).
+- **Networking**: Custom network stack (using smoltcp crate) (TCP/UDP, DHCP, DNS) with drivers for RTL8139 and PCNET. Use `curl` to fetch pages!
 - **Drivers**:
     - **Storage**: ATA/IDE and VirtIO Block devices.
     - **USB**: UHCI controller support.
-    - **Input**: PS/2 Keyboard & Mouse (`/dev/input/mice`).
+    - **Input**: PS/2 & USB Keyboard & Mouse (`/dev/input/mice`).
     - **Display**: UEFI Framebuffer (`/dev/fb0`).
     - **Time**: RTC and CMOS support.
 
 ## Roadmap & Status
 
-| Feature | Status | details |
-| :--- | :--- | :--- |
-| **Paging & Memory** | ✅ Done | Physical/Virtual allocation, User/Kernel separation |
-| **VFS & TwilightFS** | ✅ Done | Custom on-disk format, mount points `/dev`, `/proc` |
-| **Dynamic Linking** | ✅ Done | ELF loader, shared libraries support |
-| **Networking** | ✅ Done | TCP/UDP stack, `httpd` server, `curl` client |
-| **Userspace** | ✅ Done | `tcc`, `make` (partial), `vi`, `tpy` |
-| **Multitasking** | 🚧 Beta | Cooperative scheduler, SMP detection (init) |
-| **Graphics** | 🚧 Alpha | Framebuffer access, basic compositing |
-| **Doom** | ⏳ Planned | Porting doomgeneric |
+| Feature              | Status           | details                                             |
+|:---------------------|:-----------------|:----------------------------------------------------|
+| **Paging & Memory**  | ✅ Done           | Physical/Virtual allocation, User/Kernel separation |
+| **VFS & TwilightFS** | ✅ Done           | Custom on-disk format, mount points `/dev`, `/proc` |
+| **Dynamic Linking**  | ✅ Done           | ELF loader, shared libraries support                |
+| **Networking**       | ✅ Done           | TCP/UDP stack, `httpd` server, `curl` client        |
+| **Userspace**        | ✅ Done           | `tcc`, `make` (partial), `vi`, `tpy`                |
+| **Multitasking**     | 🚧 Beta          | Cooperative scheduler, SMP detection (init)         |
+| **Graphics**         | 🚧 Experimenting | Framebuffer access, basic compositing               |
+| **Doom**             | ⏳ Planned        | Porting doomgeneric                                 |
 
 ## Build Instructions
 

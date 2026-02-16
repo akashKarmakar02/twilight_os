@@ -16,8 +16,6 @@ spin = "0.9.8"
 iced-x86 = { version = "1.21.0", default-features = false, features = ["decoder", "no_std", "intel"] }
 bitflags = "2.9.0"
 sha2 = { version = "0.10.9", default-features = false, features = ["force-soft"] }
-libm = "0.2.15"
-time = { version = "0.2.27", default-features = false }
 chacha20 = { version = "0.9.1", default-features = false }
 [target.'cfg(target_arch="x86_64")'.dependencies]
 x86_64 = "0.15.2"
