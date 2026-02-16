@@ -105,7 +105,8 @@ static char *find_kv_value(const char *text, const char *key) {
   return NULL;
 }
 
-static int parse_meminfo_kb(const char *text, const char *key, uint64_t *out_kb) {
+static int parse_meminfo_kb(const char *text, const char *key,
+                            uint64_t *out_kb) {
   *out_kb = 0;
   char *val = find_kv_value(text, key);
   if (!val)
@@ -129,8 +130,8 @@ static int parse_meminfo_kb(const char *text, const char *key, uint64_t *out_kb)
   return 0;
 }
 
-static void print_rows_with_ascii(const char **art, size_t art_lines, const char **rows,
-                                  size_t row_lines) {
+static void print_rows_with_ascii(const char **art, size_t art_lines,
+                                  const char **rows, size_t row_lines) {
   size_t n = art_lines > row_lines ? art_lines : row_lines;
   for (size_t i = 0; i < n; i++) {
     const char *a = i < art_lines ? art[i] : "        ";
@@ -191,70 +192,140 @@ int main(void) {
     mem_used_kb = mem_total_kb - mem_avail_kb;
   }
 
+#define COLOR_RESET "\033[0m"
+#define COLOR_CYAN "\033[1;36m"
+#define COLOR_PURPLE "\033[1;35m"
+#define COLOR_WHITE "\033[1;37m"
+
+  const char *linux_art[] = {
+      "   .--.  ", "  |o_o | ",     "  |:_/ | ",    " //   \\\\ ",
+      "(|     |)", "/'\\_   _/`\\", "\\___)=(___/",
+  };
+
+  const char *twilight_art[] = {
+      " _________   ___       __   ___  ___       ___  ________  ___  ___  "
+      "_________",
+      "|\\___   ___\\|\\  \\     |\\  \\|\\  \\|\\  \\     |\\  \\|\\   "
+      "____\\|\\  \\|\\  \\|\\___   ___\\",
+      "\\|___ \\  \\_|\\ \\  \\    \\ \\  \\ \\  \\ \\  \\    \\ \\  \\ \\  "
+      "\\___|\\ \\  \\\\\\  \\|___ \\  \\_|",
+      "     \\ \\  \\  \\ \\  \\  __\\ \\  \\ \\  \\ \\  \\    \\ \\  \\ \\  "
+      "\\  __\\ \\   __  \\   \\ \\  \\",
+      "      \\ \\  \\  \\ \\  \\|   \\_\\  \\ \\  \\ \\  \\____\\ \\  \\ \\  "
+      "\\|\\  \\ \\  \\ \\  \\   \\ \\  \\",
+      "       \\ \\__\\  \\ \\____|\\______\\ \\__\\ \\_______\\ \\__\\ "
+      "\\_______\\ \\__\\ \\__\\   \\ \\__\\",
+      "        \\|__|   "
+      "\\|____|\\______|\\|__|\\|_______|\\|__|\\|_______|\\|__|\\|__|    "
+      "\\|__|",
+      "",
+      "                          [  T W I L I G H T   O S  ]"};
+
   // Host/user
   const char *user = getenv("USER");
   if (!user)
     user = "unknown";
   const char *host = u.nodename[0] ? u.nodename : "twilight";
 
-  char line0[256];
-  snprintf(line0, sizeof(line0), "%s@%s", user, host);
+  char line0[512];
+  snprintf(line0, sizeof(line0), "%s%s@%s%s", COLOR_PURPLE, user, host,
+           COLOR_RESET);
 
-  char os_line[256];
-  snprintf(os_line, sizeof(os_line), "OS: %s", u.sysname);
+  char line1[512]; // Separator
+  size_t user_host_len = strlen(user) + 1 + strlen(host);
+  memset(line1, 0, sizeof(line1));
+  strcat(line1, COLOR_WHITE);
+  for (size_t i = 0; i < user_host_len; ++i)
+    strcat(line1, "-");
+  strcat(line1, COLOR_RESET);
 
-  char kernel_line[256];
-  snprintf(kernel_line, sizeof(kernel_line), "Kernel: %s %s", u.release, u.version);
+  char os_line[512];
+  snprintf(os_line, sizeof(os_line), "%sOS:      %s%s", COLOR_PURPLE,
+           COLOR_RESET, u.sysname);
+
+  char kernel_line[512];
+  snprintf(kernel_line, sizeof(kernel_line), "%sKernel:  %s%s %s", COLOR_PURPLE,
+           COLOR_RESET, u.release, u.version);
 
   char cpu_line[512];
   if (cpu_model) {
     if (cpu_mhz) {
-      snprintf(cpu_line, sizeof(cpu_line), "CPU: %s (%" PRIu64 " MHz)", cpu_model, cpu_mhz);
+      snprintf(cpu_line, sizeof(cpu_line), "%sCPU:     %s%s (%" PRIu64 " MHz)",
+               COLOR_PURPLE, COLOR_RESET, cpu_model, cpu_mhz);
     } else {
-      snprintf(cpu_line, sizeof(cpu_line), "CPU: %s", cpu_model);
+      snprintf(cpu_line, sizeof(cpu_line), "%sCPU:     %s%s", COLOR_PURPLE,
+               COLOR_RESET, cpu_model);
     }
   } else {
-    snprintf(cpu_line, sizeof(cpu_line), "CPU: Unknown");
+    snprintf(cpu_line, sizeof(cpu_line), "%sCPU:     %sUnknown", COLOR_PURPLE,
+             COLOR_RESET);
   }
 
-  char mem_line[256];
+  char mem_line[512];
   if (mem_total_kb) {
     double total_mib = (double)mem_total_kb / 1024.0;
     double used_mib = (double)mem_used_kb / 1024.0;
-    snprintf(mem_line, sizeof(mem_line), "Mem: %.0f MiB / %.0f MiB", used_mib, total_mib);
+    snprintf(mem_line, sizeof(mem_line), "%sMem:     %s%.0f MiB / %.0f MiB",
+             COLOR_PURPLE, COLOR_RESET, used_mib, total_mib);
   } else {
-    snprintf(mem_line, sizeof(mem_line), "Mem: Unknown");
+    snprintf(mem_line, sizeof(mem_line), "%sMem:     %sUnknown", COLOR_PURPLE,
+             COLOR_RESET);
   }
 
-  const char *linux_art[] = {
-      "   .--.  ",
-      "  |o_o | ",
-      "  |:_/ | ",
-      " //   \\\\ ",
-      "(|     |)",
-      "/'\\_   _/`\\",
-      "\\___)=(___/",
-  };
+  const char *rows[] = {line0, line1, os_line, kernel_line, cpu_line, mem_line};
 
-  const char *twilight_art[] = {
-    "████████╗██╗    ██╗██╗██╗     ██╗ ██████╗ ██╗  ██╗████████╗",
-    "╚══██╔══╝██║    ██║██║██║     ██║██╔════╝ ██║  ██║╚══██╔══╝",
-    "   ██║   ██║ █╗ ██║██║██║     ██║██║  ███╗███████║   ██║   ",
-    "   ██║   ██║███╗██║██║██║     ██║██║   ██║██╔══██║   ██║   ",
-    "   ██║   ╚███╔███╔╝██║███████╗██║╚██████╔╝██║  ██║   ██║   ",
-    "   ╚═╝    ╚══╝╚══╝ ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ",
-    "TWILIGHT OS — build the night 🌙",
-  };
+  // Custom print function to handle colors
+  const char **art = is_linux ? linux_art : twilight_art;
+  size_t art_lines = is_linux ? sizeof(linux_art) / sizeof(linux_art[0])
+                              : sizeof(twilight_art) / sizeof(twilight_art[0]);
+  size_t row_lines = sizeof(rows) / sizeof(rows[0]);
+  size_t n = art_lines > row_lines ? art_lines : row_lines;
 
-  const char *rows[] = {line0, os_line, kernel_line, cpu_line, mem_line};
+  printf("\n");
+  for (size_t i = 0; i < n; i++) {
+    const char *a = i < art_lines ? art[i] : "";
+    // Pad ascii art to constant width only if we have more rows to print
+    int padding = 0;
+    if (i < row_lines) {
+      // Calculate padding based on max width of art.
+      // Since the new art is wide, let's just make it a fixed width large
+      // enough. formatting with %-78s would work if no colors were in art (but
+      // we will add colors). For now, simpler approach: print art, print
+      // spaces, print row. But wait, the art lines have different lengths in
+      // byte code but fixed visual length? Actually the new art is blocky so
+      // mostly fixed width.
+      padding = 80 - strlen(a);
+      if (padding < 2)
+        padding = 2; // Minimum spacing
+    }
 
-  if (is_linux) {
-    print_rows_with_ascii(linux_art, sizeof(linux_art) / sizeof(linux_art[0]), rows,
-                          sizeof(rows) / sizeof(rows[0]));
-  } else {
-    print_rows_with_ascii(twilight_art, sizeof(twilight_art) / sizeof(twilight_art[0]), rows,
-                          sizeof(rows) / sizeof(rows[0]));
+    if (!is_linux)
+      printf("%s", COLOR_CYAN);
+    printf("%s", a);
+    if (!is_linux)
+      printf("%s", COLOR_RESET);
+
+    if (i < row_lines) {
+      // Find how long the printed string was.
+      // strlen(a) includes bytes. ASCII chars are 1 byte.
+      // The escape sequences for backslashes were handled by compiler.
+      // So strlen(a) should be the printable length.
+      // Wait, I messed up the padding logic above.
+      // Iterate to print padding spaces.
+      // Let's just align to column 80.
+      size_t len = strlen(a);
+      if (len < 80) {
+        for (size_t k = 0; k < 80 - len; k++)
+          putchar(' ');
+      } else {
+        printf("  ");
+      }
+      printf("%s\n", rows[i]);
+    } else {
+      printf("\n");
+    }
   }
+  printf("\n");
 
   free(cpu_model);
   free(cpuinfo);

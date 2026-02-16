@@ -12,21 +12,19 @@ pub enum JournalRecType {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct JournalRecordHeader {
-    pub magic: u32,     // JOURNAL_MAGIC
-    pub rec_type: u8,   // JournalRecType
-    pub csum_type: u8,  // CsumType
+    pub magic: u32,
+    pub rec_type: u8,
+    pub csum_type: u8,
     pub _pad0: u16,
-    pub seq: u64,       // transaction sequence
-    pub len: u32,       // bytes including header+payload
-    pub checksum: u32,  // checksum over header+payload excluding this field (or including with 0)
+    pub seq: u64,
+    pub len: u32,
+    pub checksum: u32,
 }
 
-// Payload for Write record (simple “block image” redo log)
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct JournalWritePayload {
-    pub block_index: u64, // which block to overwrite
-    pub block_len: u32,   // bytes (normally block_size)
+    pub block_index: u64,
+    pub block_len: u32,
     pub _pad0: u32,
-    // followed by block bytes[block_len]
 }

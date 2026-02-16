@@ -398,10 +398,8 @@ impl TwilightFs {
             return Ok(ino);
         }
 
-        // Start from root inode (assumed to be inode number 1)
         let mut current_inode = 1;
 
-        // Skip empty and root path
         let path_parts = canonical.split('/').filter(|s| !s.is_empty());
         let mut prefix = String::from("/");
 
@@ -608,8 +606,6 @@ impl TwilightFs {
 
     pub fn allocate_zone(&mut self) -> Result<u32, TfsError> {
         let bits_per_block = self.superblock.block_size as usize * 8;
-        // Layout: block 0 superblock, then imap, then zmap, then inode table.
-        // So zmap starts right after the imap.
         let zmap_start = self.superblock.imap_blocks + 1;
         let max_data_zones = self
             .superblock
@@ -704,7 +700,6 @@ impl TwilightFs {
             return Err(TfsError::InvalidZone);
         }
 
-        // Layout: block 0 superblock, then imap, then zmap.
         let zmap_start = 1 + self.superblock.imap_blocks;
         let zmap_block = zmap_start + block_index as u32;
 
@@ -727,7 +722,7 @@ impl TwilightFs {
             return Err(TfsError::InvalidInode);
         }
 
-        let inode_index = inode as usize - 1; // MINIX inodes are 1-based
+        let inode_index = inode as usize - 1;
         let bits_per_block = self.superblock.block_size as usize * 8;
 
         let block_index = inode_index / bits_per_block;
@@ -741,7 +736,7 @@ impl TwilightFs {
             return Err(TfsError::IoError);
         }
 
-        buffer[byte_index] &= !(1 << bit_in_byte); // clear the bit
+        buffer[byte_index] &= !(1 << bit_in_byte);
 
         if write_tfs_block(self.device.lock().as_mut(), imap_block_lba, &buffer).is_err() {
             return Err(TfsError::IoError);
@@ -761,7 +756,6 @@ impl TwilightFs {
         let block_size = self.superblock.block_size as usize;
         let inodes_per_block = block_size / inode_size;
 
-        // Layout: block 0 superblock, then imap, then zmap, then inode table.
         let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 1;
         let block_offset = inode_index / inodes_per_block;
         let byte_offset = (inode_index % inodes_per_block) * inode_size;
@@ -795,7 +789,6 @@ impl TwilightFs {
         let block_size = self.superblock.block_size as usize;
         let inodes_per_block = block_size / inode_size;
 
-        // Layout: block 0 superblock, then imap, then zmap, then inode table.
         let inode_table_start = self.superblock.imap_blocks + self.superblock.zmap_blocks + 1;
         let block_offset = inode_index / inodes_per_block;
         let byte_offset = (inode_index % inodes_per_block) * inode_size;
@@ -851,7 +844,6 @@ impl TwilightFs {
                     .map_err(|_| "Failed to allocate directory zone")?;
                 parent_inode.direct_slot_set(i, block);
 
-                // Directory scans rely on empty slots being zeroed.
                 let zero = [0u8; FS_BLOCK_SIZE];
                 if write_tfs_block(self.device.lock().as_mut(), block, &zero).is_err() {
                     return Err("Failed to initialize directory block");
@@ -877,7 +869,6 @@ impl TwilightFs {
                     buf[offset + 3],
                 ]);
                 if inode_field == 0 {
-                    // Found empty slot
                     let entry_bytes = unsafe {
                         core::slice::from_raw_parts(&entry as *const _ as *const u8, dir_entry_size)
                     };
@@ -942,7 +933,6 @@ impl TwilightFs {
             return Err(FileNotFound);
         }
 
-        // --- Check if file already exists ---
         let parent_inode = self.read_inode(parent_inode_num).unwrap();
         let entries = self.read_dir_entries(&parent_inode).unwrap();
 
@@ -956,13 +946,11 @@ impl TwilightFs {
             }
         }
 
-        // Allocate inode and zone
         let new_inode_num = self.allocate_inode().unwrap() + 1;
         let new_zone = self.allocate_zone().unwrap();
 
         let time = CMOS::new().unix_time();
 
-        // Initialize inode
         let mut inode = Inode::new_file(time, 0o777);
         // Inherit encryption flag from parent directory
         if (parent_inode.flags & inode::IFLAG_ENCRYPTED) != 0 {
@@ -1064,7 +1052,6 @@ impl TwilightFs {
                 remaining -= copy_size;
             }
 
-            // store updated indirect block
             write_tfs_block(
                 self.device.lock().as_mut(),
                 inode.single_indirect_get(),
@@ -1158,11 +1145,9 @@ impl TwilightFs {
                     remaining -= copy_size;
                 }
 
-                // store updated indirect block
                 write_tfs_block(self.device.lock().as_mut(), indirect_zone, &indirect_block)?;
             }
 
-            // store updated double indirect block
             write_tfs_block(
                 self.device.lock().as_mut(),
                 inode.double_indirect_get(),
@@ -1260,7 +1245,6 @@ impl TwilightFs {
             return Err(FileNameTooLong);
         }
 
-        // Check if directory with same name already exists
         let parent_inode = self.read_inode(parent_inode_num).unwrap();
         let entries = self.read_dir_entries(&parent_inode).unwrap();
 
@@ -1274,13 +1258,11 @@ impl TwilightFs {
             }
         }
 
-        // Allocate inode and zone for the new directory
         let new_inode_num = self.allocate_inode().unwrap() + 1;
         let new_zone = self.allocate_zone().unwrap();
 
         let time = CMOS::new().unix_time();
 
-        // Create the new directory inode
         let mut inode = Inode::new_dir(time, 0o777);
         if (parent_inode.flags & inode::IFLAG_ENCRYPTED) != 0 {
             inode.flags |= inode::IFLAG_ENCRYPTED;
@@ -1622,7 +1604,7 @@ impl TwilightFs {
         let target_name = components.pop().unwrap();
         let parent_path = format!("/{}", components.join("/"));
         let parent_inode_num = if components.is_empty() {
-            1 // root
+            1
         } else {
             self.resolve_path(&parent_path)?
         };
@@ -1654,7 +1636,6 @@ impl TwilightFs {
                     let inode_num = entry.inode;
                     let inode = self.read_inode(inode_num).unwrap();
 
-                    // Free all zones
                     for di in 0..Inode::DIRECT_SLOT_COUNT {
                         let z = inode.direct_slot_get(di);
                         if z != 0 {
@@ -1662,13 +1643,11 @@ impl TwilightFs {
                         }
                     }
 
-                    // Free inode
                     self.dealloc_inode(inode_num).unwrap();
 
                     buf[offset..offset + dir_entry_size].fill(0);
                     write_tfs_block(self.device.lock().as_mut(), zone, &buf)?;
 
-                    // Update parent inode size if large enough
                     if parent_inode.size >= dir_entry_size as u64 {
                         parent_inode.size -= dir_entry_size as u64;
                     }

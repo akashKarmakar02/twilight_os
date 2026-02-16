@@ -1,3 +1,4 @@
+// WARNING: some code in this file is AI generated
 use crate::driver::disk::BlockDeviceIO;
 use crate::println;
 use crate::sys::fs::partition;
@@ -45,7 +46,7 @@ pub struct Superblock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CsumType {
     None = 0,
-    Crc32c = 1, // v0.1 recommended
+    Crc32c = 1,
     Blake3 = 2, // future
 }
 
@@ -53,7 +54,7 @@ pub enum CsumType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoType {
     None = 0,
-    XChaCha20Poly1305 = 1, // v0.1 recommended
+    XChaCha20Poly1305 = 1,
     Aes256Gcm = 2,         // future/hw accel
 }
 
@@ -69,7 +70,7 @@ pub struct SuperblockV1 {
     // identity
     pub magic: [u8; 4],     // "TFS0"
     pub version: u32,       // 0x000001
-    pub block_size: u16,    // bytes
+    pub block_size: u16
     pub log_block_size: u8, // log2(block_size) convenience
     pub csum_type: u8,      // CsumType
     pub uuid: Uuid128,      // unique FS id
@@ -80,7 +81,6 @@ pub struct SuperblockV1 {
     pub ro_compat_features: FeatureBits,
     pub incompat_features: FeatureBits,
 
-    // layout / counts (keep your minix-like fields for now, but make them less rigid)
     pub ninodes: u32,
     pub imap_start: u32,  // block index
     pub imap_blocks: u32, // bitmap blocks
@@ -90,23 +90,19 @@ pub struct SuperblockV1 {
     pub total_blocks: u64,  // replaces `zones` (supports >4B blocks)
     pub max_file_size: u64, // computed from mapping scheme, stored for sanity
 
-    // root / special inodes
     pub root_inode: u32,    // usually 1
     pub journal_inode: u32, // or 0 if using fixed journal region
     pub reserved_inodes: [u32; 6],
 
-    // journal (metadata journal; simplest is fixed region)
     pub journal_start: u64, // block index
     pub journal_blocks: u32,
     pub journal_seq: u64, // last committed tx sequence
 
-    // crypto config (data-only in v0.1)
     pub crypto_type: u8,  // CryptoType
     pub crypto_flags: u8, // e.g. data-only, metadata later
     pub _pad0: u16,
     pub key_derivation_salt: [u8; 16], // stored salt; master key comes from outside
 
-    // superblock checksum (covers everything except this field)
     pub sb_checksum: u32, // CRC32C over bytes [0..offset(sb_checksum))
     pub _pad1: u32,
 }
@@ -151,19 +147,14 @@ pub struct Extent64 {
 
 pub const INODE_INLINE_BYTES: usize = 64;
 
-// -----------------------------
-// Inode v0.1 (extents + xattrs + encryption-ready)
-// -----------------------------
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct InodeV1 {
-    // permissions + type (POSIX-ish)
     pub mode: u16, // includes type bits + permission bits
     pub nlinks: u16,
     pub uid: u32,
     pub gid: u32,
 
-    // size & timestamps
     pub size: u64,
     pub atime: u64,
     pub mtime: u64,
@@ -178,9 +169,6 @@ pub struct InodeV1 {
     pub xattr_block: u32, // 0 = none
     pub _pad0: u32,
 
-    // data mapping:
-    // - if IFLAG_INLINE_DATA: `inline_data` holds payload (symlink target or small file)
-    // - else: direct extents + indirect extent lists
     pub direct: [Extent32; 6], // a few direct extents
     pub indirect: u32,         // block containing Extent32[]
     pub double_indirect: u32,  // block containing u32[] -> indirect blocks
