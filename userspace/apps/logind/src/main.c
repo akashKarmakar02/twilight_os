@@ -1,7 +1,9 @@
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pwd.h>
 #include <shadow.h>
 #include <stdint.h>
@@ -31,6 +33,426 @@ static long sys_set_file_attr(const char *path, uint32_t attr, uint32_t value) {
 #define USERNAME_MAX 32
 #define PASSWORD_MAX 256
 #define HOME_DIR_PREFIX "/home"
+#define ZONEINFO_ROOT "/usr/share/zoneinfo"
+#define LOCALTIME_PATH "/etc/localtime"
+#define LOCALTIME_TMP_PATH "/etc/localtime.tmp"
+#define TIMEZONE_NAME_PATH "/etc/timezone"
+#define MENU_PAGE_SIZE 20
+
+typedef struct {
+  char **items;
+  size_t len;
+  size_t cap;
+} StringList;
+
+static void string_list_init(StringList *list) {
+  list->items = NULL;
+  list->len = 0;
+  list->cap = 0;
+}
+
+static void string_list_free(StringList *list) {
+  if (!list)
+    return;
+
+  for (size_t i = 0; i < list->len; i++) {
+    free(list->items[i]);
+  }
+  free(list->items);
+  list->items = NULL;
+  list->len = 0;
+  list->cap = 0;
+}
+
+static int string_list_push(StringList *list, const char *value) {
+  if (list->len == list->cap) {
+    size_t new_cap = list->cap == 0 ? 16 : list->cap * 2;
+    char **new_items = realloc(list->items, new_cap * sizeof(char *));
+    if (!new_items)
+      return -1;
+    list->items = new_items;
+    list->cap = new_cap;
+  }
+
+  list->items[list->len] = strdup(value);
+  if (!list->items[list->len])
+    return -1;
+  list->len++;
+  return 0;
+}
+
+static int string_cmp(const void *a, const void *b) {
+  const char *sa = *(const char *const *)a;
+  const char *sb = *(const char *const *)b;
+  return strcmp(sa, sb);
+}
+
+static void string_list_sort(StringList *list) {
+  if (list->len > 1) {
+    qsort(list->items, list->len, sizeof(char *), string_cmp);
+  }
+}
+
+static int should_skip_continent(const char *name) {
+  return strcmp(name, ".") == 0 || strcmp(name, "..") == 0 || name[0] == '.' ||
+         strcmp(name, "posix") == 0 || strcmp(name, "right") == 0 ||
+         strcmp(name, "SystemV") == 0;
+}
+
+static int collect_continents(StringList *continents) {
+  DIR *dir = opendir(ZONEINFO_ROOT);
+  if (!dir)
+    return -1;
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (should_skip_continent(entry->d_name))
+      continue;
+
+    char full_path[PATH_MAX];
+    int written =
+        snprintf(full_path, sizeof(full_path), "%s/%s", ZONEINFO_ROOT, entry->d_name);
+    if (written < 0 || (size_t)written >= sizeof(full_path))
+      continue;
+
+    struct stat st;
+    if (stat(full_path, &st) != 0 || !S_ISDIR(st.st_mode))
+      continue;
+
+    if (string_list_push(continents, entry->d_name) != 0) {
+      closedir(dir);
+      return -1;
+    }
+  }
+
+  closedir(dir);
+  string_list_sort(continents);
+  return 0;
+}
+
+static int collect_locations_recursive(const char *base_path, const char *rel_path,
+                                       StringList *locations) {
+  char current_path[PATH_MAX];
+  int current_written;
+
+  if (rel_path[0] == '\0') {
+    current_written = snprintf(current_path, sizeof(current_path), "%s", base_path);
+  } else {
+    current_written =
+        snprintf(current_path, sizeof(current_path), "%s/%s", base_path, rel_path);
+  }
+  if (current_written < 0 || (size_t)current_written >= sizeof(current_path))
+    return -1;
+
+  DIR *dir = opendir(current_path);
+  if (!dir)
+    return -1;
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
+        entry->d_name[0] == '.')
+      continue;
+
+    char child_rel[PATH_MAX];
+    int rel_written;
+    if (rel_path[0] == '\0') {
+      rel_written = snprintf(child_rel, sizeof(child_rel), "%s", entry->d_name);
+    } else {
+      rel_written = snprintf(child_rel, sizeof(child_rel), "%s/%s", rel_path,
+                             entry->d_name);
+    }
+    if (rel_written < 0 || (size_t)rel_written >= sizeof(child_rel))
+      continue;
+
+    char child_full[PATH_MAX];
+    int full_written =
+        snprintf(child_full, sizeof(child_full), "%s/%s", base_path, child_rel);
+    if (full_written < 0 || (size_t)full_written >= sizeof(child_full))
+      continue;
+
+    struct stat st;
+    if (stat(child_full, &st) != 0)
+      continue;
+
+    if (S_ISDIR(st.st_mode)) {
+      if (collect_locations_recursive(base_path, child_rel, locations) != 0) {
+        closedir(dir);
+        return -1;
+      }
+    } else if (S_ISREG(st.st_mode)) {
+      if (string_list_push(locations, child_rel) != 0) {
+        closedir(dir);
+        return -1;
+      }
+    }
+  }
+
+  closedir(dir);
+  return 0;
+}
+
+static int collect_locations(const char *continent, StringList *locations) {
+  char continent_path[PATH_MAX];
+  int written =
+      snprintf(continent_path, sizeof(continent_path), "%s/%s", ZONEINFO_ROOT, continent);
+  if (written < 0 || (size_t)written >= sizeof(continent_path))
+    return -1;
+
+  if (collect_locations_recursive(continent_path, "", locations) != 0)
+    return -1;
+
+  string_list_sort(locations);
+  return 0;
+}
+
+static int read_stdin_line(char *buf, size_t bufsz) {
+  if (!fgets(buf, bufsz, stdin))
+    return -1;
+
+  size_t len = strlen(buf);
+  if (len > 0 && buf[len - 1] == '\n') {
+    buf[len - 1] = '\0';
+  } else if (len + 1 == bufsz) {
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF) {
+    }
+  }
+
+  return 0;
+}
+
+static int menu_select(const char *title, StringList *items, size_t *selected_index) {
+  if (!items || items->len == 0)
+    return -1;
+
+  size_t page = 0;
+  size_t page_count = (items->len + MENU_PAGE_SIZE - 1) / MENU_PAGE_SIZE;
+  char input[64];
+
+  for (;;) {
+    size_t start = page * MENU_PAGE_SIZE;
+    size_t end = start + MENU_PAGE_SIZE;
+    if (end > items->len)
+      end = items->len;
+
+    printf("\n%s (page %zu/%zu)\n", title, page + 1, page_count);
+    for (size_t i = start; i < end; i++) {
+      printf("  %2zu) %s\n", (i - start) + 1, items->items[i]);
+    }
+    printf("Enter choice number");
+    if (page_count > 1) {
+      printf(", 'n' for next, 'p' for previous");
+    }
+    printf(": ");
+    fflush(stdout);
+
+    if (read_stdin_line(input, sizeof(input)) != 0)
+      return -1;
+
+    if (page_count > 1 && strcmp(input, "n") == 0) {
+      if (page + 1 < page_count) {
+        page++;
+      } else {
+        printf("Already on the last page.\n");
+      }
+      continue;
+    }
+    if (page_count > 1 && strcmp(input, "p") == 0) {
+      if (page > 0) {
+        page--;
+      } else {
+        printf("Already on the first page.\n");
+      }
+      continue;
+    }
+
+    char *endptr = NULL;
+    errno = 0;
+    long choice = strtol(input, &endptr, 10);
+    if (errno != 0 || endptr == input || *endptr != '\0' || choice < 1) {
+      printf("Invalid choice.\n");
+      continue;
+    }
+
+    size_t offset = (size_t)(choice - 1);
+    if (start + offset >= end) {
+      printf("Choice out of range.\n");
+      continue;
+    }
+
+    *selected_index = start + offset;
+    return 0;
+  }
+}
+
+static int copy_file(const char *src_path, const char *dst_path) {
+  int src_fd = open(src_path, O_RDONLY);
+  if (src_fd < 0)
+    return -1;
+
+  int dst_fd = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (dst_fd < 0) {
+    close(src_fd);
+    return -1;
+  }
+
+  char buf[4096];
+  int rc = 0;
+  for (;;) {
+    ssize_t nread = read(src_fd, buf, sizeof(buf));
+    if (nread < 0) {
+      rc = -1;
+      break;
+    }
+    if (nread == 0)
+      break;
+
+    size_t written = 0;
+    while (written < (size_t)nread) {
+      ssize_t nwritten =
+          write(dst_fd, buf + written, (size_t)nread - written);
+      if (nwritten < 0) {
+        rc = -1;
+        break;
+      }
+      written += (size_t)nwritten;
+    }
+    if (rc != 0)
+      break;
+  }
+
+  if (close(dst_fd) != 0 && rc == 0)
+    rc = -1;
+  close(src_fd);
+
+  return rc;
+}
+
+static int install_localtime(const char *zone_path) {
+  char src_path[PATH_MAX];
+  int written = snprintf(src_path, sizeof(src_path), "%s/%s", ZONEINFO_ROOT, zone_path);
+  if (written < 0 || (size_t)written >= sizeof(src_path)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+
+  if (copy_file(src_path, LOCALTIME_TMP_PATH) != 0)
+    return -1;
+
+  if (rename(LOCALTIME_TMP_PATH, LOCALTIME_PATH) != 0) {
+    int rename_errno = errno;
+    unlink(LOCALTIME_TMP_PATH);
+    errno = rename_errno;
+    return -1;
+  }
+
+  return 0;
+}
+
+static void write_timezone_name(const char *zone_path) {
+  FILE *fp = fopen(TIMEZONE_NAME_PATH, "w");
+  if (!fp) {
+    fprintf(stderr, "logind: warning: cannot write %s: %s\n", TIMEZONE_NAME_PATH,
+            strerror(errno));
+    return;
+  }
+  fprintf(fp, "%s\n", zone_path);
+  fclose(fp);
+}
+
+static void apply_timezone_env(void) {
+  FILE *fp = fopen(TIMEZONE_NAME_PATH, "r");
+  if (fp) {
+    char tzbuf[PATH_MAX];
+    if (fgets(tzbuf, sizeof(tzbuf), fp)) {
+      size_t len = strlen(tzbuf);
+      while (len > 0 &&
+             (tzbuf[len - 1] == '\n' || tzbuf[len - 1] == '\r')) {
+        tzbuf[--len] = '\0';
+      }
+      if (len > 0) {
+        setenv("TZ", tzbuf, 1);
+        fclose(fp);
+        return;
+      }
+    }
+    fclose(fp);
+  }
+
+  // Fallback to explicit localtime path if /etc/timezone is missing.
+  setenv("TZ", ":/etc/localtime", 1);
+}
+
+static int setup_timezone(void) {
+  for (;;) {
+    StringList continents;
+    string_list_init(&continents);
+    if (collect_continents(&continents) != 0 || continents.len == 0) {
+      string_list_free(&continents);
+      fprintf(stderr, "logind: no timezone continents found in %s\n",
+              ZONEINFO_ROOT);
+      return 1;
+    }
+
+    size_t continent_idx = 0;
+    if (menu_select("Select timezone continent", &continents,
+                    &continent_idx) != 0) {
+      string_list_free(&continents);
+      fprintf(stderr, "logind: failed to read timezone continent\n");
+      return 1;
+    }
+
+    StringList locations;
+    string_list_init(&locations);
+    if (collect_locations(continents.items[continent_idx], &locations) != 0 ||
+        locations.len == 0) {
+      fprintf(stderr, "logind: no timezone locations found in %s\n",
+              continents.items[continent_idx]);
+      string_list_free(&locations);
+      string_list_free(&continents);
+      continue;
+    }
+
+    char title[256];
+    snprintf(title, sizeof(title), "Select timezone location in %s",
+             continents.items[continent_idx]);
+
+    size_t location_idx = 0;
+    if (menu_select(title, &locations, &location_idx) != 0) {
+      string_list_free(&locations);
+      string_list_free(&continents);
+      fprintf(stderr, "logind: failed to read timezone location\n");
+      return 1;
+    }
+
+    char selected_zone[PATH_MAX];
+    int selected_written =
+        snprintf(selected_zone, sizeof(selected_zone), "%s/%s",
+                 continents.items[continent_idx], locations.items[location_idx]);
+    if (selected_written < 0 ||
+        (size_t)selected_written >= sizeof(selected_zone)) {
+      string_list_free(&locations);
+      string_list_free(&continents);
+      fprintf(stderr, "logind: selected timezone path too long\n");
+      continue;
+    }
+
+    printf("Selected timezone: %s\n", selected_zone);
+    if (install_localtime(selected_zone) == 0) {
+      write_timezone_name(selected_zone);
+      printf("logind: timezone configured: %s\n", selected_zone);
+      string_list_free(&locations);
+      string_list_free(&continents);
+      return 0;
+    }
+
+    fprintf(stderr, "logind: failed to install timezone '%s': %s\n",
+            selected_zone, strerror(errno));
+    string_list_free(&locations);
+    string_list_free(&continents);
+  }
+}
 
 // Stub for missing crypt in environment
 char *crypt(const char *key, const char *salt) {
@@ -346,6 +768,11 @@ static int create_user(const char *username, const char *password) {
   printf("logind: user '%s' created successfully (UID: %u)\n", username, uid);
   printf("logind: home directory: %s\n", home_dir);
 
+  if (setup_timezone() != 0) {
+    fprintf(stderr, "logind: timezone setup failed\n");
+    return 1;
+  }
+
   return 0;
 }
 
@@ -488,7 +915,6 @@ static int do_login(void) {
 
       if (field_idx >= 3 && strcmp(fields[0], username) == 0) {
         uid_t uid = (uid_t)atoi(fields[2]);
-        uid_t gid = (uid_t)atoi(fields[3]);
         char *home = field_idx >= 6 ? fields[5] : HOME_DIR_PREFIX;
         char *shell = field_idx >= 7 ? fields[6] : "/bin/tsh";
         // Set UID/GID (requires root or appropriate privileges)
@@ -501,15 +927,10 @@ static int do_login(void) {
                   strerror(errno));
         }
 
-        // Set HOME environment
-        char home_env[512];
-        snprintf(home_env, sizeof(home_env), "HOME=%s", home);
-        putenv(home_env);
-
-        // Set USER environment
-        char user_env[512];
-        snprintf(user_env, sizeof(user_env), "USER=%s", username);
-        putenv(user_env);
+        setenv("HOME", home, 1);
+        setenv("USER", username, 1);
+        setenv("PATH", "/bin", 1);
+        apply_timezone_env();
 
         // Change to home directory
         if (chdir(home) != 0) {
@@ -519,10 +940,9 @@ static int do_login(void) {
                   home);
         }
 
-        // Execute shell
+        // Execute shell with inherited environment.
         char *argv[] = {shell, NULL};
-        char *envp[] = {NULL};
-        execve(shell, argv, envp);
+        execv(shell, argv);
 
         fprintf(stderr, "logind: failed to execute shell: %s\n",
                 strerror(errno));

@@ -1219,6 +1219,15 @@ pub fn arch_prctl(code: u64, addr: u64) -> i64 {
     match code {
         ARCH_SET_FS => {
             wrmsr(IA32_FS_BASE, addr);
+
+            #[allow(static_mut_refs)]
+            if let Some(table) = unsafe { PROCESS_TABLE.get_mut() } {
+                let current_pid = sys::proc::id();
+                if let Some(process) = table.get_process(current_pid) {
+                    process.fs_base = x86_64::VirtAddr::new(addr);
+                }
+            }
+
             0
         }
         ARCH_GET_FS => {

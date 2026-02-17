@@ -25,6 +25,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use conquer_once::spin::OnceCell;
+use conquer_once::TryInitError;
 use spin::Mutex;
 
 pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
@@ -144,7 +145,7 @@ pub fn init(show_log: bool) {
     }
 
     if let Ok(tfs) = TwilightFs::check_virtio_blk() {
-        if let Err(_) = MFS.try_init_once(|| Mutex::new(tfs)) {
+        if let Err(e) = MFS.try_init_once(|| Mutex::new(tfs)) && e != TryInitError::AlreadyInit {
             println!("MFS already initialized");
             return;
         }

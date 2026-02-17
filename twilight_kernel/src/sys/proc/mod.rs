@@ -626,7 +626,10 @@ impl Process {
         );
     }
 
-    pub fn fork(&self, tf: &InterruptStack) -> Result<u16, ()> {
+    pub fn fork(&mut self, tf: &InterruptStack) -> Result<u16, ()> {
+        let live_fs_base = io::get_fsbase()();
+        self.fs_base = live_fs_base;
+
         // 0. Allocate PID
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
 
@@ -777,7 +780,7 @@ impl Process {
                     fd_table: new_fd_table,
                     kernel_gs: kgs,
                     gs_base: kgs_va,
-                    fs_base: self.fs_base,
+                    fs_base: live_fs_base,
                     proc_mm: self.proc_mm.clone(), // Need to implement Clone for ProcMM or manually deep copy
                     parent_pid: self.pid,
                     stdio_flags: self.stdio_flags,
