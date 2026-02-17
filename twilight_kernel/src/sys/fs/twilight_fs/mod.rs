@@ -539,8 +539,7 @@ impl TwilightFs {
                 }
                 let sectors = total_sectors - start_lba;
                 let mut entries = [PartitionEntry::empty(); 4];
-                entries[0] =
-                    PartitionEntry::new(0x00, TWILIGHT_PARTITION_TYPE, start_lba, sectors);
+                entries[0] = PartitionEntry::new(0x00, TWILIGHT_PARTITION_TYPE, start_lba, sectors);
                 partition::encode_entries(&mut mbr, &entries);
                 partition::write_signature(&mut mbr);
                 device
@@ -602,6 +601,66 @@ impl TwilightFs {
         self.create_dir_entry(root_inode_num, "..", root_inode_num)?;
         self.shared.invalidate_all();
         Ok(())
+    }
+
+    pub fn allocate_zones(&mut self, count: usize) -> Result<Vec<u32>, TfsError> {
+        let bits_per_block = self.superblock.block_size as usize * 8;
+        let zmap_start = self.superblock.imap_blocks + 1;
+        let max_data_zones = self
+            .superblock
+            .zones
+            .saturating_sub(self.superblock.first_data_zone);
+
+        let mut zones = Vec::with_capacity(count);
+        let mut buf = [0u8; FS_BLOCK_SIZE];
+
+        for i in 0..self.superblock.zmap_blocks {
+            if zones.len() == count {
+                break;
+            }
+
+            if read_tfs_block(self.device.lock().as_mut(), zmap_start + i, &mut buf).is_err() {
+                return Err(TfsError::IoError);
+            }
+
+            let mut dirty = false;
+            for byte_idx in 0..buf.len() {
+                if zones.len() == count {
+                    break;
+                }
+                if buf[byte_idx] != 0xFF {
+                    for bit in 0..8 {
+                        if zones.len() == count {
+                            break;
+                        }
+                        if buf[byte_idx] & (1 << bit) == 0 {
+                            let zone = i * bits_per_block as u32 + (byte_idx * 8 + bit) as u32;
+                            if zone >= max_data_zones {
+                                break;
+                            }
+                            buf[byte_idx] |= 1 << bit;
+                            zones.push(zone + self.superblock.first_data_zone);
+                            dirty = true;
+                        }
+                    }
+                }
+            }
+
+            if dirty {
+                if write_tfs_block(self.device.lock().as_mut(), zmap_start + i, &buf).is_err() {
+                    return Err(TfsError::IoError);
+                }
+            }
+        }
+
+        if zones.len() < count {
+            for zone in &zones {
+                let _ = self.dealloc_zone(*zone);
+            }
+            return Err(TfsError::NoSpaceLeft);
+        }
+
+        Ok(zones)
     }
 
     pub fn allocate_zone(&mut self) -> Result<u32, TfsError> {
@@ -972,11 +1031,48 @@ impl TwilightFs {
             return Err(InvalidInode);
         }
 
-        let mut inode = self.read_inode(inode_num).unwrap();
+        let mut inode = self.read_inode(inode_num).map_err(|_| InvalidInode)?;
         let block_size = self.superblock.block_size as usize;
+        let zone_entries = block_size / 4;
+        let required_blocks = if data.is_empty() {
+            0
+        } else {
+            (data.len() + block_size - 1) / block_size
+        };
+        let max_blocks =
+            Inode::DIRECT_SLOT_COUNT + zone_entries + (zone_entries.saturating_mul(zone_entries));
+        if required_blocks > max_blocks {
+            return Err(FsError::FileSizeTooLarge);
+        }
+
+        let metadata_headroom = required_blocks / zone_entries + 3;
+        let mut preallocated = if required_blocks > 0 {
+            self.allocate_zones(required_blocks + metadata_headroom)
+                .unwrap_or(Vec::new())
+        } else {
+            Vec::new()
+        };
+        // allocate_zones returns ascending zones. Reverse once so pop() preserves ascending order.
+        preallocated.reverse();
+
+        let mut get_new_zone = |fs: &mut TwilightFs| -> Result<u32, FsError> {
+            if let Some(zone) = preallocated.pop() {
+                Ok(zone)
+            } else {
+                fs.allocate_zone().map_err(|_| InvalidInode)
+            }
+        };
+
+        struct WriteOp {
+            zone: u32,
+            data_offset: usize,
+            len: usize,
+        }
 
         let mut bytes_written = 0;
         let mut remaining = data.len();
+        let mut write_ops: Vec<WriteOp> = Vec::with_capacity(required_blocks + 1);
+
         let mut direct_zones = [0u32; Inode::DIRECT_SLOT_COUNT];
         for (i, slot) in direct_zones.iter_mut().enumerate() {
             *slot = inode.direct_slot_get(i);
@@ -988,101 +1084,103 @@ impl TwilightFs {
             }
 
             if direct_zones[i] == 0 {
-                let zone = self.allocate_zone().unwrap();
+                let zone = get_new_zone(self)?;
                 direct_zones[i] = zone;
             }
 
-            let block = direct_zones[i];
-            let mut buffer = [0u8; FS_BLOCK_SIZE];
-
             let copy_size = core::cmp::min(block_size, remaining);
-            buffer[..copy_size].copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
-
-            write_tfs_block(self.device.lock().as_mut(), block, &buffer)?;
+            write_ops.push(WriteOp {
+                zone: direct_zones[i],
+                data_offset: bytes_written,
+                len: copy_size,
+            });
 
             bytes_written += copy_size;
             remaining -= copy_size;
         }
 
+        let mut single_indirect_block = [0u8; FS_BLOCK_SIZE];
+        let mut single_indirect_loaded = false;
+        let mut single_indirect_dirty = false;
+
         // if space in direct zones is filled, use indirect nodes
         if remaining > 0 {
             if inode.single_indirect_get() == 0 {
-                let zone = self.allocate_zone().unwrap();
+                let zone = get_new_zone(self)?;
                 inode.single_indirect_set(zone);
-                let zero_block = [0u8; FS_BLOCK_SIZE];
-                write_tfs_block(self.device.lock().as_mut(), zone, &zero_block)?;
+                single_indirect_loaded = true;
+                single_indirect_dirty = true;
             }
 
-            let mut indirect_block = [0u8; FS_BLOCK_SIZE];
-            read_tfs_block(
-                self.device.lock().as_mut(),
-                inode.single_indirect_get(),
-                &mut indirect_block,
-            )?;
+            if !single_indirect_loaded {
+                read_tfs_block(
+                    self.device.lock().as_mut(),
+                    inode.single_indirect_get(),
+                    &mut single_indirect_block,
+                )?;
+                single_indirect_loaded = true;
+            }
 
-            let zone_entries = FS_BLOCK_SIZE / 4;
             for i in 0..zone_entries {
                 if remaining == 0 {
                     break;
                 }
 
                 let entry = u32::from_le_bytes([
-                    indirect_block[i * 4],
-                    indirect_block[i * 4 + 1],
-                    indirect_block[i * 4 + 2],
-                    indirect_block[i * 4 + 3],
+                    single_indirect_block[i * 4],
+                    single_indirect_block[i * 4 + 1],
+                    single_indirect_block[i * 4 + 2],
+                    single_indirect_block[i * 4 + 3],
                 ]);
 
                 let zone = if entry == 0 {
-                    let new_zone = self.allocate_zone().unwrap();
-                    indirect_block[i * 4..i * 4 + 4].copy_from_slice(&new_zone.to_le_bytes());
+                    let new_zone = get_new_zone(self)?;
+                    single_indirect_block[i * 4..i * 4 + 4].copy_from_slice(&new_zone.to_le_bytes());
+                    single_indirect_dirty = true;
                     new_zone
                 } else {
                     entry
                 };
 
-                let mut buffer = [0u8; FS_BLOCK_SIZE];
                 let copy_size = core::cmp::min(block_size, remaining);
-
-                buffer[..copy_size]
-                    .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
-                write_tfs_block(self.device.lock().as_mut(), zone, &buffer)?;
+                write_ops.push(WriteOp {
+                    zone,
+                    data_offset: bytes_written,
+                    len: copy_size,
+                });
 
                 bytes_written += copy_size;
                 remaining -= copy_size;
             }
-
-            write_tfs_block(
-                self.device.lock().as_mut(),
-                inode.single_indirect_get(),
-                &indirect_block,
-            )?;
         }
+
+        let mut double_indirect_block = [0u8; FS_BLOCK_SIZE];
+        let mut double_indirect_loaded = false;
+        let mut double_indirect_dirty = false;
+        let mut dirty_l2_blocks: Vec<(u32, [u8; FS_BLOCK_SIZE])> = Vec::new();
 
         if remaining > 0 {
             if inode.double_indirect_get() == 0 {
-                inode.double_indirect_set(self.allocate_zone().unwrap());
-                let zero_block = [0u8; FS_BLOCK_SIZE];
-                write_tfs_block(
-                    self.device.lock().as_mut(),
-                    inode.double_indirect_get(),
-                    &zero_block,
-                )?;
+                inode.double_indirect_set(get_new_zone(self)?);
+                double_indirect_loaded = true;
+                double_indirect_dirty = true;
             }
 
-            let mut double_indirect_block = [0u8; FS_BLOCK_SIZE];
-            read_tfs_block(
-                self.device.lock().as_mut(),
-                inode.double_indirect_get(),
-                &mut double_indirect_block,
-            )?;
+            if !double_indirect_loaded {
+                read_tfs_block(
+                    self.device.lock().as_mut(),
+                    inode.double_indirect_get(),
+                    &mut double_indirect_block,
+                )?;
+                double_indirect_loaded = true;
+            }
 
-            let zone_entries = FS_BLOCK_SIZE / 4;
             for i in 0..zone_entries {
                 if remaining == 0 {
                     break;
                 }
 
+                let mut indirect_was_new = false;
                 let indirect_zone = {
                     let entry = u32::from_le_bytes([
                         double_indirect_block[i * 4],
@@ -1091,11 +1189,11 @@ impl TwilightFs {
                         double_indirect_block[i * 4 + 3],
                     ]);
                     if entry == 0 {
-                        let new_zone = self.allocate_zone().unwrap();
+                        let new_zone = get_new_zone(self)?;
                         double_indirect_block[i * 4..i * 4 + 4]
                             .copy_from_slice(&new_zone.to_le_bytes());
-                        let zero_block = [0u8; FS_BLOCK_SIZE];
-                        write_tfs_block(self.device.lock().as_mut(), new_zone, &zero_block)?;
+                        double_indirect_dirty = true;
+                        indirect_was_new = true;
                         new_zone
                     } else {
                         entry
@@ -1103,13 +1201,15 @@ impl TwilightFs {
                 };
 
                 let mut indirect_block = [0u8; FS_BLOCK_SIZE];
-                read_tfs_block(
-                    self.device.lock().as_mut(),
-                    indirect_zone,
-                    &mut indirect_block,
-                )?;
+                let mut indirect_dirty = false;
+                if !indirect_was_new {
+                    read_tfs_block(
+                        self.device.lock().as_mut(),
+                        indirect_zone,
+                        &mut indirect_block,
+                    )?;
+                }
 
-                let zone_entries = FS_BLOCK_SIZE / 4;
                 for j in 0..zone_entries {
                     if remaining == 0 {
                         break;
@@ -1123,31 +1223,80 @@ impl TwilightFs {
                             indirect_block[j * 4 + 3],
                         ]);
                         if entry == 0 {
-                            let new_zone = self.allocate_zone().unwrap();
+                            let new_zone = get_new_zone(self)?;
                             indirect_block[j * 4..j * 4 + 4]
                                 .copy_from_slice(&new_zone.to_le_bytes());
-                            let zero_block = [0u8; FS_BLOCK_SIZE];
-                            write_tfs_block(self.device.lock().as_mut(), new_zone, &zero_block)?;
+                            indirect_dirty = true;
                             new_zone
                         } else {
                             entry
                         }
                     };
 
-                    let mut buffer = [0u8; FS_BLOCK_SIZE];
                     let copy_size = core::cmp::min(block_size, remaining);
-
-                    buffer[..copy_size]
-                        .copy_from_slice(&data[bytes_written..bytes_written + copy_size]);
-                    write_tfs_block(self.device.lock().as_mut(), zone, &buffer)?;
+                    write_ops.push(WriteOp {
+                        zone,
+                        data_offset: bytes_written,
+                        len: copy_size,
+                    });
 
                     bytes_written += copy_size;
                     remaining -= copy_size;
                 }
 
-                write_tfs_block(self.device.lock().as_mut(), indirect_zone, &indirect_block)?;
+                if indirect_dirty {
+                    dirty_l2_blocks.push((indirect_zone, indirect_block));
+                }
             }
+        }
 
+        if remaining > 0 {
+            return Err(FsError::FileSizeTooLarge);
+        }
+
+        let mut i = 0usize;
+        while i < write_ops.len() {
+            let op = &write_ops[i];
+            if op.len == block_size {
+                let mut j = i + 1;
+                // the next like is written badly thats why this comment (17 Feb, 2026)
+                // If the next write_ops zmap zone is continous to this one then write them together. This will minimize I/O blocks and Up the filesystem speed.
+                while j < write_ops.len()
+                    && write_ops[j - 1].len == block_size
+                    && write_ops[j].len == block_size
+                    && write_ops[j].zone == write_ops[j - 1].zone + 1
+                    && write_ops[j].data_offset == write_ops[j - 1].data_offset + block_size
+                {
+                    j += 1;
+                }
+
+                let data_start = write_ops[i].data_offset;
+                let data_len = (j - i) * block_size;
+                write_tfs_blocks(
+                    self.device.lock().as_mut(),
+                    write_ops[i].zone,
+                    &data[data_start..data_start + data_len],
+                )?;
+                i = j;
+            } else {
+                let mut block = [0u8; FS_BLOCK_SIZE];
+                block[..op.len].copy_from_slice(&data[op.data_offset..op.data_offset + op.len]);
+                write_tfs_block(self.device.lock().as_mut(), op.zone, &block)?;
+                i += 1;
+            }
+        }
+
+        for (zone, block) in dirty_l2_blocks.iter() {
+            write_tfs_block(self.device.lock().as_mut(), *zone, block)?;
+        }
+        if single_indirect_loaded && single_indirect_dirty {
+            write_tfs_block(
+                self.device.lock().as_mut(),
+                inode.single_indirect_get(),
+                &single_indirect_block,
+            )?;
+        }
+        if double_indirect_loaded && double_indirect_dirty {
             write_tfs_block(
                 self.device.lock().as_mut(),
                 inode.double_indirect_get(),
@@ -1159,7 +1308,11 @@ impl TwilightFs {
             inode.direct_slot_set(i, zone);
         }
         inode.size = bytes_written as u64;
-        self.write_inode(inode_num, &inode).unwrap();
+        self.write_inode(inode_num, &inode).map_err(|_| InvalidInode)?;
+
+        for zone in preallocated {
+            let _ = self.dealloc_zone(zone);
+        }
 
         self.shared.invalidate_all();
         Ok(())
@@ -1350,7 +1503,9 @@ impl TwilightFs {
         parent_inode_num: u32,
         name: &str,
     ) -> Result<Option<(u32, usize, u32)>, FsError> {
-        let parent_inode = self.read_inode(parent_inode_num).map_err(|_| InvalidInode)?;
+        let parent_inode = self
+            .read_inode(parent_inode_num)
+            .map_err(|_| InvalidInode)?;
         let dir_entry_size = size_of::<DirEntry>();
         let entries_per_block = self.superblock.block_size as usize / dir_entry_size;
         let mut buffer = [0u8; FS_BLOCK_SIZE];
@@ -1390,7 +1545,9 @@ impl TwilightFs {
         zone: u32,
         offset: usize,
     ) -> Result<(), FsError> {
-        let mut parent_inode = self.read_inode(parent_inode_num).map_err(|_| InvalidInode)?;
+        let mut parent_inode = self
+            .read_inode(parent_inode_num)
+            .map_err(|_| InvalidInode)?;
         let dir_entry_size = size_of::<DirEntry>();
         let mut buf = [0u8; FS_BLOCK_SIZE];
         read_tfs_block(self.device.lock().as_mut(), zone, &mut buf)?;
@@ -1422,11 +1579,15 @@ impl TwilightFs {
         let old_parent_inode_num = self.resolve_path(old_parent_path.as_str())?;
         let new_parent_inode_num = self.resolve_path(new_parent_path.as_str())?;
 
-        let old_parent_inode = self.read_inode(old_parent_inode_num).map_err(|_| InvalidInode)?;
+        let old_parent_inode = self
+            .read_inode(old_parent_inode_num)
+            .map_err(|_| InvalidInode)?;
         if !old_parent_inode.is_dir() {
             return Err(FsError::InvalidPath);
         }
-        let new_parent_inode = self.read_inode(new_parent_inode_num).map_err(|_| InvalidInode)?;
+        let new_parent_inode = self
+            .read_inode(new_parent_inode_num)
+            .map_err(|_| InvalidInode)?;
         if !new_parent_inode.is_dir() {
             return Err(FsError::InvalidPath);
         }
@@ -1446,7 +1607,9 @@ impl TwilightFs {
             self.find_dir_entry_slot(new_parent_inode_num, new_name.as_str())?
         {
             if existing_inode_num != old_inode_num {
-                let existing_inode = self.read_inode(existing_inode_num).map_err(|_| InvalidInode)?;
+                let existing_inode = self
+                    .read_inode(existing_inode_num)
+                    .map_err(|_| InvalidInode)?;
                 if existing_inode.is_dir() {
                     return Err(FileAlreadyExists);
                 }
@@ -1718,6 +1881,17 @@ impl FsCtx for TwilightFs {
         } else {
             Ok(())
         }
+    }
+
+    fn alloc_zones(&mut self, count: usize) -> Result<Vec<u32>, TfsError> {
+        self.allocate_zones(count)
+    }
+
+    fn write_blocks(&mut self, start_lba: u32, buf: &[u8]) -> Result<(), ()> {
+        if buf.len() % self.block_size() != 0 {
+            return Err(());
+        }
+        write_tfs_blocks(self.device.lock().as_mut(), start_lba, buf).map_err(|_| ())
     }
 }
 

@@ -91,10 +91,6 @@ run-blk-bios: $(IMAGE_NAME).iso
 		echo "Creating hdd.img..."; \
 		qemu-img create -f raw hdd.img 1G; \
 	fi
-	@if [ ! -f usb.img ]; then \
-		echo "Creating usb.img..."; \
-		qemu-img create -f raw usb.img 100M; \
-	fi
 	qemu-system-$(KARCH) \
 		-m 1024 \
 		-smp 4 \
@@ -105,8 +101,6 @@ run-blk-bios: $(IMAGE_NAME).iso
 		-cdrom $(IMAGE_NAME).iso \
   		-drive file=hdd.img,if=none,format=raw,id=vd0 \
   		-device virtio-blk-pci,drive=vd0 \
-		-drive file=usb.img,if=none,format=raw,id=usb0 \
-		-device usb-storage,drive=usb0 \
 		-serial stdio \
 		-d int,guest_errors,unimp \
 	  	-D qemu.log \

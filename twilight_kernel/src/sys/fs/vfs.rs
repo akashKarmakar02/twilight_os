@@ -106,6 +106,38 @@ pub trait FsCtx {
     fn write_inode_twilight(&mut self, ino: u32, inode: Inode) -> Result<(), &'static str>;
 
     fn remove_file(&mut self, path: &str) -> Result<(), ()>;
+
+    fn alloc_zones(&mut self, count: usize) -> Result<Vec<u32>, TfsError> {
+        let mut zones = Vec::with_capacity(count);
+        for _ in 0..count {
+            match self.alloc_zone() {
+                Ok(z) => zones.push(z),
+                Err(e) => {
+                    // TODO: Rollback allocated zones?
+                    // For now, return error, but this might leak.
+                    // ideally we should free them.
+                    for z in zones {
+                        let _ = self.free_zone(z);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(zones)
+    }
+
+    fn write_blocks(&mut self, start_lba: u32, buf: &[u8]) -> Result<(), ()> {
+        let block_size = self.block_size();
+        if buf.len() % block_size != 0 {
+            return Err(());
+        }
+        let blocks = buf.len() / block_size;
+        for i in 0..blocks {
+            let offset = i * block_size;
+            self.write_block(start_lba + i as u32, &buf[offset..offset + block_size])?;
+        }
+        Ok(())
+    }
 }
 
 #[allow(dead_code)]

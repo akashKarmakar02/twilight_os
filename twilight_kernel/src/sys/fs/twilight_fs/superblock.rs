@@ -55,7 +55,7 @@ pub enum CsumType {
 pub enum CryptoType {
     None = 0,
     XChaCha20Poly1305 = 1,
-    Aes256Gcm = 2,         // future/hw accel
+    Aes256Gcm = 2, // future/hw accel
 }
 
 #[repr(C, packed)]
@@ -68,9 +68,9 @@ pub struct Uuid128 {
 #[derive(Debug, Clone, Copy)]
 pub struct SuperblockV1 {
     // identity
-    pub magic: [u8; 4],     // "TFS0"
-    pub version: u32,       // 0x000001
-    pub block_size: u16
+    pub magic: [u8; 4], // "TFS0"
+    pub version: u32,   // 0x000001
+    pub block_size: u16,
     pub log_block_size: u8, // log2(block_size) convenience
     pub csum_type: u8,      // CsumType
     pub uuid: Uuid128,      // unique FS id

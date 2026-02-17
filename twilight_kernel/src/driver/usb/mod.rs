@@ -157,13 +157,13 @@ pub fn usb_irq_handler() {
                 }
             }
         }
-        #[allow(static_mut_refs)]
-        if let Some(xhci) = XHCI_DEVICES.get_mut() {
-            for hc in xhci.iter_mut() {
-                if hc.handle_interrupt() {
-                    hc.poll_drivers();
-                }
-            }
-        }
+        // #[allow(static_mut_refs)]
+        // if let Some(xhci) = XHCI_DEVICES.get_mut() {
+        //     for hc in xhci.iter_mut() {
+        //         if hc.handle_interrupt() {
+        //             hc.poll_drivers();
+        //         }
+        //     }
+        // }
     }
 }
