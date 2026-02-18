@@ -6,29 +6,16 @@ use super::random_port;
 
 use crate::arch::x86_64::halt;
 use crate::driver::disk::ata::{FileIO, IO};
-use crate::driver::nic::{SocketStatus, NET};
+use crate::driver::nic::NET;
 use crate::driver::timer::cmos::CMOS;
 use crate::task::executor::sleep;
 use alloc::vec;
-use bit_field::BitField;
 use smoltcp::iface::SocketHandle;
 use smoltcp::phy::Device;
 use smoltcp::socket::Socket;
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use smoltcp::wire::{IpAddress, IpEndpoint};
-
-fn tcp_socket_status(socket: &tcp::Socket) -> u8 {
-    let mut status = 0;
-    status.set_bit(SocketStatus::IsListening as usize, socket.is_listening());
-    status.set_bit(SocketStatus::IsActive as usize, socket.is_active());
-    status.set_bit(SocketStatus::IsOpen as usize, socket.is_open());
-    status.set_bit(SocketStatus::MaySend as usize, socket.may_send());
-    status.set_bit(SocketStatus::CanSend as usize, socket.can_send());
-    status.set_bit(SocketStatus::MayRecv as usize, socket.may_recv());
-    status.set_bit(SocketStatus::CanRecv as usize, socket.can_recv());
-    status
-}
 
 #[derive(Debug)]
 pub struct TcpSocket {
@@ -309,12 +296,6 @@ impl FileIO for TcpSocket {
                 }
                 iface.poll(sys::net::time(), device, &mut sockets);
                 let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-                if buf.len() == 1 {
-                    // 1 byte status read
-                    buf[0] = tcp_socket_status(socket);
-                    return Ok(1);
-                }
 
                 if socket.can_recv() {
                     bytes = socket.recv_slice(buf).map_err(|_| ())?;
