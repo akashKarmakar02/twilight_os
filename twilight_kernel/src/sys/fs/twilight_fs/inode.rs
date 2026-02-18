@@ -734,7 +734,7 @@ impl VfsNodeOps for TFSVfsNode {
             .lock()
             .write_inode_twilight(self.inode_no, self.inode)
             .unwrap();
-        self.shared.invalidate_all();
+        self.shared.invalidate_file_inode(self.inode_no);
         Ok(())
     }
 
@@ -774,7 +774,7 @@ impl VfsNodeOps for TFSVfsNode {
                 .lock()
                 .write_inode_twilight(self.inode_no, self.inode)
                 .map_err(|_| -(EIO as i32))?;
-            self.shared.invalidate_all();
+            self.shared.invalidate_file_inode(self.inode_no);
             return Ok(());
         }
 

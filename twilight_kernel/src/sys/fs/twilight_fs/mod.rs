@@ -35,6 +35,7 @@ static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);
 const PATH_LOOKUP_CACHE_CAPACITY: usize = 1024;
 const FILE_CACHE_MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 const FILE_CACHE_MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+const DIR_INDEX_CACHE_CAPACITY: usize = 512;
 
 #[inline]
 fn to_u32_saturating(value: u64) -> u32 {
@@ -312,12 +313,95 @@ impl FileContentCache {
         self.map.insert(inode_no, data);
         self.order.push_back(inode_no);
     }
+
+    fn invalidate_inode(&mut self, generation: usize, inode_no: u32) {
+        self.ensure_generation(generation);
+        if let Some(old) = self.map.remove(&inode_no) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.len());
+        }
+        self.order.retain(|ino| *ino != inode_no);
+    }
+
+    fn invalidate_all_entries(&mut self) {
+        self.total_bytes = 0;
+        self.map.clear();
+        self.order.clear();
+    }
+}
+
+#[derive(Clone, Default)]
+struct DirIndexEntry {
+    names: BTreeMap<String, u32>,
+    next_free_slot_hint: usize,
+}
+
+#[derive(Default)]
+struct DirIndexCache {
+    generation: usize,
+    map: BTreeMap<u32, DirIndexEntry>,
+    order: VecDeque<u32>,
+}
+
+impl DirIndexCache {
+    fn ensure_generation(&mut self, generation: usize) {
+        if self.generation != generation {
+            self.generation = generation;
+            self.map.clear();
+            self.order.clear();
+        }
+    }
+
+    fn get(&mut self, generation: usize, parent_ino: u32) -> Option<DirIndexEntry> {
+        self.ensure_generation(generation);
+        self.map.get(&parent_ino).cloned()
+    }
+
+    fn insert(&mut self, generation: usize, parent_ino: u32, entry: DirIndexEntry) {
+        self.ensure_generation(generation);
+
+        if !self.map.contains_key(&parent_ino) {
+            self.order.push_back(parent_ino);
+        }
+        self.map.insert(parent_ino, entry);
+
+        while self.order.len() > DIR_INDEX_CACHE_CAPACITY {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+    }
+
+    fn update_after_insert(
+        &mut self,
+        generation: usize,
+        parent_ino: u32,
+        name: String,
+        inode_no: u32,
+        next_free_slot_hint: usize,
+    ) {
+        self.ensure_generation(generation);
+
+        if !self.map.contains_key(&parent_ino) {
+            self.order.push_back(parent_ino);
+        }
+
+        let entry = self.map.entry(parent_ino).or_default();
+        entry.names.insert(name, inode_no);
+        entry.next_free_slot_hint = next_free_slot_hint;
+
+        while self.order.len() > DIR_INDEX_CACHE_CAPACITY {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+    }
 }
 
 pub(crate) struct TwilightFsShared {
     generation: AtomicUsize,
     lookup_cache: Mutex<PathLookupCache>,
     file_cache: Mutex<FileContentCache>,
+    dir_index_cache: Mutex<DirIndexCache>,
 }
 
 impl TwilightFsShared {
@@ -326,6 +410,7 @@ impl TwilightFsShared {
             generation: AtomicUsize::new(0),
             lookup_cache: Mutex::new(PathLookupCache::default()),
             file_cache: Mutex::new(FileContentCache::default()),
+            dir_index_cache: Mutex::new(DirIndexCache::default()),
         }
     }
 
@@ -335,8 +420,15 @@ impl TwilightFsShared {
     }
 
     #[inline]
-    pub(crate) fn invalidate_all(&self) {
+    pub(crate) fn invalidate_namespace(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
+        self.file_cache.lock().invalidate_all_entries();
+    }
+
+    #[inline]
+    pub(crate) fn invalidate_file_inode(&self, inode_no: u32) {
+        let generation = self.generation();
+        self.file_cache.lock().invalidate_inode(generation, inode_no);
     }
 
     #[inline]
@@ -368,6 +460,38 @@ impl TwilightFsShared {
     pub(crate) fn insert_file_cache(&self, inode_no: u32, data: Vec<u8>) {
         let generation = self.generation();
         self.file_cache.lock().insert(generation, inode_no, data);
+    }
+
+    #[inline]
+    fn dir_index_get(&self, parent_ino: u32) -> Option<DirIndexEntry> {
+        let generation = self.generation();
+        self.dir_index_cache.lock().get(generation, parent_ino)
+    }
+
+    #[inline]
+    fn dir_index_set(&self, parent_ino: u32, entry: DirIndexEntry) {
+        let generation = self.generation();
+        self.dir_index_cache
+            .lock()
+            .insert(generation, parent_ino, entry);
+    }
+
+    #[inline]
+    fn dir_index_update_after_insert(
+        &self,
+        parent_ino: u32,
+        name: String,
+        inode_no: u32,
+        next_free_slot_hint: usize,
+    ) {
+        let generation = self.generation();
+        self.dir_index_cache.lock().update_after_insert(
+            generation,
+            parent_ino,
+            name,
+            inode_no,
+            next_free_slot_hint,
+        );
     }
 }
 
@@ -599,7 +723,7 @@ impl TwilightFs {
         self.write_inode(root_inode_num, &root_inode)?;
         self.create_dir_entry(root_inode_num, ".", root_inode_num)?;
         self.create_dir_entry(root_inode_num, "..", root_inode_num)?;
-        self.shared.invalidate_all();
+        self.shared.invalidate_namespace();
         Ok(())
     }
 
@@ -869,6 +993,80 @@ impl TwilightFs {
         Ok(inode)
     }
 
+    fn decode_dir_name(name: &[u8; 60]) -> Option<String> {
+        let raw = core::str::from_utf8(name).ok()?.trim_end_matches('\0');
+        if raw.is_empty() {
+            None
+        } else {
+            Some(raw.to_string())
+        }
+    }
+
+    fn build_dir_index_entry(&mut self, parent_inode: &Inode) -> Result<DirIndexEntry, FsError> {
+        let dir_entry_size = size_of::<DirEntry>();
+        let entries_per_block = self.superblock.block_size as usize / dir_entry_size;
+        let total_slots = Inode::DIRECT_SLOT_COUNT * entries_per_block;
+
+        let mut names = BTreeMap::new();
+        let mut next_free_slot_hint = total_slots;
+        let mut buf = [0u8; FS_BLOCK_SIZE];
+
+        for slot in 0..total_slots {
+            let block_idx = slot / entries_per_block;
+            let entry_idx = slot % entries_per_block;
+            let zone = parent_inode.direct_slot_get(block_idx);
+            if zone == 0 {
+                if next_free_slot_hint == total_slots {
+                    next_free_slot_hint = slot;
+                }
+                continue;
+            }
+
+            if entry_idx == 0 {
+                read_tfs_block(self.device.lock().as_mut(), zone, &mut buf).map_err(|_| InvalidInode)?;
+            }
+
+            let offset = entry_idx * dir_entry_size;
+            let inode_no = u32::from_le_bytes([
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            ]);
+            if inode_no == 0 {
+                if next_free_slot_hint == total_slots {
+                    next_free_slot_hint = slot;
+                }
+                continue;
+            }
+
+            let mut name = [0u8; 60];
+            name.copy_from_slice(&buf[offset + 4..offset + 64]);
+            if let Some(decoded) = Self::decode_dir_name(&name) {
+                names.insert(decoded, inode_no);
+            }
+        }
+
+        Ok(DirIndexEntry {
+            names,
+            next_free_slot_hint,
+        })
+    }
+
+    fn ensure_dir_index_entry(
+        &mut self,
+        parent_inode_num: u32,
+        parent_inode: &Inode,
+    ) -> Result<DirIndexEntry, FsError> {
+        if let Some(entry) = self.shared.dir_index_get(parent_inode_num) {
+            return Ok(entry);
+        }
+
+        let entry = self.build_dir_index_entry(parent_inode)?;
+        self.shared.dir_index_set(parent_inode_num, entry.clone());
+        Ok(entry)
+    }
+
     // TODO: move this to DirEntry impl
     pub fn create_dir_entry(
         &mut self,
@@ -880,8 +1078,12 @@ impl TwilightFs {
 
         let dir_entry_size = size_of::<DirEntry>();
         let entries_per_block = self.superblock.block_size as usize / dir_entry_size;
-
-        let mut entry_added = false;
+        let total_slots = Inode::DIRECT_SLOT_COUNT * entries_per_block;
+        let start_hint = self
+            .shared
+            .dir_index_get(parent_inode_num)
+            .map(|entry| core::cmp::min(entry.next_free_slot_hint, total_slots))
+            .unwrap_or(0);
         let name_bytes = {
             let mut name_buf = [0u8; 60];
             let name_bytes = name.as_bytes();
@@ -894,33 +1096,49 @@ impl TwilightFs {
             inode: child_inode_num,
             name: name_bytes,
         };
+        let entry_bytes =
+            unsafe { core::slice::from_raw_parts(&entry as *const _ as *const u8, dir_entry_size) };
 
-        for i in 0..Inode::DIRECT_SLOT_COUNT {
-            let mut block = parent_inode.direct_slot_get(i);
-            if block == 0 {
-                block = self
-                    .allocate_zone()
-                    .map_err(|_| "Failed to allocate directory zone")?;
-                parent_inode.direct_slot_set(i, block);
+        let mut try_insert = |fs: &mut TwilightFs,
+                              start: usize,
+                              end: usize|
+         -> Result<Option<usize>, &'static str> {
+            let mut buf = [0u8; FS_BLOCK_SIZE];
+            let mut loaded_block_idx: Option<usize> = None;
+            let mut loaded_block_zone = 0u32;
 
-                let zero = [0u8; FS_BLOCK_SIZE];
-                if write_tfs_block(self.device.lock().as_mut(), block, &zero).is_err() {
-                    return Err("Failed to initialize directory block");
+            for slot in start..end {
+                let block_idx = slot / entries_per_block;
+                let entry_idx = slot % entries_per_block;
+                let mut block = parent_inode.direct_slot_get(block_idx);
+
+                if block == 0 {
+                    block = fs
+                        .allocate_zone()
+                        .map_err(|_| "Failed to allocate directory zone")?;
+                    parent_inode.direct_slot_set(block_idx, block);
+
+                    let zero = [0u8; FS_BLOCK_SIZE];
+                    if write_tfs_block(fs.device.lock().as_mut(), block, &zero).is_err() {
+                        return Err("Failed to initialize directory block");
+                    }
+
+                    fs.write_inode(parent_inode_num, &parent_inode)?;
                 }
 
-                self.write_inode(parent_inode_num, &parent_inode)?;
-            }
+                if loaded_block_idx != Some(block_idx) || loaded_block_zone != block {
+                    if read_tfs_block(fs.device.lock().as_mut(), block, &mut buf).is_err() {
+                        return Err("Failed to read block");
+                    }
+                    loaded_block_idx = Some(block_idx);
+                    loaded_block_zone = block;
+                }
 
-            let mut buf = [0u8; FS_BLOCK_SIZE];
-            if read_tfs_block(self.device.lock().as_mut(), block, &mut buf).is_err() {
-                return Err("Failed to read block");
-            }
-            if i == 0 && parent_inode.size == 0 {
-                buf.fill(0);
-            }
+                if block_idx == 0 && parent_inode.size == 0 {
+                    buf.fill(0);
+                }
 
-            for j in 0..entries_per_block {
-                let offset = j * dir_entry_size;
+                let offset = entry_idx * dir_entry_size;
                 let inode_field = u32::from_le_bytes([
                     buf[offset],
                     buf[offset + 1],
@@ -928,27 +1146,39 @@ impl TwilightFs {
                     buf[offset + 3],
                 ]);
                 if inode_field == 0 {
-                    let entry_bytes = unsafe {
-                        core::slice::from_raw_parts(&entry as *const _ as *const u8, dir_entry_size)
-                    };
                     buf[offset..offset + dir_entry_size].copy_from_slice(entry_bytes);
-                    if write_tfs_block(self.device.lock().as_mut(), block, &buf).is_err() {
+                    if write_tfs_block(fs.device.lock().as_mut(), block, &buf).is_err() {
                         return Err("Failed to write block");
                     }
                     parent_inode.size += dir_entry_size as u64;
-                    self.write_inode(parent_inode_num, &parent_inode)?;
-
-                    entry_added = true;
-                    break;
+                    fs.write_inode(parent_inode_num, &parent_inode)?;
+                    return Ok(Some(slot));
                 }
             }
 
-            if entry_added {
-                return Ok(());
-            }
-        }
+            Ok(None)
+        };
 
-        Err("Directory is full")
+        let inserted_slot = if let Some(slot) = try_insert(self, start_hint, total_slots)? {
+            Some(slot)
+        } else if start_hint > 0 {
+            try_insert(self, 0, start_hint)?
+        } else {
+            None
+        };
+
+        if let Some(slot) = inserted_slot {
+            let next_hint = core::cmp::min(slot + 1, total_slots);
+            self.shared.dir_index_update_after_insert(
+                parent_inode_num,
+                name.to_string(),
+                child_inode_num,
+                next_hint,
+            );
+            Ok(())
+        } else {
+            Err("Directory is full")
+        }
     }
 
     // TODO: move this to DirEntry impl
@@ -992,21 +1222,14 @@ impl TwilightFs {
             return Err(FileNotFound);
         }
 
-        let parent_inode = self.read_inode(parent_inode_num).unwrap();
-        let entries = self.read_dir_entries(&parent_inode).unwrap();
-
-        for entry in &entries {
-            let existing_name = core::str::from_utf8(&entry.name)
-                .unwrap_or("")
-                .trim_end_matches('\0');
-
-            if existing_name == name {
-                return Err(FileAlreadyExists);
-            }
+        let parent_inode = self.read_inode(parent_inode_num).map_err(|_| InvalidInode)?;
+        let dir_index = self.ensure_dir_index_entry(parent_inode_num, &parent_inode)?;
+        if dir_index.names.contains_key(name) {
+            return Err(FileAlreadyExists);
         }
 
-        let new_inode_num = self.allocate_inode().unwrap() + 1;
-        let new_zone = self.allocate_zone().unwrap();
+        let new_inode_num = self.allocate_inode().map_err(|_| InvalidInode)? + 1;
+        let new_zone = self.allocate_zone().map_err(|_| InvalidInode)?;
 
         let time = CMOS::new().unix_time();
 
@@ -1017,12 +1240,12 @@ impl TwilightFs {
         }
         inode.direct_slot_set(0, new_zone);
 
-        self.write_inode(new_inode_num, &inode).unwrap();
+        self.write_inode(new_inode_num, &inode)
+            .map_err(|_| InvalidInode)?;
 
         self.create_dir_entry(parent_inode_num, name, new_inode_num)
-            .unwrap();
+            .map_err(|_| InvalidInode)?;
 
-        self.shared.invalidate_all();
         Ok(new_inode_num)
     }
 
@@ -1045,10 +1268,41 @@ impl TwilightFs {
             return Err(FsError::FileSizeTooLarge);
         }
 
-        let metadata_headroom = required_blocks / zone_entries + 3;
-        let mut preallocated = if required_blocks > 0 {
-            self.allocate_zones(required_blocks + metadata_headroom)
-                .unwrap_or(Vec::new())
+        let direct_capacity = Inode::DIRECT_SLOT_COUNT;
+        let single_capacity = zone_entries;
+        let existing_blocks = if inode.size == 0 {
+            0
+        } else {
+            ((inode.size as usize) + block_size - 1) / block_size
+        };
+        let needs_indirect = required_blocks > direct_capacity;
+        let is_tiny_direct_only = required_blocks > 0 && !needs_indirect;
+
+        let missing_data_est = required_blocks.saturating_sub(existing_blocks);
+        let mut metadata_est = 0usize;
+        if needs_indirect && inode.single_indirect_get() == 0 {
+            metadata_est += 1;
+        }
+        if required_blocks > direct_capacity + single_capacity {
+            if inode.double_indirect_get() == 0 {
+                metadata_est += 1;
+            }
+            let needed_double_data_blocks = required_blocks - direct_capacity - single_capacity;
+            let existing_double_data_blocks =
+                existing_blocks.saturating_sub(direct_capacity + single_capacity);
+            let needed_l1_blocks = (needed_double_data_blocks + zone_entries - 1) / zone_entries;
+            let existing_l1_blocks =
+                (existing_double_data_blocks + zone_entries - 1) / zone_entries;
+            metadata_est += needed_l1_blocks.saturating_sub(existing_l1_blocks);
+        }
+
+        let prealloc_count = if is_tiny_direct_only {
+            0
+        } else {
+            missing_data_est + metadata_est
+        };
+        let mut preallocated = if prealloc_count > 0 {
+            self.allocate_zones(prealloc_count).unwrap_or(Vec::new())
         } else {
             Vec::new()
         };
@@ -1314,7 +1568,7 @@ impl TwilightFs {
             let _ = self.dealloc_zone(zone);
         }
 
-        self.shared.invalidate_all();
+        self.shared.invalidate_file_inode(inode_num);
         Ok(())
     }
 
@@ -1398,21 +1652,14 @@ impl TwilightFs {
             return Err(FileNameTooLong);
         }
 
-        let parent_inode = self.read_inode(parent_inode_num).unwrap();
-        let entries = self.read_dir_entries(&parent_inode).unwrap();
-
-        for entry in &entries {
-            let existing_name = core::str::from_utf8(&entry.name)
-                .unwrap_or("")
-                .trim_end_matches('\0');
-
-            if existing_name == name {
-                return Err(FileAlreadyExists);
-            }
+        let parent_inode = self.read_inode(parent_inode_num).map_err(|_| InvalidInode)?;
+        let dir_index = self.ensure_dir_index_entry(parent_inode_num, &parent_inode)?;
+        if dir_index.names.contains_key(name) {
+            return Err(FileAlreadyExists);
         }
 
-        let new_inode_num = self.allocate_inode().unwrap() + 1;
-        let new_zone = self.allocate_zone().unwrap();
+        let new_inode_num = self.allocate_inode().map_err(|_| InvalidInode)? + 1;
+        let new_zone = self.allocate_zone().map_err(|_| InvalidInode)?;
 
         let time = CMOS::new().unix_time();
 
@@ -1421,17 +1668,17 @@ impl TwilightFs {
             inode.flags |= inode::IFLAG_ENCRYPTED;
         }
         inode.direct_slot_set(0, new_zone);
-        self.write_inode(new_inode_num, &inode).unwrap();
+        self.write_inode(new_inode_num, &inode)
+            .map_err(|_| InvalidInode)?;
 
         self.create_dir_entry(parent_inode_num, name, new_inode_num)
-            .unwrap();
+            .map_err(|_| InvalidInode)?;
 
         self.create_dir_entry(new_inode_num, ".", new_inode_num)
-            .unwrap();
+            .map_err(|_| InvalidInode)?;
         self.create_dir_entry(new_inode_num, "..", parent_inode_num)
-            .unwrap();
+            .map_err(|_| InvalidInode)?;
 
-        self.shared.invalidate_all();
         Ok(new_inode_num)
     }
 
@@ -1636,7 +1883,7 @@ impl TwilightFs {
             self.clear_dir_entry_slot(old_parent_inode_num, old_zone, old_offset)?;
         }
 
-        self.shared.invalidate_all();
+        self.shared.invalidate_namespace();
         Ok(())
     }
 
@@ -1816,7 +2063,7 @@ impl TwilightFs {
                     }
                     self.write_inode(parent_inode_num, &parent_inode).unwrap();
 
-                    self.shared.invalidate_all();
+                    self.shared.invalidate_namespace();
                     return Ok(());
                 }
             }
