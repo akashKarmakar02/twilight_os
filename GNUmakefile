@@ -237,7 +237,7 @@ limine/limine:
 	$(MAKE) -C limine
 
 .PHONY: kernel
-kernel: userspace
+kernel:
 	$(MAKE) -C twilight_kernel
 
 .PHONY: userspace
@@ -245,7 +245,7 @@ userspace:
 	cd userspace && \
 	cargo build --release
 
-cpio:
+cpio: userspace
 	cd rootfs && find . | cpio -o -H newc > ../rootfs.cpio
 
 $(IMAGE_NAME).iso: limine/limine kernel cpio
@@ -293,7 +293,7 @@ ifeq ($(KARCH),loongarch64)
 endif
 	rm -rf iso_root
 
-$(IMAGE_NAME).hdd: limine/limine kernel userspace cpio
+$(IMAGE_NAME).hdd: limine/limine kernel cpio
 	rm -f $(IMAGE_NAME).hdd
 	dd if=/dev/zero bs=1M count=0 seek=200 of=$(IMAGE_NAME).hdd
 	PATH=$$PATH:/usr/sbin:/sbin sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00 -m 1
