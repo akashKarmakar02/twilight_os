@@ -340,15 +340,49 @@ static void draw_progress(size_t current, size_t total) {
     write(2, msg, (size_t)len);
 }
 
-static size_t parse_content_length(const char *headers) {
-  const char *needle = "Content-Length:";
-  const char *p = strstr(headers, needle);
-  if (!p)
-    return 0;
-  p += strlen(needle);
-  while (*p == ' ' || *p == '\t')
-    p++;
-  return (size_t)strtoull(p, NULL, 10);
+static size_t parse_content_length_bounded(const char *headers, size_t hdr_len) {
+  const char needle[] = "Content-Length:";
+  const size_t needle_len = sizeof(needle) - 1;
+  size_t pos = 0;
+
+  while (pos < hdr_len) {
+    size_t line_start = pos;
+    while (pos < hdr_len && headers[pos] != '\n')
+      pos++;
+    size_t line_end = pos;
+    if (pos < hdr_len)
+      pos++;
+
+    if (line_end > line_start && headers[line_end - 1] == '\r')
+      line_end--;
+
+    size_t line_len = line_end - line_start;
+    if (line_len < needle_len)
+      continue;
+    if (memcmp(headers + line_start, needle, needle_len) != 0)
+      continue;
+
+    size_t i = line_start + needle_len;
+    while (i < line_end && (headers[i] == ' ' || headers[i] == '\t'))
+      i++;
+
+    unsigned long long v = 0;
+    int saw_digit = 0;
+    while (i < line_end && headers[i] >= '0' && headers[i] <= '9') {
+      saw_digit = 1;
+      unsigned digit = (unsigned)(headers[i] - '0');
+      if (v > (unsigned long long)(SIZE_MAX - digit) / 10)
+        return SIZE_MAX;
+      v = v * 10 + digit;
+      i++;
+    }
+
+    if (!saw_digit)
+      return 0;
+    return (size_t)v;
+  }
+
+  return 0;
 }
 
 static char *get_filename_from_path(char *path) {
@@ -693,11 +727,11 @@ int main(int argc, char **argv) {
       for (size_t i = 0; i + 3 < header_len; i++) {
         if (header_buf[i] == '\r' && header_buf[i + 1] == '\n' &&
             header_buf[i + 2] == '\r' && header_buf[i + 3] == '\n') {
-          header_buf[i + 4] = 0;
-          content_length = parse_content_length(header_buf);
+          size_t header_bytes = i + 4;
+          content_length = parse_content_length_bounded(header_buf, header_bytes);
 
           if (url.print_headers) {
-            if (write_all_fd(1, header_buf, i + 4) != 0) {
+            if (write_all_fd(1, header_buf, header_bytes) != 0) {
               if (fout)
                 fclose(fout);
               transport_close(&tr);
@@ -705,9 +739,9 @@ int main(int argc, char **argv) {
             }
           }
 
-          size_t body_chunk_len = header_len - (i + 4);
+          size_t body_chunk_len = header_len - header_bytes;
           if (body_chunk_len > 0) {
-            if (write_all_fd(fd_out, header_buf + i + 4, body_chunk_len) != 0) {
+            if (write_all_fd(fd_out, header_buf + header_bytes, body_chunk_len) != 0) {
               if (fout)
                 fclose(fout);
               transport_close(&tr);
