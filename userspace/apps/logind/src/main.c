@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <termios.h>
@@ -37,7 +38,6 @@ static long sys_set_file_attr(const char *path, uint32_t attr, uint32_t value) {
 #define LOCALTIME_PATH "/etc/localtime"
 #define LOCALTIME_TMP_PATH "/etc/localtime.tmp"
 #define TIMEZONE_NAME_PATH "/etc/timezone"
-#define MENU_PAGE_SIZE 20
 
 typedef struct {
   char **items;
@@ -222,50 +222,103 @@ static int read_stdin_line(char *buf, size_t bufsz) {
   return 0;
 }
 
+static size_t digit_count(size_t value) {
+  size_t digits = 1;
+  while (value >= 10) {
+    value /= 10;
+    digits++;
+  }
+  return digits;
+}
+
+static size_t get_terminal_columns(void) {
+  struct winsize ws;
+  memset(&ws, 0, sizeof(ws));
+
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+    size_t cols = ws.ws_col;
+    return cols < 20 ? 20 : cols;
+  }
+
+  memset(&ws, 0, sizeof(ws));
+  if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+    size_t cols = ws.ws_col;
+    return cols < 20 ? 20 : cols;
+  }
+
+  const char *env_cols = getenv("COLUMNS");
+  if (env_cols && env_cols[0] != '\0') {
+    char *endptr = NULL;
+    errno = 0;
+    long parsed = strtol(env_cols, &endptr, 10);
+    if (errno == 0 && endptr != env_cols && *endptr == '\0' && parsed > 0) {
+      size_t cols = (size_t)parsed;
+      return cols < 20 ? 20 : cols;
+    }
+  }
+
+  return 80;
+}
+
+static size_t menu_label_width(size_t one_based_index, const char *item) {
+  return digit_count(one_based_index) + 2 + strlen(item);
+}
+
 static int menu_select(const char *title, StringList *items, size_t *selected_index) {
   if (!items || items->len == 0)
     return -1;
 
-  size_t page = 0;
-  size_t page_count = (items->len + MENU_PAGE_SIZE - 1) / MENU_PAGE_SIZE;
+  size_t max_label_width = 0;
+  for (size_t i = 0; i < items->len; i++) {
+    size_t width = menu_label_width(i + 1, items->items[i]);
+    if (width > max_label_width)
+      max_label_width = width;
+  }
+
+  size_t column_width = max_label_width + 2;
+  if (column_width == 0)
+    column_width = 1;
+
+  size_t terminal_columns = get_terminal_columns();
+  size_t columns = terminal_columns / column_width;
+  if (columns == 0)
+    columns = 1;
+
+  size_t row_count = (items->len + columns - 1) / columns;
   char input[64];
 
   for (;;) {
-    size_t start = page * MENU_PAGE_SIZE;
-    size_t end = start + MENU_PAGE_SIZE;
-    if (end > items->len)
-      end = items->len;
+    printf("\n%s\n", title);
+    for (size_t row = 0; row < row_count; row++) {
+      size_t last_visible_col = 0;
+      for (size_t col = 0; col < columns; col++) {
+        size_t idx = row * columns + col;
+        if (idx < items->len)
+          last_visible_col = col;
+      }
 
-    printf("\n%s (page %zu/%zu)\n", title, page + 1, page_count);
-    for (size_t i = start; i < end; i++) {
-      printf("  %2zu) %s\n", (i - start) + 1, items->items[i]);
+      for (size_t col = 0; col < columns; col++) {
+        size_t idx = row * columns + col;
+        if (idx >= items->len)
+          continue;
+
+        size_t label_width = menu_label_width(idx + 1, items->items[idx]);
+        printf("%zu) %s", idx + 1, items->items[idx]);
+
+        if (col < last_visible_col) {
+          size_t pad = column_width > label_width ? column_width - label_width : 1;
+          for (size_t s = 0; s < pad; s++) {
+            putchar(' ');
+          }
+        }
+      }
+      putchar('\n');
     }
-    printf("Enter choice number");
-    if (page_count > 1) {
-      printf(", 'n' for next, 'p' for previous");
-    }
-    printf(": ");
+    printf("Enter choice number (1-%zu): ", items->len);
     fflush(stdout);
 
     if (read_stdin_line(input, sizeof(input)) != 0)
       return -1;
-
-    if (page_count > 1 && strcmp(input, "n") == 0) {
-      if (page + 1 < page_count) {
-        page++;
-      } else {
-        printf("Already on the last page.\n");
-      }
-      continue;
-    }
-    if (page_count > 1 && strcmp(input, "p") == 0) {
-      if (page > 0) {
-        page--;
-      } else {
-        printf("Already on the first page.\n");
-      }
-      continue;
-    }
 
     char *endptr = NULL;
     errno = 0;
@@ -275,13 +328,12 @@ static int menu_select(const char *title, StringList *items, size_t *selected_in
       continue;
     }
 
-    size_t offset = (size_t)(choice - 1);
-    if (start + offset >= end) {
+    if ((size_t)choice > items->len) {
       printf("Choice out of range.\n");
       continue;
     }
 
-    *selected_index = start + offset;
+    *selected_index = (size_t)(choice - 1);
     return 0;
   }
 }

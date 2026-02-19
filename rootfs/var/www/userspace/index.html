@@ -350,8 +350,8 @@
                 </div>
                 <div class="doc-block">
                     <h3>Overview</h3>
-                    <p>Displays the current system time. It reads from the kernel's real-time clock (RTC) and formats it
-                        according to the Indian Standard Time (IST, UTC+5:30).</p>
+                    <p>Displays the current system time. Timezone is loaded from <code>/etc/localtime</code>, which is
+                        configured during user setup. If timezone data is missing, it falls back to UTC.</p>
                 </div>
             </article>
 
