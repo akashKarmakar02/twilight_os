@@ -1,4 +1,4 @@
-use crate::{serial_println, sys};
+use crate::sys;
 use crate::sys::fs::twilight_fs::{
     TwilightFsShared, read_tfs_block, read_tfs_blocks, write_tfs_block,
 };
@@ -251,6 +251,7 @@ impl VfsNodeOps for TFSVfsNode {
 
         let mut logic_block = lba / block_size;
         let mut current_offset_in_block = lba % block_size;
+        let mut dev = device.lock();
 
         struct ReadOp {
             zone: u32,
@@ -269,7 +270,7 @@ impl VfsNodeOps for TFSVfsNode {
                 } else {
                     if !single_indirect_loaded {
                         read_tfs_block(
-                            device.lock().as_mut(),
+                            dev.as_mut(),
                             self.inode.single_indirect_get(),
                             &mut single_indirect_cache,
                         )
@@ -289,7 +290,7 @@ impl VfsNodeOps for TFSVfsNode {
                 } else {
                     if !double_root_loaded {
                         read_tfs_block(
-                            device.lock().as_mut(),
+                            dev.as_mut(),
                             self.inode.double_indirect_get(),
                             &mut double_root_cache,
                         )
@@ -310,7 +311,7 @@ impl VfsNodeOps for TFSVfsNode {
                     } else {
                         if double_l1_loaded_idx != Some(l1_idx) || double_l1_loaded_zone != l1_zone
                         {
-                            read_tfs_block(device.lock().as_mut(), l1_zone, &mut double_l1_cache)
+                            read_tfs_block(dev.as_mut(), l1_zone, &mut double_l1_cache)
                                 .map_err(|_| ())?;
                             double_l1_loaded_idx = Some(l1_idx);
                             double_l1_loaded_zone = l1_zone;
@@ -366,7 +367,7 @@ impl VfsNodeOps for TFSVfsNode {
                 let out_start = read_ops[i].out_off;
                 let out_slice = &mut buf[out_start..out_start + run_bytes];
 
-                read_tfs_blocks(device.lock().as_mut(), start_zone, out_slice).map_err(|_| ())?;
+                read_tfs_blocks(dev.as_mut(), start_zone, out_slice).map_err(|_| ())?;
                 for b in 0..run_blocks {
                     let start = b * block_size;
                     let end = start + block_size;
@@ -374,7 +375,7 @@ impl VfsNodeOps for TFSVfsNode {
                 }
                 i = j;
             } else {
-                if let Err(_) = read_tfs_block(device.lock().as_mut(), op.zone, &mut buffer) {
+                if let Err(_) = read_tfs_block(dev.as_mut(), op.zone, &mut buffer) {
                     return Err(());
                 }
                 self.apply_crypto(op.zone as u64, &mut buffer);
@@ -830,64 +831,6 @@ impl TFSVfsNode {
 }
 
 impl TFSVfsNode {
-    fn get_zone(&self, device: &mut BlockDev, logical_block: usize) -> Result<u32, ()> {
-        let block_size = 2048;
-        if logical_block < Inode::DIRECT_SLOT_COUNT {
-            return Ok(self.inode.direct_slot_get(logical_block));
-        }
-
-        let indirect_start = Inode::DIRECT_SLOT_COUNT;
-        let indirect_entries = block_size / 4;
-
-        if logical_block < indirect_start + indirect_entries {
-            if self.inode.single_indirect_get() == 0 {
-                return Ok(0);
-            }
-            let idx = logical_block - indirect_start;
-            let mut buf = [0u8; 2048];
-            read_tfs_block(
-                device.lock().as_mut(),
-                self.inode.single_indirect_get(),
-                &mut buf,
-            )
-            .map_err(|_| ())?;
-            return Ok(u32::from_le_bytes(
-                buf[idx * 4..(idx + 1) * 4].try_into().unwrap(),
-            ));
-        }
-
-        let double_start = indirect_start + indirect_entries;
-        let double_entries = indirect_entries * indirect_entries;
-
-        if logical_block < double_start + double_entries {
-            if self.inode.double_indirect_get() == 0 {
-                return Ok(0);
-            }
-            let rel = logical_block - double_start;
-            let l1_idx = rel / indirect_entries;
-            let l2_idx = rel % indirect_entries;
-
-            let mut buf = [0u8; 2048];
-            read_tfs_block(
-                device.lock().as_mut(),
-                self.inode.double_indirect_get(),
-                &mut buf,
-            )
-            .map_err(|_| ())?;
-            let l1_zone = u32::from_le_bytes(buf[l1_idx * 4..(l1_idx + 1) * 4].try_into().unwrap());
-            if l1_zone == 0 {
-                return Ok(0);
-            }
-
-            read_tfs_block(device.lock().as_mut(), l1_zone, &mut buf).map_err(|_| ())?;
-            return Ok(u32::from_le_bytes(
-                buf[l2_idx * 4..(l2_idx + 1) * 4].try_into().unwrap(),
-            ));
-        }
-
-        Ok(0)
-    }
-
     fn read_all_file(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()> {
         let file_size = self.inode.size as usize;
         let mut out = vec![0u8; file_size];

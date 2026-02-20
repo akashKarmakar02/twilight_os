@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 pub const JOURNAL_MAGIC: u32 = 0x4C4E_524A; // "JRNL" little-endian
 
 #[repr(u8)]

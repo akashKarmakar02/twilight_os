@@ -21,7 +21,7 @@ lazy_static! {
 }
 
 const PARTITION_ALIGNMENT_SECTORS: u32 = 2048; // 1 MiB
-const RESERVED_BOOT_MB: u32 = 64;
+const RESERVED_BOOT_MB: u32 = 50;
 const MIN_TWILIGHT_SECTORS: u32 = PARTITION_ALIGNMENT_SECTORS * 8;
 
 #[derive(Debug)]
@@ -316,7 +316,7 @@ fn ensure_partition_table(
         if mbr_manager.write_entries(&entries).is_err() {
             return Err("failed to write partition table");
         } else {
-            boot_sectors = 50 * 1024 * 2;
+            boot_sectors = (RESERVED_BOOT_MB as u64) * 1024 * 2;
             let boot_entry_clone = entries[boot_slot.unwrap()];
             boot_entry = Some(crate::fs::mbr::PartitionEntry::new(
                 boot_entry_clone.status,

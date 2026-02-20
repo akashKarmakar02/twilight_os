@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::driver::pci_device_driver::PciDeviceDriver;
 use crate::driver::timer::wait;
 use crate::driver::usb::interfaces::{
