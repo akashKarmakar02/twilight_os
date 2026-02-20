@@ -301,7 +301,7 @@ $(IMAGE_NAME).hdd: limine/limine kernel cpio
 ifeq ($(KARCH),x86_64)
 	./limine/limine bios-install $(IMAGE_NAME).hdd
 endif
-	mformat -i $(IMAGE_NAME).hdd@@1M
+	mformat -F -i $(IMAGE_NAME).hdd@@1M
 	mmd -i $(IMAGE_NAME).hdd@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
 	mcopy -i $(IMAGE_NAME).hdd@@1M twilight_kernel/kernel ::/boot
 	mcopy -i $(IMAGE_NAME).hdd@@1M rootfs.cpio ::/boot

@@ -7,6 +7,9 @@ use core::cmp;
 use crate::driver::disk::BlockDeviceIO;
 use crate::sys::fs::partition;
 
+pub mod runtime;
+pub use runtime::{detect_fat32_partition, Fat32Fs};
+
 pub enum FatEntry<'a> {
     Directory(&'a str),
     File { path: &'a str, data: &'a [u8] },

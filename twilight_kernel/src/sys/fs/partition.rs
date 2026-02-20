@@ -5,9 +5,11 @@ pub const MBR_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 pub const PARTITION_TABLE_OFFSET: usize = 446;
 pub const PARTITION_ENTRY_SIZE: usize = 16;
 
+pub const FAT32_CHS_PARTITION_TYPE: u8 = 0x0B;
 pub const FAT32_LBA_PARTITION_TYPE: u8 = 0x0C;
 pub const FAT16_CHS_PARTITION_TYPE: u8 = 0x06;
 pub const FAT16_LBA_PARTITION_TYPE: u8 = 0x0E;
+pub const EFI_SYSTEM_PARTITION_TYPE: u8 = 0xEF;
 pub const TWILIGHT_PARTITION_TYPE: u8 = 0x99;
 
 const LBA_CHS_PLACEHOLDER: [u8; 3] = [0xFE, 0xFF, 0xFF];

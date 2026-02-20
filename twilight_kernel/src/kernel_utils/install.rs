@@ -391,11 +391,11 @@ fn is_boot_partition(entry: &crate::fs::mbr::PartitionEntry) -> bool {
     entry.is_present()
         && matches!(
             entry.partition_type,
-            partition::FAT32_LBA_PARTITION_TYPE
+            partition::FAT32_CHS_PARTITION_TYPE
+                | partition::FAT32_LBA_PARTITION_TYPE
+                | partition::EFI_SYSTEM_PARTITION_TYPE
                 | partition::FAT16_CHS_PARTITION_TYPE
                 | partition::FAT16_LBA_PARTITION_TYPE
-                | 0x0B
-                | 239
         )
 }
 

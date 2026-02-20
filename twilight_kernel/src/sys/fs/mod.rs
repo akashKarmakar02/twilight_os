@@ -14,6 +14,7 @@ use crate::driver::disk::USB_BLOCK_DEVICE;
 use crate::println;
 use crate::sys::fs::devfs::DevFs;
 use crate::sys::fs::fat16::{Fat16Fs, detect_fat16_partition};
+use crate::sys::fs::fat32::{Fat32Fs, detect_fat32_partition};
 use crate::sys::fs::procfs::ProcFs;
 use crate::sys::fs::ram_fs::InitramfsFs;
 use crate::sys::fs::twilight_fs::{
@@ -296,13 +297,29 @@ fn try_mount_boot(bus: u8, dsk: u8, show_log: bool) -> bool {
         return true;
     }
 
-    let Some(entry) = detect_fat16_partition(bus, dsk) else {
-        return false;
-    };
-    let entry_lba = entry.lba_start;
+    if let Some(entry) = detect_fat32_partition(bus, dsk) {
+        let entry_lba = entry.lba_start;
+        if let Ok(fs) = Fat32Fs::from_partition(bus, dsk, entry) {
+            #[allow(static_mut_refs)]
+            unsafe {
+                VFS.get_mut().mount("/boot", Arc::new(Mutex::new(fs)));
+            }
+            if show_log {
+                println!(
+                    "\x1b[93m[{:.6}]\x1b[0m FAT32 partition mounted at /boot from ATA {}:{} (LBA {})",
+                    crate::driver::timer::pit::uptime(),
+                    bus,
+                    dsk,
+                    entry_lba
+                );
+            }
+            return true;
+        }
+    }
 
-    match Fat16Fs::from_partition(bus, dsk, entry) {
-        Ok(fs) => {
+    if let Some(entry) = detect_fat16_partition(bus, dsk) {
+        let entry_lba = entry.lba_start;
+        if let Ok(fs) = Fat16Fs::from_partition(bus, dsk, entry) {
             #[allow(static_mut_refs)]
             unsafe {
                 VFS.get_mut().mount("/boot", Arc::new(Mutex::new(fs)));
@@ -316,10 +333,11 @@ fn try_mount_boot(bus: u8, dsk: u8, show_log: bool) -> bool {
                     entry_lba
                 );
             }
-            true
+            return true;
         }
-        Err(_) => false,
     }
+
+    false
 }
 
 pub trait Vfs: Send {
