@@ -11,7 +11,7 @@ use crate::println;
 use crate::sys::console::init_console;
 use crate::sys::fs::vfs::{VFS, VfsNode};
 use crate::sys::memory::bitmap::with_frame_allocator;
-use crate::sys::memory::{alloc_pages, dealloc_pages, kernel_page_table, phys_mem_offset};
+use crate::sys::memory::{alloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
 use crate::sys::proc::switch::read_cr3;
 use crate::sys::proc::task::{
@@ -51,6 +51,7 @@ const INTERP_DYN_LOAD_BASE: u64 = 0x6000_0000;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
 static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
+const INITIAL_CONTEXT_STACK_GUARD: u64 = 4096 * 2;
 
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
@@ -183,6 +184,14 @@ impl ProcessTable {
     pub fn run(&mut self, mut process: Process) {
         let pid = process.pid;
 
+        crate::serial_println!(
+            "[proc::run] start new pid={} current={} entry={:#x} user_sp={:#x}",
+            pid,
+            crate::sys::proc::id(),
+            process.entry_point,
+            process.stack,
+        );
+
         let parent_table_frame = self.proc_list.back().map(|p| p.page_table_frame);
         let (_, cr3_flags) = Cr3::read();
 
@@ -191,11 +200,15 @@ impl ProcessTable {
             unsafe { Cr3::write(frame, cr3_flags) };
         }
 
-        let mut stack_ptr = process.context_switch_rsp.as_u64();
+        let mut stack_ptr = initial_context_stack_top(process.kernel_gs.kernel_rsp);
         let context_ptr = {
             let mut stack = StackHelper::new(&mut stack_ptr);
+            let cr3 = process.page_table_frame.start_address().as_u64() | cr3_flags.bits();
 
             // Build an initial interrupt frame + context so switch_tasks can iret into userspace.
+            let preempt_frame =
+                build_initial_preempt_frame(&mut stack, cr3, process.entry_point, process.stack, 0);
+
             let kframe = stack.offset::<InterruptErrorStack>();
             *kframe = InterruptErrorStack {
                 code: 0,
@@ -210,7 +223,9 @@ impl ProcessTable {
             let context = stack.offset::<Context>();
             *context = Context::default();
             context.rip = iretq_init as u64;
-            context.cr3 = process.page_table_frame.start_address().as_u64() | cr3_flags.bits();
+            context.cr3 = cr3;
+
+            process.preempt_frame = preempt_frame as u64;
 
             context as *mut Context
         };
@@ -257,9 +272,14 @@ impl ProcessTable {
             prev_task.state = ProcessState::Waiting;
             prev_task.preempt_frame = 0;
             next_task.state = ProcessState::Running;
-            next_task.preempt_frame = 0;
 
+            crate::serial_println!(
+                "[proc::run] switch parent pid={} -> child pid={}",
+                prev_task.pid,
+                next_task.pid,
+            );
             switch_tasks(prev_task, next_task);
+            crate::serial_println!("[proc::run] returned to pid={}", crate::sys::proc::id());
         }
     }
 }
@@ -626,12 +646,23 @@ impl Process {
         );
     }
 
-    pub fn fork(&mut self, tf: &InterruptStack) -> Result<u16, ()> {
+    pub fn fork(&mut self, tf: &InterruptStack) -> Result<Process, ()> {
         let live_fs_base = io::get_fsbase()();
         self.fs_base = live_fs_base;
 
         // 0. Allocate PID
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+        crate::serial_println!(
+            "[fork] parent={} child={} rip={:#x} rsp={:#x} regions={} heap={:#x}-{:#x} mmap={}",
+            self.pid,
+            pid,
+            tf.iret.rip,
+            tf.iret.rsp,
+            self.addr_size_vec.len(),
+            self.proc_mm.heap_start,
+            self.proc_mm.mapped_heap_end,
+            self.proc_mm.mmap_regions.len(),
+        );
 
         // 1. Allocate new page table
         let (_, flags) = Cr3::read();
@@ -672,6 +703,7 @@ impl Process {
         for (addr, size) in regions_to_copy.iter() {
             let addr = *addr;
             let size = *size;
+            crate::serial_println!("[fork] copy child={} addr={:#x} size={:#x}", pid, addr, size);
 
             // Allocate in child
             // Note: We use true, true (RWX) for simplicity, though strict permissions would be better.
@@ -729,15 +761,18 @@ impl Process {
         let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
 
         // Stack grows down. Point to top.
-        let mut stack_ptr = switch_stack as u64;
+        let kernel_rsp = switch_stack as u64;
+        let mut stack_ptr = initial_context_stack_top(kernel_rsp);
 
         let kgs = Box::new(KernelGsData {
-            kernel_rsp: stack_ptr,
+            kernel_rsp,
             user_rsp: 0,
         });
         let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
 
         let mut stack = StackHelper::new(&mut stack_ptr);
+        let child_cr3 = page_table_frame.start_address().as_u64() | flags.bits();
+
         // Allocate space for InterruptErrorStack
         let kframe = stack.offset::<InterruptErrorStack>();
 
@@ -753,56 +788,46 @@ impl Process {
         let context = stack.offset::<Context>();
         *context = Context::default();
         context.rip = iretq_init as u64;
-        context.cr3 = page_table_frame.start_address().as_u64() | flags.bits();
+        context.cr3 = child_cr3;
 
-        let child_pid = pid;
+        let child = Process {
+            context: context as *mut Context,
+            context_switch_rsp: VirtAddr::new(stack_ptr),
+            fpu_storage: self.fpu_storage, // Clone FPU state? Yes.
 
-        #[allow(static_mut_refs)]
-        unsafe {
-            PROCESS_TABLE
-                .get_mut()
-                .unwrap()
-                .proc_list
-                .push_back(Process {
-                    context: context as *mut Context,
-                    context_switch_rsp: VirtAddr::new(stack_ptr),
-                    fpu_storage: self.fpu_storage, // Clone FPU state? Yes.
+            stack: self.stack, // Copy user stack pointer (same VA)
+            stack_size: self.stack_size,
+            entry_point: self.entry_point,
+            pid,
+            mapper,
+            page_table_frame,
+            state: ProcessState::Running,
+            addr_size_vec: child_addr_size_vec,
+            pwd: self.pwd.clone(),
+            fd_table: new_fd_table,
+            kernel_gs: kgs,
+            gs_base: kgs_va,
+            fs_base: live_fs_base,
+            proc_mm: self.proc_mm.clone(), // Need to implement Clone for ProcMM or manually deep copy
+            parent_pid: self.pid,
+            stdio_flags: self.stdio_flags,
+            stdio_fd_flags: self.stdio_fd_flags,
+            stdio_target: self.stdio_target,
+            exit_code: 0,
+            preempt_frame: 0,
+        };
 
-                    stack: self.stack, // Copy user stack pointer (same VA)
-                    stack_size: self.stack_size,
-                    entry_point: self.entry_point,
-                    pid: child_pid,
-                    mapper,
-                    page_table_frame,
-                    state: ProcessState::Running,
-                    addr_size_vec: child_addr_size_vec,
-                    pwd: self.pwd.clone(),
-                    fd_table: new_fd_table,
-                    kernel_gs: kgs,
-                    gs_base: kgs_va,
-                    fs_base: live_fs_base,
-                    proc_mm: self.proc_mm.clone(), // Need to implement Clone for ProcMM or manually deep copy
-                    parent_pid: self.pid,
-                    stdio_flags: self.stdio_flags,
-                    stdio_fd_flags: self.stdio_fd_flags,
-                    stdio_target: self.stdio_target,
-                    exit_code: 0,
-                    preempt_frame: 0,
-                })
-        }
-
-        Ok(child_pid)
+        crate::serial_println!("[fork] child={} ready", pid);
+        Ok(child)
     }
 
     pub fn cleanup(&mut self, table_frame: PhysFrame) {
-        for (addr, size) in self.addr_size_vec.iter() {
-            let addr = *addr;
-            let size = *size;
-
-            if let Err(_) = dealloc_pages(&mut self.mapper, addr, size) {
-                println!("failed to dealloc pages in {:X} of size {}", addr, size);
-            }
-        }
+        // The process memory map is not normalized enough yet to safely walk
+        // addr_size_vec here. Some regions can overlap with heap/mmap tracking
+        // or page-table cleanup, which can corrupt allocator state while reaping
+        // a zombie. Keep the old behavior for this multitasking slice: reap the
+        // process table entry and release the root page-table frame only.
+        self.addr_size_vec.clear();
 
         with_frame_allocator(|allocator| unsafe {
             allocator.deallocate_frame(table_frame);
@@ -814,66 +839,57 @@ pub fn id() -> u16 {
     PID.load(Ordering::SeqCst)
 }
 
+fn initial_context_stack_top(kernel_rsp: u64) -> u64 {
+    kernel_rsp - INITIAL_CONTEXT_STACK_GUARD
+}
+
 pub fn exit(code: i32) {
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
 
     let current_pid = id();
-    let mut idx = None;
-    for (i, p) in table.proc_list.iter().enumerate() {
-        if p.pid == current_pid {
-            idx = Some(i);
-            break;
+    crate::serial_println!("[exit] pid={} code={}", current_pid, code);
+
+    let slice = table.proc_list.make_contiguous();
+    let Some(cur_idx) = find_process_index(slice, current_pid) else {
+        loop {
+            crate::task::executor::halt();
         }
-    }
-
-    // Don't remove, just get mutable reference
-    if let Some(i) = idx {
-        let process = &mut table.proc_list[i];
-        process.state = ProcessState::Dead;
-        process.exit_code = code;
-
-        let _parent_pid = process.parent_pid;
-        let _page_table_frame = process.page_table_frame;
-        let _addr_size_vec = core::mem::replace(&mut process.addr_size_vec, Vec::new());
-    }
-
-    #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-    let current_pid = id();
-
-    // ... logic remains similar to original but takes code ...
-
-    let mut idx = None;
-    for (i, p) in table.proc_list.iter().enumerate() {
-        if p.pid == current_pid {
-            idx = Some(i);
-            break;
-        }
-    }
-
-    let mut process = if let Some(i) = idx {
-        table.proc_list.remove(i).unwrap()
-    } else {
-        // panic or return
-        return;
     };
-    process.exit_code = code;
 
-    if let Some(p_process) = table.get_process(process.parent_pid) {
-        p_process.state = ProcessState::Running;
-        p_process.preempt_frame = 0;
+    let parent_pid = slice[cur_idx].parent_pid;
+    crate::serial_println!("[exit] pid={} parent={}", current_pid, parent_pid);
+    slice[cur_idx].state = ProcessState::Dead;
+    slice[cur_idx].exit_code = code;
+    slice[cur_idx].preempt_frame = 0;
 
-        let (pre_table_frame, flags) = Cr3::read();
-        unsafe {
-            Cr3::write(p_process.page_table_frame, flags);
+    if let Some(parent_idx) = find_process_index(slice, parent_pid)
+        && matches!(slice[parent_idx].state, ProcessState::Waiting)
+    {
+        crate::serial_println!("[exit] wake parent pid={}", parent_pid);
+        slice[parent_idx].state = ProcessState::Running;
+    }
+
+    let next_idx = find_process_index(slice, parent_pid)
+        .filter(|&idx| matches!(slice[idx].state, ProcessState::Running))
+        .or_else(|| find_next_runnable_index(slice, cur_idx));
+
+    let Some(next_idx) = next_idx else {
+        crate::serial_println!("[exit] pid={} no runnable target", current_pid);
+        loop {
+            crate::task::executor::halt();
         }
-        process.cleanup(pre_table_frame);
+    };
 
-        PID.store(p_process.pid, Ordering::SeqCst);
-        switch_tasks(&mut process, p_process);
-    } else {
-        loop {}
+    crate::serial_println!(
+        "[exit] switch dead pid={} -> pid={}",
+        current_pid,
+        slice[next_idx].pid,
+    );
+    switch_by_index(slice, cur_idx, next_idx);
+
+    loop {
+        crate::task::executor::halt();
     }
 }
 
@@ -882,9 +898,9 @@ pub fn on_timer_tick() {
 }
 
 pub fn maybe_schedule() {
-    // NOTE: Proper preemptive scheduling requires saving/restoring full user context.
-    // Keep this as a stub for now so timer ticks don't cause unsafe switches.
-    let _ = NEED_RESCHED.swap(false, Ordering::Relaxed);
+    if NEED_RESCHED.swap(false, Ordering::Relaxed) {
+        schedule_now();
+    }
 }
 
 pub fn schedule_now() {
@@ -902,29 +918,11 @@ pub fn schedule_now() {
         return;
     };
 
-    // Find next runnable process in round-robin order.
-    let mut next_idx = None;
-    for step in 1..=slice.len() {
-        let idx = (cur_idx + step) % slice.len();
-        if matches!(slice[idx].state, ProcessState::Running) {
-            next_idx = Some(idx);
-            break;
-        }
-    }
-    let Some(next_idx) = next_idx else {
+    let Some(next_idx) = find_next_runnable_index(slice, cur_idx) else {
         return;
     };
-    if next_idx == cur_idx {
-        return;
-    }
 
-    let cur_ptr: *mut Process = &mut slice[cur_idx];
-    let next_ptr: *mut Process = &mut slice[next_idx];
-
-    unsafe {
-        PID.store((*next_ptr).pid, Ordering::SeqCst);
-        switch_tasks(&mut *cur_ptr, &mut *next_ptr);
-    }
+    switch_by_index(slice, cur_idx, next_idx);
 }
 
 #[repr(C)]
@@ -952,6 +950,148 @@ pub struct PreemptFrame {
     pub ss: u64,
 }
 
+fn build_initial_preempt_frame(
+    stack: &mut StackHelper<'_>,
+    cr3: u64,
+    rip: u64,
+    rsp: u64,
+    rax: u64,
+) -> *mut PreemptFrame {
+    let frame = stack.offset::<PreemptFrame>();
+    *frame = PreemptFrame {
+        cr3,
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        r11: 0,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rbp: 0,
+        rdi: 0,
+        rsi: 0,
+        rdx: 0,
+        rcx: 0,
+        rbx: 0,
+        rax,
+        rip,
+        cs: USER_CS.bits() as u64,
+        rflags: 0x202,
+        rsp,
+        ss: USER_SS.bits() as u64,
+    };
+    frame
+}
+
+fn find_process_index(processes: &[Process], pid: u16) -> Option<usize> {
+    processes.iter().position(|process| process.pid == pid)
+}
+
+fn find_next_runnable_index(processes: &[Process], current_idx: usize) -> Option<usize> {
+    if processes.len() < 2 {
+        return None;
+    }
+
+    for step in 1..=processes.len() {
+        let idx = (current_idx + step) % processes.len();
+        if idx == current_idx {
+            continue;
+        }
+        if matches!(processes[idx].state, ProcessState::Running) {
+            return Some(idx);
+        }
+    }
+
+    None
+}
+
+fn find_next_preemptable_index(processes: &[Process], current_idx: usize) -> Option<usize> {
+    if processes.len() < 2 {
+        return None;
+    }
+
+    for step in 1..=processes.len() {
+        let idx = (current_idx + step) % processes.len();
+        if idx == current_idx {
+            continue;
+        }
+        if matches!(processes[idx].state, ProcessState::Running)
+            && processes[idx].preempt_frame != 0
+        {
+            return Some(idx);
+        }
+    }
+
+    None
+}
+
+fn switch_by_index(processes: &mut [Process], cur_idx: usize, next_idx: usize) {
+    if cur_idx == next_idx {
+        return;
+    }
+
+    let ptr = processes.as_mut_ptr();
+    unsafe {
+        let cur = &mut *ptr.add(cur_idx);
+        let next = &mut *ptr.add(next_idx);
+
+        PID.store(next.pid, Ordering::SeqCst);
+        switch_tasks(cur, next);
+    }
+}
+
+fn restore_preempted_process(process: &mut Process) {
+    io::set_fsbase()(process.fs_base);
+    io::set_inactive_gsbase()(process.gs_base);
+
+    if let Some(fpu) = process.fpu_storage.as_mut() {
+        xrstor(fpu);
+    }
+
+    let kstack_top = process.kernel_gs.kernel_rsp;
+    #[allow(static_mut_refs)]
+    unsafe {
+        crate::arch::x86_64::gdt::TSS.rsp[0] = kstack_top;
+    }
+    io::wrmsr(io::IA32_SYSENTER_ESP, kstack_top);
+}
+
+fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
+    if from_user == 0 {
+        return frame;
+    }
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let cur_pid = id();
+
+    let slice = table.proc_list.make_contiguous();
+    let Some(cur_idx) = find_process_index(slice, cur_pid) else {
+        return frame;
+    };
+
+    {
+        let cur = &mut slice[cur_idx];
+        cur.preempt_frame = frame as u64;
+        cur.fs_base = io::get_fsbase()();
+        cur.gs_base = io::get_inactive_gsbase()(); // inactive = user GS because the ISR has swapgs'd.
+        if let Some(fpu) = cur.fpu_storage.as_mut() {
+            xsave(fpu);
+        }
+    }
+
+    let Some(next_idx) = find_next_preemptable_index(slice, cur_idx) else {
+        return frame;
+    };
+
+    let next = &mut slice[next_idx];
+    PID.store(next.pid, Ordering::SeqCst);
+    restore_preempted_process(next);
+
+    next.preempt_frame as *mut PreemptFrame
+}
+
 pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
     crate::driver::timer::pit::pit_tick_isr();
 
@@ -962,80 +1102,7 @@ pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mu
             .notify_end_of_interrupt(crate::arch::x86_64::idt::PIC_1_OFFSET);
     }
 
-    if from_user == 0 {
-        return frame;
-    }
-
-    #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-    let cur_pid = id();
-
-    let slice = table.proc_list.make_contiguous();
-    if slice.len() < 2 {
-        // Still remember the latest frame.
-        if let Some(p) = slice.iter_mut().find(|p| p.pid == cur_pid) {
-            p.preempt_frame = frame as u64;
-        }
-        return frame;
-    }
-
-    let Some(cur_idx) = slice.iter().position(|p| p.pid == cur_pid) else {
-        return frame;
-    };
-
-    // Save the current user's FS/GS bases and the latest preempt frame.
-    {
-        let cur = &mut slice[cur_idx];
-        cur.preempt_frame = frame as u64;
-        cur.fs_base = io::get_fsbase()();
-        cur.gs_base = io::get_inactive_gsbase()(); // inactive = user GS because we swapgs in ISR
-        if let Some(fpu) = cur.fpu_storage.as_mut() {
-            xsave(fpu);
-        }
-    }
-
-    // Find next runnable task (round robin), requiring that it has a saved frame.
-    let mut next_idx = None;
-    for step in 1..=slice.len() {
-        let idx = (cur_idx + step) % slice.len();
-        if !matches!(slice[idx].state, ProcessState::Running) {
-            continue;
-        }
-        if slice[idx].preempt_frame == 0 {
-            continue;
-        }
-        next_idx = Some(idx);
-        break;
-    }
-    let Some(next_idx) = next_idx else {
-        return frame;
-    };
-    if next_idx == cur_idx {
-        return frame;
-    }
-
-    let next_pid = slice[next_idx].pid;
-    PID.store(next_pid, Ordering::SeqCst);
-
-    // Restore FS/GS + FPU for next task; update kernel stack top for next ring3->ring0 entry.
-    {
-        let next = &mut slice[next_idx];
-        io::set_fsbase()(next.fs_base);
-        io::set_inactive_gsbase()(next.gs_base);
-
-        if let Some(fpu) = next.fpu_storage.as_mut() {
-            xrstor(fpu);
-        }
-
-        let kstack_top = next.kernel_gs.kernel_rsp;
-        #[allow(static_mut_refs)]
-        unsafe {
-            crate::arch::x86_64::gdt::TSS.rsp[0] = kstack_top;
-        }
-        io::wrmsr(io::IA32_SYSENTER_ESP, kstack_top);
-    }
-
-    slice[next_idx].preempt_frame as *mut PreemptFrame
+    timer_preempt_common(frame, from_user)
 }
 
 pub extern "C" fn apic_timer_preempt(
@@ -1047,94 +1114,7 @@ pub extern "C" fn apic_timer_preempt(
     // EOI for Local APIC
     crate::driver::apic::lapic::end_of_interrupt();
 
-    if from_user == 0 {
-        return frame;
-    }
-
-    #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-    let cur_pid = id();
-
-    let slice = table.proc_list.make_contiguous();
-    let len = slice.len();
-
-    // Find index of current process
-    // We can't rely on valid pointers if we don't find it, so be careful.
-    let mut cur_idx_opt = None;
-    for (i, p) in slice.iter().enumerate() {
-        if p.pid == cur_pid {
-            cur_idx_opt = Some(i);
-            break;
-        }
-    }
-
-    // Still remember the latest frame.
-    if let Some(cur_idx) = cur_idx_opt {
-        slice[cur_idx].preempt_frame = frame as u64;
-    } else {
-        return frame;
-    }
-
-    // Create copy of slice length to avoid borrow issues if we need it
-    if len < 2 {
-        return frame;
-    }
-
-    let cur_idx = cur_idx_opt.unwrap();
-
-    // Save the current user's FS/GS bases and the latest preempt frame.
-    {
-        let cur = &mut slice[cur_idx];
-        cur.preempt_frame = frame as u64;
-        cur.fs_base = io::get_fsbase()();
-        cur.gs_base = io::get_inactive_gsbase()(); // inactive = user GS because we swapgs in ISR
-        if let Some(fpu) = cur.fpu_storage.as_mut() {
-            xsave(fpu);
-        }
-    }
-
-    // Find next runnable task (round robin)
-    let mut next_idx = None;
-    for step in 1..=len {
-        let idx = (cur_idx + step) % len;
-        if !matches!(slice[idx].state, ProcessState::Running) {
-            continue;
-        }
-        if slice[idx].preempt_frame == 0 {
-            continue;
-        }
-        next_idx = Some(idx);
-        break;
-    }
-    let Some(next_idx) = next_idx else {
-        return frame;
-    };
-    if next_idx == cur_idx {
-        return frame;
-    }
-
-    let next_pid = slice[next_idx].pid;
-    PID.store(next_pid, Ordering::SeqCst);
-
-    // Restore FS/GS + FPU for next task; update kernel stack top for next ring3->ring0 entry.
-    {
-        let next = &mut slice[next_idx];
-        io::set_fsbase()(next.fs_base);
-        io::set_inactive_gsbase()(next.gs_base);
-
-        if let Some(fpu) = next.fpu_storage.as_mut() {
-            xrstor(fpu);
-        }
-
-        let kstack_top = next.kernel_gs.kernel_rsp;
-        #[allow(static_mut_refs)]
-        unsafe {
-            crate::arch::x86_64::gdt::TSS.rsp[0] = kstack_top;
-        }
-        io::wrmsr(io::IA32_SYSENTER_ESP, kstack_top);
-    }
-
-    slice[next_idx].preempt_frame as *mut PreemptFrame
+    timer_preempt_common(frame, from_user)
 }
 
 #[unsafe(naked)]
@@ -1173,14 +1153,15 @@ pub fn init() {
 
     let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
 
-    let mut stack_ptr = switch_stack as u64;
+    let kernel_rsp = switch_stack as u64;
+    let mut stack_ptr = initial_context_stack_top(kernel_rsp);
 
     let mut kgs = Box::new(KernelGsData {
         kernel_rsp: 0,
         user_rsp: 0,
     });
 
-    kgs.kernel_rsp = stack_ptr;
+    kgs.kernel_rsp = kernel_rsp;
 
     let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
 

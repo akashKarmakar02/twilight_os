@@ -25,6 +25,8 @@ fn main() -> io::Result<()> {
 
     fs::create_dir_all(out_bin_dir)?;
 
+    build_libraries()?;
+
     if !apps_dir.exists() {
         eprintln!("apps directory not found: {}", apps_dir.display());
         std::process::exit(1);
@@ -276,6 +278,47 @@ fn build_make(path: &Path) -> io::Result<()> {
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "make failed"));
     }
+    Ok(())
+}
+
+fn build_libraries() -> io::Result<()> {
+    let libs_dir = Path::new("libs");
+    if !libs_dir.exists() {
+        return Ok(());
+    }
+
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(libs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() && (path.join("Makefile").exists() || path.join("makefile").exists()) {
+            entries.push(path);
+        }
+    }
+    entries.sort();
+
+    let cc = selected_cc();
+    let make_cc = cc_for_make(&cc);
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        println!("\n=== Building library: {} ===", name);
+
+        let mut cmd = Command::new("make");
+        cmd.arg("-C")
+            .arg(&path)
+            .arg("install")
+            .arg("ROOTFS=../../../rootfs")
+            .env("CC", &make_cc);
+        apply_ccache_env(&mut cmd);
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(io::Error::new(io::ErrorKind::Other, "library make failed"));
+        }
+    }
+
     Ok(())
 }
 

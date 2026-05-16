@@ -721,11 +721,7 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
                                 let advance_seek = if is_pipe {
                                     None
                                 } else {
-                                    Some(
-                                        effective_seek
-                                            .saturating_sub(seek)
-                                            .saturating_add(n),
-                                    )
+                                    Some(effective_seek.saturating_sub(seek).saturating_add(n))
                                 };
                                 (n as i64, advance_seek)
                             }
@@ -939,11 +935,14 @@ pub fn execev(
     stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
 ) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
+        crate::serial_println!("[execve] pid={} bad path ptr={:#x}", crate::sys::proc::id(), arg1);
         return -1;
     };
+    crate::serial_println!("[execve] pid={} path={}", crate::sys::proc::id(), path);
 
     #[allow(static_mut_refs)]
     let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str().trim()) }) else {
+        crate::serial_println!("[execve] pid={} open failed path={}", crate::sys::proc::id(), path);
         return -2;
     };
 
@@ -951,6 +950,7 @@ pub fn execev(
     let mut elf_buf = vec![0u8; elf_size];
 
     let Ok(_) = elf_node.read(0, &mut elf_buf) else {
+        crate::serial_println!("[execve] pid={} read failed path={}", crate::sys::proc::id(), path);
         return -2;
     };
 
@@ -970,6 +970,13 @@ pub fn execev(
     if let Some(p) = process_table.get_process(crate::sys::proc::id()) {
         match p.exec(&elf_buf, &argv_strs, &[]) {
             Ok((entry, sp)) => {
+                crate::serial_println!(
+                    "[execve] pid={} loaded path={} entry={:#x} sp={:#x}",
+                    crate::sys::proc::id(),
+                    path,
+                    entry,
+                    sp,
+                );
                 // Determine Code Segment/Stack Segment for user (Ring 3).
                 // They should be USER_CS/USER_SS.
                 // The interrupt frame likely already has them, but we ensure RIP/RSP are set.
@@ -1001,10 +1008,12 @@ pub fn execev(
             Err(_) => {
                 // If exec fails, we return error and the OLD process continues.
                 // Note: p.exec should atomic-fail (not modifying self if elf is bad).
+                crate::serial_println!("[execve] pid={} exec failed path={}", crate::sys::proc::id(), path);
                 -1
             }
         }
     } else {
+        crate::serial_println!("[execve] no process pid={}", crate::sys::proc::id());
         -(ESRCH as i64)
     }
 }
@@ -1026,6 +1035,12 @@ pub fn fork(
 
     // We need to find the current process to call fork on it.
     let current_pid = crate::sys::proc::id();
+    crate::serial_println!(
+        "[sys_fork] current={} user_rip={:#x} user_rsp={:#x}",
+        current_pid,
+        stack_frame.instruction_pointer.as_u64(),
+        stack_frame.stack_pointer.as_u64(),
+    );
     let process_opt = table.proc_list.iter_mut().find(|p| p.pid == current_pid);
 
     if let Some(process) = process_opt {
@@ -1059,17 +1074,27 @@ pub fn fork(
             },
         };
 
-        if let Ok(child_pid) = process.fork(&tf) {
+        if let Ok(child) = process.fork(&tf) {
+            let child_pid = child.pid;
+            table.proc_list.push_back(child);
+            crate::serial_println!("[sys_fork] parent={} child={} return", current_pid, child_pid);
             return child_pid as i64;
         }
     }
 
+    crate::serial_println!("[sys_fork] current={} failed", current_pid);
     -(ENOSYS as i64)
 }
 
 pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i64 {
     let current_pid = crate::sys::proc::id();
     let wnohang = 1;
+    crate::serial_println!(
+        "[wait4] pid={} target={} options={:#x}",
+        current_pid,
+        pid,
+        options,
+    );
 
     loop {
         let mut reaped_pid = None;
@@ -1098,14 +1123,20 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
             }
 
             if let Some(idx) = remove_idx {
-                if let Some(p) = table.proc_list.remove(idx) {
+                if let Some(mut p) = table.proc_list.remove(idx) {
                     reaped_pid = Some(p.pid);
-                    // Process resources should have been cleaned up in exit() mostly,
-                    // or we clean up here?
-                    // In exit(), we freed page table frame, so it's mostly gone.
-                    // The struct itself is dropped here.
+                    let table_frame = p.page_table_frame;
+                    crate::serial_println!(
+                        "[wait4] pid={} reap child={} code={}",
+                        current_pid,
+                        p.pid,
+                        p.exit_code,
+                    );
+                    p.cleanup(table_frame);
+                    core::mem::forget(p);
                 }
             } else if !has_children {
+                crate::serial_println!("[wait4] pid={} no children", current_pid);
                 return -(crate::sys::syscall::SyscallError::ECHILD as i64);
             }
         }
@@ -1128,15 +1159,18 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
             #[allow(static_mut_refs)]
             let table = unsafe { crate::sys::proc::PROCESS_TABLE.get_mut().unwrap() };
             if let Some(me) = table.proc_list.iter_mut().find(|p| p.pid == current_pid) {
+                crate::serial_println!("[wait4] pid={} block", current_pid);
                 me.state = crate::sys::proc::ProcessState::Waiting;
             }
         }
 
         crate::sys::proc::schedule_now(); // Yield
+        crate::serial_println!("[wait4] pid={} resumed", current_pid);
     }
 }
 
 pub fn sched_yield() -> i64 {
+    crate::sys::proc::schedule_now();
     0
 }
 
@@ -1915,7 +1949,10 @@ pub fn rename(old_path_ptr: usize, new_path_ptr: usize) -> i64 {
         return -(ENOENT as i64);
     }
 
-    if fs.rename(old_full_path.as_str(), new_full_path.as_str()).is_ok() {
+    if fs
+        .rename(old_full_path.as_str(), new_full_path.as_str())
+        .is_ok()
+    {
         0
     } else {
         -(EIO as i64)
@@ -2426,6 +2463,16 @@ fn poll_fd_set(fds: &mut [PollFd], process: &mut Process) -> Result<usize, i64> 
     Ok(ready_count)
 }
 
+fn poll_fd_set_for_pid(fds: &mut [PollFd], pid: u16) -> Result<usize, i64> {
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(pid) };
+    let Some(process) = proc_opt else {
+        return Err(-(ESRCH as i64));
+    };
+
+    poll_fd_set(fds, process)
+}
+
 pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
     if nfds == 0 {
         return 0;
@@ -2435,19 +2482,9 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
     }
 
     let fds = unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds) };
+    let current_pid = sys::proc::id();
 
-    #[allow(static_mut_refs)]
-    let proc_opt = unsafe {
-        PROCESS_TABLE
-            .get_mut()
-            .unwrap()
-            .get_process(sys::proc::id())
-    };
-    let Some(process) = proc_opt else {
-        return -(ESRCH as i64);
-    };
-
-    let mut ready = match poll_fd_set(fds, process) {
+    let mut ready = match poll_fd_set_for_pid(fds, current_pid) {
         Ok(n) => n,
         Err(e) => return e,
     };
@@ -2474,9 +2511,10 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
             }
         }
 
+        sys::proc::schedule_now();
         halt();
 
-        ready = match poll_fd_set(fds, process) {
+        ready = match poll_fd_set_for_pid(fds, current_pid) {
             Ok(n) => n,
             Err(e) => return e,
         };
@@ -2502,19 +2540,9 @@ pub fn ppoll(
     }
 
     let fds = unsafe { core::slice::from_raw_parts_mut(fds_ptr as *mut PollFd, nfds) };
+    let current_pid = sys::proc::id();
 
-    #[allow(static_mut_refs)]
-    let proc_opt = unsafe {
-        PROCESS_TABLE
-            .get_mut()
-            .unwrap()
-            .get_process(sys::proc::id())
-    };
-    let Some(process) = proc_opt else {
-        return -(ESRCH as i64);
-    };
-
-    let mut ready = match poll_fd_set(fds, process) {
+    let mut ready = match poll_fd_set_for_pid(fds, current_pid) {
         Ok(n) => n,
         Err(e) => return e,
     };
@@ -2543,12 +2571,13 @@ pub fn ppoll(
             }
         }
 
-        halt();
-
         // Check for signals here if we implemented them?
         // But for now just poll fds.
 
-        ready = match poll_fd_set(fds, process) {
+        sys::proc::schedule_now();
+        halt();
+
+        ready = match poll_fd_set_for_pid(fds, current_pid) {
             Ok(n) => n,
             Err(e) => return e,
         };
