@@ -1,4 +1,4 @@
-use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, rdmsr, wrmsr};
+use crate::arch::x86_64::io::{IA32_FS_BASE, rdmsr, wrmsr};
 use crate::driver::disk::ata::IO;
 use crate::driver::disk::dummy_blockdev;
 use crate::driver::timer::pit::uptime;
@@ -1068,7 +1068,7 @@ pub fn fork(
             iret: IretRegisters {
                 rip: stack_frame.instruction_pointer.as_u64(),
                 cs: stack_frame.code_segment.0 as u64,
-                rflags: stack_frame.cpu_flags.bits(),
+                rflags: stack_frame.cpu_flags.bits() | 0x202,
                 rsp: stack_frame.stack_pointer.as_u64(),
                 ss: stack_frame.stack_segment.0 as u64,
             },
@@ -1273,14 +1273,27 @@ pub fn arch_prctl(code: u64, addr: u64) -> i64 {
             }
         }
         ARCH_SET_GS => {
-            wrmsr(IA32_GS_BASE, addr);
+            let base = x86_64::VirtAddr::new(addr);
+            crate::arch::x86_64::io::set_inactive_gsbase()(base);
+
+            #[allow(static_mut_refs)]
+            if let Some(table) = unsafe { PROCESS_TABLE.get_mut() } {
+                let current_pid = sys::proc::id();
+                if let Some(process) = table.get_process(current_pid) {
+                    process.gs_base = base;
+                }
+            }
+
             0
         }
         ARCH_GET_GS => {
             if addr == 0 {
                 -(EFAULT as i64)
             } else {
-                unsafe { *(addr as *mut u64) = rdmsr(IA32_GS_BASE) };
+                unsafe {
+                    *(addr as *mut u64) =
+                        crate::arch::x86_64::io::get_inactive_gsbase()().as_u64()
+                };
                 0
             }
         }
@@ -2503,6 +2516,7 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
     } else {
         Some(start + (timeout_ms as f64) / 1000.0)
     };
+    let wait_queue = sys::proc::poll_wait_queue();
 
     loop {
         if let Some(limit) = deadline {
@@ -2511,8 +2525,30 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
             }
         }
 
-        sys::proc::schedule_now();
-        halt();
+        let wait_pid = wait_queue.prepare_current();
+
+        ready = match poll_fd_set_for_pid(fds, current_pid) {
+            Ok(n) => n,
+            Err(e) => {
+                wait_queue.finish_wait(wait_pid);
+                return e;
+            }
+        };
+
+        if ready > 0 {
+            wait_queue.finish_wait(wait_pid);
+            return ready as i64;
+        }
+
+        if let Some(limit) = deadline {
+            if uptime() >= limit {
+                wait_queue.finish_wait(wait_pid);
+                return 0;
+            }
+        }
+
+        sys::proc::await_io();
+        wait_queue.finish_wait(wait_pid);
 
         ready = match poll_fd_set_for_pid(fds, current_pid) {
             Ok(n) => n,
@@ -2563,6 +2599,7 @@ pub fn ppoll(
     } else {
         None
     };
+    let wait_queue = sys::proc::poll_wait_queue();
 
     loop {
         if let Some(limit) = deadline {
@@ -2574,8 +2611,30 @@ pub fn ppoll(
         // Check for signals here if we implemented them?
         // But for now just poll fds.
 
-        sys::proc::schedule_now();
-        halt();
+        let wait_pid = wait_queue.prepare_current();
+
+        ready = match poll_fd_set_for_pid(fds, current_pid) {
+            Ok(n) => n,
+            Err(e) => {
+                wait_queue.finish_wait(wait_pid);
+                return e;
+            }
+        };
+
+        if ready > 0 {
+            wait_queue.finish_wait(wait_pid);
+            return ready as i64;
+        }
+
+        if let Some(limit) = deadline {
+            if uptime() >= limit {
+                wait_queue.finish_wait(wait_pid);
+                return 0;
+            }
+        }
+
+        sys::proc::await_io();
+        wait_queue.finish_wait(wait_pid);
 
         ready = match poll_fd_set_for_pid(fds, current_pid) {
             Ok(n) => n,

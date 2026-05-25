@@ -2,6 +2,7 @@ use crate::arch::x86_64::io;
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::phys_to_virt;
 use crate::sys::proc::Process;
+use x86_64::instructions::interrupts;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{FrameAllocator, Size4KiB};
 use x86_64::VirtAddr;
@@ -158,7 +159,7 @@ pub fn allocate_switch_stack() -> Result<VirtAddr, MapToError<Size4KiB>> {
 
 
 pub fn switch_tasks(prev_task: &mut Process, next_task: &mut Process) {
-    unsafe {
+    interrupts::without_interrupts(|| unsafe {
         crate::serial_println!(
             "[switch] enter prev pid={} state={:?} ctx={:p} k_rsp={:#x} preempt={:#x} next pid={} state={:?} ctx={:p} k_rsp={:#x} preempt={:#x}",
             prev_task.pid,
@@ -211,12 +212,17 @@ pub fn switch_tasks(prev_task: &mut Process, next_task: &mut Process) {
         );
 
         crate::serial_println!(
-            "[switch] load next fs={:#x} gs={:#x} pid={}",
+            "[switch] load next fs={:#x} user_gs={:#x} kernel_gs={:#x} pid={}",
             next_task.fs_base.as_u64(),
             next_task.gs_base.as_u64(),
+            (&*next_task.kernel_gs as *const _ as u64),
             next_task.pid,
         );
         io::set_fsbase()(next_task.fs_base);
+        io::wrmsr(
+            io::IA32_GS_BASE,
+            &*next_task.kernel_gs as *const _ as u64,
+        );
         io::set_inactive_gsbase()(next_task.gs_base);
         crate::serial_println!("[switch] load next fs/gs done pid={}", next_task.pid);
 
@@ -227,7 +233,7 @@ pub fn switch_tasks(prev_task: &mut Process, next_task: &mut Process) {
         );
         task_spinup(&mut prev_task.context, next_task.context);
         crate::serial_println!("[switch] returned to pid={}", prev_task.pid);
-    }
+    });
 }
 
 unsafe fn log_context(label: &str, context: *mut Context) {

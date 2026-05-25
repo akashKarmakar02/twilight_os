@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use x86_64::instructions::interrupts;
 
 pub struct Mutex<T: ?Sized> {
@@ -90,5 +91,80 @@ impl Drop for IrqGuard {
         if self.locked {
             interrupts::enable();
         }
+    }
+}
+
+pub struct WaitQueue {
+    waiters: Mutex<Vec<u16>>,
+}
+
+impl WaitQueue {
+    pub const fn new() -> Self {
+        Self {
+            waiters: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn prepare_current(&self) -> u16 {
+        let pid = crate::sys::proc::id();
+        let mut waiters = self.waiters.lock_irq();
+
+        if !waiters.contains(&pid) {
+            waiters.push(pid);
+        }
+
+        pid
+    }
+
+    pub fn finish_wait(&self, pid: u16) {
+        let mut waiters = self.waiters.lock_irq();
+
+        if let Some(idx) = waiters.iter().position(|&waiter| waiter == pid) {
+            waiters.remove(idx);
+        }
+    }
+
+    pub fn notify_one(&self) {
+        let waiter = {
+            let mut waiters = self.waiters.lock_irq();
+            if waiters.is_empty() {
+                None
+            } else {
+                Some(waiters.remove(0))
+            }
+        };
+
+        if let Some(pid) = waiter {
+            crate::sys::proc::wake_process(pid);
+        }
+    }
+
+    pub fn notify_all(&self) {
+        loop {
+            let waiter = {
+                let mut waiters = self.waiters.lock_irq();
+                if waiters.is_empty() {
+                    None
+                } else {
+                    Some(waiters.remove(0))
+                }
+            };
+
+            let Some(pid) = waiter else {
+                break;
+            };
+
+            crate::sys::proc::wake_process(pid);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.waiters.lock_irq().is_empty()
+    }
+}
+
+impl Default for WaitQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }

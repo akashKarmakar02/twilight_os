@@ -18,7 +18,7 @@ use crate::sys::proc::task::{
     Context, FpuState, allocate_switch_stack, switch_tasks, xrstor, xsave,
 };
 use crate::sys::proc::user::USER_ENV;
-use crate::utils::StackHelper;
+use crate::utils::{StackHelper, sync::WaitQueue};
 use alloc::alloc::alloc_zeroed;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -42,6 +42,7 @@ use x86_64::structures::paging::{
 };
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
+static POLL_WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
@@ -154,6 +155,7 @@ pub enum ProcessState {
     Running,
     Sleeping,
     Waiting,
+    AwaitingIo,
     Dead,
 }
 
@@ -328,6 +330,7 @@ pub struct Process {
     pub proc_mm: Box<ProcMM>,
     pub exit_code: i32,
     pub preempt_frame: u64, // saved RSP to PreemptFrame on this task's kernel stack
+    pub pending_io: bool,
 }
 
 impl Process {
@@ -457,8 +460,6 @@ impl Process {
 
         kgs.kernel_rsp = stack_ptr;
 
-        let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
-
         let p = Process {
             context: core::ptr::null_mut(), // Point to the constructed context
             context_switch_rsp: VirtAddr::new(stack_ptr), // This field might be redundant if we use context, but keep it consistent
@@ -475,7 +476,7 @@ impl Process {
             pwd: pwd.to_string(),
             kernel_gs: kgs,
             fs_base: VirtAddr::zero(),
-            gs_base: kgs_va,
+            gs_base: VirtAddr::zero(),
             fd_table: Vec::new(),
             proc_mm,
             parent_pid,
@@ -484,6 +485,7 @@ impl Process {
             stdio_target: [-1; 3],
             exit_code: 0,
             preempt_frame: 0,
+            pending_io: false,
         };
         Ok(p)
     }
@@ -768,8 +770,6 @@ impl Process {
             kernel_rsp,
             user_rsp: 0,
         });
-        let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
-
         let mut stack = StackHelper::new(&mut stack_ptr);
         let child_cr3 = page_table_frame.start_address().as_u64() | flags.bits();
 
@@ -806,7 +806,7 @@ impl Process {
             pwd: self.pwd.clone(),
             fd_table: new_fd_table,
             kernel_gs: kgs,
-            gs_base: kgs_va,
+            gs_base: self.gs_base,
             fs_base: live_fs_base,
             proc_mm: self.proc_mm.clone(), // Need to implement Clone for ProcMM or manually deep copy
             parent_pid: self.pid,
@@ -815,6 +815,7 @@ impl Process {
             stdio_target: self.stdio_target,
             exit_code: 0,
             preempt_frame: 0,
+            pending_io: false,
         };
 
         crate::serial_println!("[fork] child={} ready", pid);
@@ -837,6 +838,10 @@ impl Process {
 
 pub fn id() -> u16 {
     PID.load(Ordering::SeqCst)
+}
+
+pub fn poll_wait_queue() -> &'static WaitQueue {
+    &POLL_WAIT_QUEUE
 }
 
 fn initial_context_stack_top(kernel_rsp: u64) -> u64 {
@@ -894,7 +899,8 @@ pub fn exit(code: i32) {
 }
 
 pub fn on_timer_tick() {
-    NEED_RESCHED.store(true, Ordering::Relaxed);
+    // NEED_RESCHED.store(true, Ordering::Relaxed);
+    POLL_WAIT_QUEUE.notify_all();
 }
 
 pub fn maybe_schedule() {
@@ -923,6 +929,62 @@ pub fn schedule_now() {
     };
 
     switch_by_index(slice, cur_idx, next_idx);
+}
+
+pub fn await_io() {
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let cur_pid = id();
+
+    let slice = table.proc_list.make_contiguous();
+    let Some(cur_idx) = find_process_index(slice, cur_pid) else {
+        return;
+    };
+
+    if slice[cur_idx].pending_io {
+        slice[cur_idx].pending_io = false;
+        return;
+    }
+
+    slice[cur_idx].state = ProcessState::AwaitingIo;
+    slice[cur_idx].preempt_frame = 0;
+
+    let Some(next_idx) = find_next_runnable_index(slice, cur_idx) else {
+        slice[cur_idx].state = ProcessState::Running;
+        crate::task::executor::halt();
+        return;
+    };
+
+    switch_by_index(slice, cur_idx, next_idx);
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    if let Some(process) = table.get_process(cur_pid) {
+        if matches!(process.state, ProcessState::AwaitingIo) {
+            process.state = ProcessState::Running;
+        }
+        process.pending_io = false;
+    }
+}
+
+pub fn wake_process(pid: u16) {
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+
+    let Some(process) = table.get_process(pid) else {
+        return;
+    };
+
+    match process.state {
+        ProcessState::AwaitingIo => {
+            process.state = ProcessState::Running;
+            process.pending_io = false;
+        }
+        ProcessState::Dead => {}
+        _ => {
+            process.pending_io = true;
+        }
+    }
 }
 
 #[repr(C)]
@@ -1043,6 +1105,10 @@ fn switch_by_index(processes: &mut [Process], cur_idx: usize, next_idx: usize) {
 
 fn restore_preempted_process(process: &mut Process) {
     io::set_fsbase()(process.fs_base);
+    io::wrmsr(
+        io::IA32_GS_BASE,
+        &*process.kernel_gs as *const _ as u64,
+    );
     io::set_inactive_gsbase()(process.gs_base);
 
     if let Some(fpu) = process.fpu_storage.as_mut() {
@@ -1125,6 +1191,16 @@ pub unsafe extern "C" fn iretq_init() {
         "add rsp, 8",
         crate::arch::x86_64::asm_utils::pop_preserved!(),
         crate::arch::x86_64::asm_utils::pop_scratch!(),
+        // If the target frame returns to ring 3, make GS active for user mode.
+        // Kernel mode keeps active GS pointing at KernelGsData.
+        "push rax",
+        "mov rax, [rsp + 16]",
+        "and rax, 3",
+        "cmp rax, 3",
+        "jne 2f",
+        "swapgs",
+        "2:",
+        "pop rax",
         "iretq",
     )
 }
@@ -1162,8 +1238,6 @@ pub fn init() {
     });
 
     kgs.kernel_rsp = kernel_rsp;
-
-    let kgs_va = VirtAddr::new(&*kgs as *const _ as u64);
 
     let mut stack = StackHelper::new(&mut stack_ptr);
 
@@ -1210,7 +1284,7 @@ pub fn init() {
                 pwd: "/".to_string(),
                 fd_table: Vec::new(),
                 kernel_gs: kgs,
-                gs_base: kgs_va,
+                gs_base: VirtAddr::zero(),
                 fs_base: VirtAddr::zero(),
                 proc_mm,
                 parent_pid: 1,
@@ -1219,6 +1293,7 @@ pub fn init() {
                 stdio_target: [-1; 3],
                 exit_code: 0,
                 preempt_frame: 0,
+                pending_io: false,
             })
     }
 
@@ -1253,6 +1328,7 @@ pub fn init() {
         stdio_target: [-1; 3],
         exit_code: 0,
         preempt_frame: 0,
+        pending_io: false,
     };
 
     idle_task.gs_base = VirtAddr::new(&*idle_task.kernel_gs as *const _ as u64);
