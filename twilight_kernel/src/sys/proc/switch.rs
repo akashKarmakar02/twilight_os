@@ -1,6 +1,6 @@
 use crate::println;
-use core::arch::{asm};
-use crate::sys::proc::task::{task_spinup, Context};
+use crate::sys::proc::task::{Context, task_spinup};
+use core::arch::asm;
 
 static mut TASK_A_STACK: [u8; 4096] = [0; 4096];
 static mut TASK_B_STACK: [u8; 4096] = [0; 4096];
@@ -21,7 +21,9 @@ extern "C" fn task_a() -> ! {
     }
     println!("[A] done");
     #[allow(static_mut_refs)]
-    unsafe { task_exit(&mut TASK_A_DONE, &mut TASK_A_CTX_SP) };
+    unsafe {
+        task_exit(&mut TASK_A_DONE, &mut TASK_A_CTX_SP)
+    };
 }
 
 extern "C" fn task_b() -> ! {
@@ -34,12 +36,14 @@ extern "C" fn task_b() -> ! {
     }
     println!("[B] done");
     #[allow(static_mut_refs)]
-    unsafe { task_exit(&mut TASK_B_DONE, &mut TASK_B_CTX_SP) };
+    unsafe {
+        task_exit(&mut TASK_B_DONE, &mut TASK_B_CTX_SP)
+    };
 }
 
 #[inline(never)]
 fn yield_to(next_sp: &mut *mut Context, my_sp_slot: &mut *mut Context) {
-    unsafe { task_spinup(my_sp_slot, *next_sp) }; 
+    unsafe { task_spinup(my_sp_slot, *next_sp) };
 }
 
 // Cooperative scheduler: pick next runnable or return to boot if none.
@@ -54,13 +58,13 @@ fn schedule(from_slot: &mut *mut Context) -> ! {
     let target = if unsafe { !TASK_A_DONE || !TASK_B_DONE } {
         // someone still runnable
         if me_is_a {
-            if unsafe { !TASK_B_DONE } { 
+            if unsafe { !TASK_B_DONE } {
                 unsafe { TASK_B_CTX_SP }
-            } else { 
-                unsafe { BOOT_CTX_SP } 
+            } else {
+                unsafe { BOOT_CTX_SP }
             }
         } else {
-            if unsafe { !TASK_A_DONE } { 
+            if unsafe { !TASK_A_DONE } {
                 unsafe { TASK_A_CTX_SP }
             } else {
                 unsafe { BOOT_CTX_SP }

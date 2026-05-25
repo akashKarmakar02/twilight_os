@@ -7,16 +7,16 @@ use core::mem::size_of;
 
 #[repr(C)]
 pub struct XhciCapabilityRegisters {
-    pub caplength:  u8,   // Capability Register Length
-    pub reserved0:  u8,
-    pub hciversion: u16,  // Interface Version Number
-    pub hcsparams1: u32,  // Structural Parameters 1
-    pub hcsparams2: u32,  // Structural Parameters 2
-    pub hcsparams3: u32,  // Structural Parameters 3
-    pub hccparams1: u32,  // Capability Parameters 1
-    pub dboff:      u32,  // Doorbell Offset
-    pub rtsoff:     u32,  // Runtime Register Space Offset
-    pub hccparams2: u32,  // Capability Parameters 2
+    pub caplength: u8, // Capability Register Length
+    pub reserved0: u8,
+    pub hciversion: u16, // Interface Version Number
+    pub hcsparams1: u32, // Structural Parameters 1
+    pub hcsparams2: u32, // Structural Parameters 2
+    pub hcsparams3: u32, // Structural Parameters 3
+    pub hccparams1: u32, // Capability Parameters 1
+    pub dboff: u32,      // Doorbell Offset
+    pub rtsoff: u32,     // Runtime Register Space Offset
+    pub hccparams2: u32, // Capability Parameters 2
 }
 
 /* Compile-time size check (equivalent to static_assert) */
@@ -28,12 +28,12 @@ const _: () = assert!(size_of::<XhciCapabilityRegisters>() == 32);
 
 #[repr(C)]
 pub struct XhciInterrupterRegisters {
-    pub iman: u32,    // Interrupter Management
-    pub imod: u32,    // Interrupter Moderation
-    pub erstsz: u32,  // Event Ring Segment Table Size
+    pub iman: u32,   // Interrupter Management
+    pub imod: u32,   // Interrupter Moderation
+    pub erstsz: u32, // Event Ring Segment Table Size
     pub reserved: u32,
-    pub erstba: u64,  // Event Ring Segment Table Base Address
-    pub erdp: u64,    // Event Ring Dequeue Pointer
+    pub erstba: u64, // Event Ring Segment Table Base Address
+    pub erdp: u64,   // Event Ring Dequeue Pointer
 }
 
 const _: () = assert!(size_of::<XhciInterrupterRegisters>() == 32);
@@ -61,19 +61,18 @@ pub struct XhciDoorbellRegisters {
 
 #[repr(C)]
 pub struct XhciOperationalRegisters {
-    pub usbcmd:   u32,        // USB Command
-    pub usbsts:   u32,        // USB Status
-    pub pagesize: u32,        // Page Size
+    pub usbcmd: u32,   // USB Command
+    pub usbsts: u32,   // USB Status
+    pub pagesize: u32, // Page Size
     pub reserved0: [u32; 2],
 
-    pub dnctrl: u32,          // Device Notification Control
-    pub crcr:   u64,          // Command Ring Control
+    pub dnctrl: u32, // Device Notification Control
+    pub crcr: u64,   // Command Ring Control
     pub reserved1: [u32; 4],
 
-    pub dcbaap: u64,          // Device Context Base Address Array Pointer
-    pub config: u32,          // Configure
+    pub dcbaap: u64, // Device Context Base Address Array Pointer
+    pub config: u32, // Configure
     pub reserved2: [u32; 49],
-
     // Port Register Set follows dynamically (MAXPORTS)
 }
 

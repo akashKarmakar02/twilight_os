@@ -1,9 +1,9 @@
-use linked_list_allocator::LockedHeap;
-use x86_64::structures::paging::{
-    mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB
-};
-use x86_64::VirtAddr;
 use crate::sys::memory::bitmap::with_frame_allocator;
+use linked_list_allocator::LockedHeap;
+use x86_64::VirtAddr;
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB, mapper::MapToError,
+};
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -37,7 +37,9 @@ pub fn init_heap() -> Result<(), MapToError<Size4KiB>> {
     })?;
 
     unsafe {
-        ALLOCATOR.lock().init(heap_start.as_u64() as usize, super::memory_size());
+        ALLOCATOR
+            .lock()
+            .init(heap_start.as_u64() as usize, super::memory_size());
     }
 
     Ok(())

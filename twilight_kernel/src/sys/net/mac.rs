@@ -1,6 +1,6 @@
-use alloc::string::ToString;
 use crate::driver::disk::ata::{FileIO, IO};
 use crate::driver::nic::NET;
+use alloc::string::ToString;
 
 #[derive(Debug, Clone)]
 pub struct NetMac;
@@ -39,4 +39,3 @@ impl FileIO for NetMac {
         }
     }
 }
-

@@ -1,6 +1,6 @@
-use alloc::format;
 use crate::driver::disk::ata::{FileIO, IO};
 use crate::driver::nic::{EthernetDeviceIO, NET};
+use alloc::format;
 
 #[derive(Debug, Clone)]
 pub struct NetUsage;
@@ -46,4 +46,3 @@ impl FileIO for NetUsage {
         }
     }
 }
-

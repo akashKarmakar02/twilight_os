@@ -18,7 +18,11 @@ impl ProcFs {
         let proc_dir = Metadata::dir(1000, "");
         files.push((
             "".to_string(),
-            VfsNode::new(dummy_blockdev(), proc_dir, Arc::new(RwLock::new(DirNodeOps))),
+            VfsNode::new(
+                dummy_blockdev(),
+                proc_dir,
+                Arc::new(RwLock::new(DirNodeOps)),
+            ),
         ));
 
         let cpuinfo_meta = Metadata {
@@ -129,9 +133,9 @@ impl ProcFs {
         if path.is_empty() {
             return true;
         }
-        self.file_structure.iter().any(|(p, node)| {
-            p.as_str() == path && node.metadata.file_type == FileType::Dir
-        })
+        self.file_structure
+            .iter()
+            .any(|(p, node)| p.as_str() == path && node.metadata.file_type == FileType::Dir)
     }
 }
 
@@ -175,11 +179,7 @@ impl FileSystem for ProcFs {
             return Err(());
         }
 
-        if let Some((_, node)) = self
-            .file_structure
-            .iter()
-            .find(|(p, _)| p.as_str() == rel)
-        {
+        if let Some((_, node)) = self.file_structure.iter().find(|(p, _)| p.as_str() == rel) {
             let mut out = node.clone();
             // Keep size updated for proc files.
             out.metadata.size = out
@@ -236,11 +236,7 @@ impl FileSystem for ProcFs {
             return Err(());
         }
 
-        if let Some((_, node)) = self
-            .file_structure
-            .iter()
-            .find(|(p, _)| p.as_str() == rel)
-        {
+        if let Some((_, node)) = self.file_structure.iter().find(|(p, _)| p.as_str() == rel) {
             let mut out = node.metadata.clone();
             // Update size dynamically.
             let mut dev = node.device.clone();

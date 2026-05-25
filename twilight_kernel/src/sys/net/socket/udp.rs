@@ -37,12 +37,8 @@ impl UdpSocket {
 
     pub fn new() -> Self {
         let mut sockets = SOCKETS.lock();
-        let udp_rx_buffer = udp::PacketBuffer::new(
-            vec![udp::PacketMetadata::EMPTY], vec![0; 1024]
-        );
-        let udp_tx_buffer = udp::PacketBuffer::new(
-            vec![udp::PacketMetadata::EMPTY], vec![0; 1024]
-        );
+        let udp_rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 1024]);
+        let udp_tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 1024]);
         let udp_socket = udp::Socket::new(udp_rx_buffer, udp_tx_buffer);
         let handle = sockets.add(udp_socket);
         let remote_endpoint = None;
@@ -191,11 +187,7 @@ impl UdpSocket {
         let sockets = SOCKETS.lock();
         let socket = sockets.get::<udp::Socket>(self.handle);
         let ep = socket.endpoint();
-        if ep.port == 0 {
-            None
-        } else {
-            Some(ep.port)
-        }
+        if ep.port == 0 { None } else { Some(ep.port) }
     }
 
     pub fn remote_endpoint(&self) -> Option<IpEndpoint> {
@@ -239,7 +231,6 @@ impl FileIO for UdpSocket {
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<usize, ()> {
-
         let mut cmos = CMOS::new();
         let timeout = 5;
         let started = cmos.unix_time();

@@ -1,13 +1,10 @@
-use core::{cmp, slice};
-use spin::{Once, Mutex};
-use bit_field::BitField;
-use limine::memory_map::EntryType;
-use x86_64::structures::paging::{
-    FrameAllocator, FrameDeallocator,
-    PhysFrame, Size4KiB
-};
-use x86_64::PhysAddr;
 use crate::log;
+use bit_field::BitField;
+use core::{cmp, slice};
+use limine::memory_map::EntryType;
+use spin::{Mutex, Once};
+use x86_64::PhysAddr;
+use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct UsableRegion {
@@ -26,7 +23,7 @@ impl UsableRegion {
 
         Self {
             first_frame,
-            frame_count
+            frame_count,
         }
     }
 
@@ -59,9 +56,7 @@ fn frame_at(addr: u64) -> PhysFrame<Size4KiB> {
 static FRAME_ALLOCATOR: Once<Mutex<BitmapFrameAllocator>> = Once::new();
 
 pub fn init_frame_allocator(memory_map: &[&limine::memory_map::Entry]) {
-    FRAME_ALLOCATOR.call_once(|| {
-        Mutex::new(BitmapFrameAllocator::init(memory_map))
-    });
+    FRAME_ALLOCATOR.call_once(|| Mutex::new(BitmapFrameAllocator::init(memory_map)));
 }
 
 const MAX_REGIONS: usize = 32;
@@ -78,15 +73,18 @@ impl BitmapFrameAllocator {
     pub fn init(memory_map: &[&limine::memory_map::Entry]) -> Self {
         let mut bitmap_addr = None;
 
-        let frames_count: usize = memory_map.iter().map(|region| {
-            if region.entry_type == EntryType::USABLE {
-                let size = region.length;
-                debug_assert_eq!(size % 4096, 0);
-                (size / 4096) as usize
-            } else {
-                0
-            }
-        }).sum();
+        let frames_count: usize = memory_map
+            .iter()
+            .map(|region| {
+                if region.entry_type == EntryType::USABLE {
+                    let size = region.length;
+                    debug_assert_eq!(size % 4096, 0);
+                    (size / 4096) as usize
+                } else {
+                    0
+                }
+            })
+            .sum();
         let bitmap_size = ((frames_count + 63) / 64) * 8;
 
         let mut allocator = Self {
@@ -128,8 +126,8 @@ impl BitmapFrameAllocator {
                         continue; // Entire region consumed by the bitmap
                     }
                     (bitmap_end, region_end)
-                },
-                _ => (region_start, region_end)
+                }
+                _ => (region_start, region_end),
             };
 
             if usable_end - usable_start >= 4096 {
@@ -239,7 +237,8 @@ impl BitmapFrameAllocator {
             }
 
             let max_start = region_len - num_pages;
-            let start0 = if self.next_free_index >= base && self.next_free_index < base + region_len {
+            let start0 = if self.next_free_index >= base && self.next_free_index < base + region_len
+            {
                 (self.next_free_index - base).min(max_start)
             } else {
                 0
@@ -310,8 +309,8 @@ impl BitmapFrameAllocator {
             }
 
             // Limit how much of this region we can use before exceeding max_phys.
-            let max_pages_by_addr = ((max_phys_addr_inclusive + 1).saturating_sub(region_start)
-                / 0x1000) as usize;
+            let max_pages_by_addr =
+                ((max_phys_addr_inclusive + 1).saturating_sub(region_start) / 0x1000) as usize;
             let region_len_limited = region_len.min(max_pages_by_addr);
             if region_len_limited < num_pages {
                 base += region_len;
@@ -393,7 +392,9 @@ impl FrameDeallocator<Size4KiB> for BitmapFrameAllocator {
 }
 
 pub fn frame_allocator() -> &'static Mutex<BitmapFrameAllocator> {
-    FRAME_ALLOCATOR.get().expect("frame allocator not initialized")
+    FRAME_ALLOCATOR
+        .get()
+        .expect("frame allocator not initialized")
 }
 
 pub fn with_frame_allocator<F, R>(f: F) -> R

@@ -2,13 +2,13 @@ mod devfs;
 pub mod fat16;
 pub mod fat32;
 mod gdt;
+pub mod mbr;
 pub mod partition;
 pub mod pipe;
 mod procfs;
 pub mod ram_fs;
 pub mod twilight_fs;
 pub mod vfs;
-pub mod mbr;
 
 use crate::driver::disk::USB_BLOCK_DEVICE;
 use crate::println;
@@ -25,8 +25,8 @@ use crate::sys::fs::vfs::{FileSystem, Metadata, VfsNode};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use conquer_once::spin::OnceCell;
 use conquer_once::TryInitError;
+use conquer_once::spin::OnceCell;
 use spin::Mutex;
 
 pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
@@ -146,7 +146,9 @@ pub fn init(show_log: bool) {
     }
 
     if let Ok(tfs) = TwilightFs::check_virtio_blk() {
-        if let Err(e) = MFS.try_init_once(|| Mutex::new(tfs)) && e != TryInitError::AlreadyInit {
+        if let Err(e) = MFS.try_init_once(|| Mutex::new(tfs))
+            && e != TryInitError::AlreadyInit
+        {
             println!("MFS already initialized");
             return;
         }

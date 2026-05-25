@@ -17,7 +17,6 @@ pub struct PartitionEntry {
     pub sectors: u32,
 }
 
-
 impl PartitionEntry {
     pub const fn new(status: u8, partition_type: u8, lba_start: u32, sectors: u32) -> Self {
         Self {
@@ -48,7 +47,7 @@ impl PartitionEntry {
 
 pub struct Mbr<'a> {
     buf: [u8; 512],
-    dev: &'a mut dyn BlockDeviceIO
+    dev: &'a mut dyn BlockDeviceIO,
 }
 
 impl<'a> Mbr<'a> {
@@ -73,7 +72,9 @@ impl<'a> Mbr<'a> {
         for (index, entry) in entries.iter_mut().enumerate() {
             let base = PARTITION_TABLE_OFFSET + index * PARTITION_ENTRY_SIZE;
             entry.status = self.buf[base];
-            entry.chs_start.copy_from_slice(&self.buf[base + 1..base + 4]);
+            entry
+                .chs_start
+                .copy_from_slice(&self.buf[base + 1..base + 4]);
             entry.partition_type = self.buf[base + 4];
             entry.chs_end.copy_from_slice(&self.buf[base + 5..base + 8]);
             entry.lba_start = u32::from_le_bytes(self.buf[base + 8..base + 12].try_into().unwrap());
@@ -87,11 +88,11 @@ impl<'a> Mbr<'a> {
         self.encode_entries(entries);
         self.dev.write(0, self.buf.as_slice())
     }
-    
+
     fn encode_entries(&mut self, entries: &[PartitionEntry]) {
         for (index, entry) in entries.iter().enumerate() {
             let base = PARTITION_TABLE_OFFSET + index * PARTITION_ENTRY_SIZE;
-            
+
             self.buf[base] = entry.status;
             self.buf[base + 1..base + 4].copy_from_slice(&entry.chs_start);
             self.buf[base + 4] = entry.partition_type;

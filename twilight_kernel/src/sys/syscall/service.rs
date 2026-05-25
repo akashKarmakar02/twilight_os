@@ -935,14 +935,22 @@ pub fn execev(
     stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
 ) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
-        crate::serial_println!("[execve] pid={} bad path ptr={:#x}", crate::sys::proc::id(), arg1);
+        crate::serial_println!(
+            "[execve] pid={} bad path ptr={:#x}",
+            crate::sys::proc::id(),
+            arg1
+        );
         return -1;
     };
     crate::serial_println!("[execve] pid={} path={}", crate::sys::proc::id(), path);
 
     #[allow(static_mut_refs)]
     let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str().trim()) }) else {
-        crate::serial_println!("[execve] pid={} open failed path={}", crate::sys::proc::id(), path);
+        crate::serial_println!(
+            "[execve] pid={} open failed path={}",
+            crate::sys::proc::id(),
+            path
+        );
         return -2;
     };
 
@@ -950,7 +958,11 @@ pub fn execev(
     let mut elf_buf = vec![0u8; elf_size];
 
     let Ok(_) = elf_node.read(0, &mut elf_buf) else {
-        crate::serial_println!("[execve] pid={} read failed path={}", crate::sys::proc::id(), path);
+        crate::serial_println!(
+            "[execve] pid={} read failed path={}",
+            crate::sys::proc::id(),
+            path
+        );
         return -2;
     };
 
@@ -1008,7 +1020,11 @@ pub fn execev(
             Err(_) => {
                 // If exec fails, we return error and the OLD process continues.
                 // Note: p.exec should atomic-fail (not modifying self if elf is bad).
-                crate::serial_println!("[execve] pid={} exec failed path={}", crate::sys::proc::id(), path);
+                crate::serial_println!(
+                    "[execve] pid={} exec failed path={}",
+                    crate::sys::proc::id(),
+                    path
+                );
                 -1
             }
         }
@@ -1077,7 +1093,11 @@ pub fn fork(
         if let Ok(child) = process.fork(&tf) {
             let child_pid = child.pid;
             table.proc_list.push_back(child);
-            crate::serial_println!("[sys_fork] parent={} child={} return", current_pid, child_pid);
+            crate::serial_println!(
+                "[sys_fork] parent={} child={} return",
+                current_pid,
+                child_pid
+            );
             return child_pid as i64;
         }
     }
@@ -1291,8 +1311,7 @@ pub fn arch_prctl(code: u64, addr: u64) -> i64 {
                 -(EFAULT as i64)
             } else {
                 unsafe {
-                    *(addr as *mut u64) =
-                        crate::arch::x86_64::io::get_inactive_gsbase()().as_u64()
+                    *(addr as *mut u64) = crate::arch::x86_64::io::get_inactive_gsbase()().as_u64()
                 };
                 0
             }

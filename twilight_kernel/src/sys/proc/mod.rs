@@ -14,9 +14,7 @@ use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
 use crate::sys::proc::switch::read_cr3;
-use crate::sys::proc::task::{
-    Context, FpuState, allocate_switch_stack, switch_tasks, xrstor, xsave,
-};
+use crate::sys::proc::task::{Context, FpuState, allocate_switch_stack, switch_tasks, xrstor};
 use crate::sys::proc::user::USER_ENV;
 use crate::utils::{StackHelper, sync::WaitQueue};
 use alloc::alloc::alloc_zeroed;
@@ -705,7 +703,12 @@ impl Process {
         for (addr, size) in regions_to_copy.iter() {
             let addr = *addr;
             let size = *size;
-            crate::serial_println!("[fork] copy child={} addr={:#x} size={:#x}", pid, addr, size);
+            crate::serial_println!(
+                "[fork] copy child={} addr={:#x} size={:#x}",
+                pid,
+                addr,
+                size
+            );
 
             // Allocate in child
             // Note: We use true, true (RWX) for simplicity, though strict permissions would be better.
@@ -866,7 +869,6 @@ pub fn exit(code: i32) {
     crate::serial_println!("[exit] pid={} parent={}", current_pid, parent_pid);
     slice[cur_idx].state = ProcessState::Dead;
     slice[cur_idx].exit_code = code;
-    slice[cur_idx].preempt_frame = 0;
 
     if let Some(parent_idx) = find_process_index(slice, parent_pid)
         && matches!(slice[parent_idx].state, ProcessState::Waiting)
@@ -949,11 +951,10 @@ pub fn await_io() {
         }
 
         slice[cur_idx].state = ProcessState::AwaitingIo;
-        slice[cur_idx].preempt_frame = 0;
 
         if let Some(next_idx) = find_next_runnable_index(slice, cur_idx) {
             switch_by_index(slice, cur_idx, next_idx);
-            
+
             // Context switched back. Check if we were woken properly.
             #[allow(static_mut_refs)]
             let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
@@ -968,11 +969,23 @@ pub fn await_io() {
                 }
             }
         } else {
-            // No other runnable process. Stay logically Waiting but set Running
-            // temporarily so that wake_process() will set pending_io=true if it hits us.
-            slice[cur_idx].state = ProcessState::Running;
+            // No other runnable process. Stay logically AwaitingIo.
             crate::task::executor::halt();
-            // Woke up from halt (likely timer tick). Loop around to re-evaluate state.
+
+            // Woke up from halt (likely timer or IO interrupt).
+            // Check if we were woken properly.
+            #[allow(static_mut_refs)]
+            let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+            if let Some(process) = table.get_process(cur_pid) {
+                if process.pending_io {
+                    process.pending_io = false;
+                    process.state = ProcessState::Running;
+                    return;
+                }
+                if matches!(process.state, ProcessState::Running) {
+                    return;
+                }
+            }
         }
     }
 }
@@ -1078,26 +1091,6 @@ fn find_next_runnable_index(processes: &[Process], current_idx: usize) -> Option
     None
 }
 
-fn find_next_preemptable_index(processes: &[Process], current_idx: usize) -> Option<usize> {
-    if processes.len() < 2 {
-        return None;
-    }
-
-    for step in 1..=processes.len() {
-        let idx = (current_idx + step) % processes.len();
-        if idx == current_idx {
-            continue;
-        }
-        if matches!(processes[idx].state, ProcessState::Running)
-            && processes[idx].preempt_frame != 0
-        {
-            return Some(idx);
-        }
-    }
-
-    None
-}
-
 fn switch_by_index(processes: &mut [Process], cur_idx: usize, next_idx: usize) {
     if cur_idx == next_idx {
         return;
@@ -1113,59 +1106,11 @@ fn switch_by_index(processes: &mut [Process], cur_idx: usize, next_idx: usize) {
     }
 }
 
-fn restore_preempted_process(process: &mut Process) {
-    io::set_fsbase()(process.fs_base);
-    io::wrmsr(
-        io::IA32_GS_BASE,
-        &*process.kernel_gs as *const _ as u64,
-    );
-    io::set_inactive_gsbase()(process.gs_base);
-
-    if let Some(fpu) = process.fpu_storage.as_mut() {
-        xrstor(fpu);
-    }
-
-    let kstack_top = process.kernel_gs.kernel_rsp;
-    #[allow(static_mut_refs)]
-    unsafe {
-        crate::arch::x86_64::gdt::TSS.rsp[0] = kstack_top;
-    }
-    io::wrmsr(io::IA32_SYSENTER_ESP, kstack_top);
-}
-
 fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
-    if from_user == 0 {
-        return frame;
+    if from_user != 0 {
+        schedule_now();
     }
-
-    #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-    let cur_pid = id();
-
-    let slice = table.proc_list.make_contiguous();
-    let Some(cur_idx) = find_process_index(slice, cur_pid) else {
-        return frame;
-    };
-
-    {
-        let cur = &mut slice[cur_idx];
-        cur.preempt_frame = frame as u64;
-        cur.fs_base = io::get_fsbase()();
-        cur.gs_base = io::get_inactive_gsbase()(); // inactive = user GS because the ISR has swapgs'd.
-        if let Some(fpu) = cur.fpu_storage.as_mut() {
-            xsave(fpu);
-        }
-    }
-
-    let Some(next_idx) = find_next_preemptable_index(slice, cur_idx) else {
-        return frame;
-    };
-
-    let next = &mut slice[next_idx];
-    PID.store(next.pid, Ordering::SeqCst);
-    restore_preempted_process(next);
-
-    next.preempt_frame as *mut PreemptFrame
+    frame
 }
 
 pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {

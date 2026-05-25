@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-
 use crate::driver::keyboard::KeyboardListener;
 use crate::driver::timer::pit::uptime_duration;
 use crate::sys::console::TTY;
@@ -228,7 +227,10 @@ impl Tty {
             // await_io() sets the process to AwaitingIo and context-switches
             // to another runnable process. The keyboard IRQ handler will
             // wake us back via INPUT_WAIT_QUEUE.notify_all().
-            crate::serial_println!("[tty] pid={} waiting for input, yielding via await_io", crate::sys::proc::id());
+            crate::serial_println!(
+                "[tty] pid={} waiting for input, yielding via await_io",
+                crate::sys::proc::id()
+            );
             INPUT_WAIT_QUEUE.prepare_current();
             crate::sys::proc::await_io();
             INPUT_WAIT_QUEUE.finish_wait(crate::sys::proc::id());

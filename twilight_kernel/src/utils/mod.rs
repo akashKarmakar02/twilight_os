@@ -3,7 +3,6 @@ use x86_64::align_down;
 pub mod bitmap;
 pub mod sync;
 
-
 pub struct StackHelper<'a> {
     ptr: &'a mut u64,
 }
@@ -19,9 +18,7 @@ impl<'a> StackHelper<'a> {
 
     pub fn offset<T: Sized>(&mut self) -> &mut T {
         self.skip_by(size_of::<T>() as u64);
-        unsafe {
-            &mut *(*self.ptr as *mut T)
-        }
+        unsafe { &mut *(*self.ptr as *mut T) }
     }
 
     pub fn top(&self) -> u64 {
@@ -62,7 +59,6 @@ impl<'a> StackHelper<'a> {
         x
     }
 }
-
 
 pub fn slice_into_bytes<T: Sized>(slice: &[T]) -> &[u8] {
     let data = slice.as_ptr().cast::<u8>();

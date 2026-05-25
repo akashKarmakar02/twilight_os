@@ -243,8 +243,8 @@ impl EthernetDeviceIO for Device {
             return None;
         }
 
-        let n = u16::from_le_bytes([self.rx_buffer[offset + 2], self.rx_buffer[offset + 3]])
-            as usize;
+        let n =
+            u16::from_le_bytes([self.rx_buffer[offset + 2], self.rx_buffer[offset + 3]]) as usize;
 
         // Update buffer read pointer
         let next = ((offset + n + 4 + 3) & !3) % RX_BUFFER_LEN;

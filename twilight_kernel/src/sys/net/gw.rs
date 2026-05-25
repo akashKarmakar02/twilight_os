@@ -1,9 +1,9 @@
-use alloc::string::{String, ToString};
-use core::str::FromStr;
-use smoltcp::wire::Ipv4Address;
 use crate::driver::disk::ata::{FileIO, IO};
 use crate::driver::nic::NET;
 use crate::log;
+use alloc::string::{String, ToString};
+use core::str::FromStr;
+use smoltcp::wire::Ipv4Address;
 
 #[derive(Debug, Clone)]
 pub struct NetGw;
@@ -61,4 +61,3 @@ impl FileIO for NetGw {
         }
     }
 }
-

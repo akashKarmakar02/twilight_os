@@ -4,10 +4,10 @@ pub const JOURNAL_MAGIC: u32 = 0x4C4E_524A; // "JRNL" little-endian
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalRecType {
-    Begin   = 1,
-    Write   = 2, // write whole block
-    Commit  = 3,
-    Abort   = 4,
+    Begin = 1,
+    Write = 2, // write whole block
+    Commit = 3,
+    Abort = 4,
 }
 
 #[repr(C, packed)]

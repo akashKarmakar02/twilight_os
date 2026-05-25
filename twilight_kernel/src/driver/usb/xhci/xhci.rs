@@ -2052,7 +2052,8 @@ impl XhciDriver {
             // dword1: EP type in bits 3..5, max packet in bits 16..31
             let ep_type = EP_TYPE_CONTROL << 3; // control
             let cerr = 3u32 << 1; // Recommended for non-isoch endpoints
-            ec.add(1).write_volatile(cerr | ep_type | (max_packet << 16));
+            ec.add(1)
+                .write_volatile(cerr | ep_type | (max_packet << 16));
             // dword2/3: TR Dequeue Pointer (16-byte aligned), DCS is bit0 of the low dword
             ec.add(2).write_volatile(((ep0_phys as u32) & !0xF) | 1);
             ec.add(3).write_volatile((ep0_phys >> 32) as u32);
@@ -2312,7 +2313,11 @@ impl HostController for XhciDriver {
         let mut ring = PhysBuf::new_dma32(trb_count * size_of::<Trb>());
         ring.fill(0);
         let ring_phys = ring.addr();
-        log_dma_range("Interrupt Endpoint Ring", ring_phys, trb_count * size_of::<Trb>());
+        log_dma_range(
+            "Interrupt Endpoint Ring",
+            ring_phys,
+            trb_count * size_of::<Trb>(),
+        );
         log_dma_range("Interrupt Endpoint Buffer", buf_phys, len);
         unsafe {
             let trbs =

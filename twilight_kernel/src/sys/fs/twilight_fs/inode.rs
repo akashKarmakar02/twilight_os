@@ -259,7 +259,8 @@ impl VfsNodeOps for TFSVfsNode {
             block_off: usize,
             len: usize,
         }
-        let mut read_ops: Vec<ReadOp> = Vec::with_capacity((max_to_read + block_size - 1) / block_size);
+        let mut read_ops: Vec<ReadOp> =
+            Vec::with_capacity((max_to_read + block_size - 1) / block_size);
 
         while remaining > 0 {
             let zone = if logic_block < direct_blocks {
