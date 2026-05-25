@@ -932,38 +932,48 @@ pub fn schedule_now() {
 }
 
 pub fn await_io() {
-    #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
     let cur_pid = id();
 
-    let slice = table.proc_list.make_contiguous();
-    let Some(cur_idx) = find_process_index(slice, cur_pid) else {
-        return;
-    };
+    loop {
+        #[allow(static_mut_refs)]
+        let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+        let slice = table.proc_list.make_contiguous();
+        let Some(cur_idx) = find_process_index(slice, cur_pid) else {
+            return;
+        };
 
-    if slice[cur_idx].pending_io {
-        slice[cur_idx].pending_io = false;
-        return;
-    }
-
-    slice[cur_idx].state = ProcessState::AwaitingIo;
-    slice[cur_idx].preempt_frame = 0;
-
-    let Some(next_idx) = find_next_runnable_index(slice, cur_idx) else {
-        slice[cur_idx].state = ProcessState::Running;
-        crate::task::executor::halt();
-        return;
-    };
-
-    switch_by_index(slice, cur_idx, next_idx);
-
-    #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-    if let Some(process) = table.get_process(cur_pid) {
-        if matches!(process.state, ProcessState::AwaitingIo) {
-            process.state = ProcessState::Running;
+        if slice[cur_idx].pending_io {
+            slice[cur_idx].pending_io = false;
+            slice[cur_idx].state = ProcessState::Running;
+            return;
         }
-        process.pending_io = false;
+
+        slice[cur_idx].state = ProcessState::AwaitingIo;
+        slice[cur_idx].preempt_frame = 0;
+
+        if let Some(next_idx) = find_next_runnable_index(slice, cur_idx) {
+            switch_by_index(slice, cur_idx, next_idx);
+            
+            // Context switched back. Check if we were woken properly.
+            #[allow(static_mut_refs)]
+            let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+            if let Some(process) = table.get_process(cur_pid) {
+                if process.pending_io {
+                    process.pending_io = false;
+                    process.state = ProcessState::Running;
+                    return;
+                }
+                if matches!(process.state, ProcessState::Running) {
+                    return; // Woken by wake_process explicitly setting state
+                }
+            }
+        } else {
+            // No other runnable process. Stay logically Waiting but set Running
+            // temporarily so that wake_process() will set pending_io=true if it hits us.
+            slice[cur_idx].state = ProcessState::Running;
+            crate::task::executor::halt();
+            // Woke up from halt (likely timer tick). Loop around to re-evaluate state.
+        }
     }
 }
 
