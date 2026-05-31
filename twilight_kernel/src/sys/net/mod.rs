@@ -1,11 +1,11 @@
-use smoltcp::time::Instant;
 use crate::driver::timer::cmos::CMOS;
+use smoltcp::time::Instant;
 
 pub mod gw;
 pub mod ip;
 pub mod mac;
-pub mod usage;
 pub mod socket;
+pub mod usage;
 
 pub fn time() -> Instant {
     let mut cmos = CMOS::new();

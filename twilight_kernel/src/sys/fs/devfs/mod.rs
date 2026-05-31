@@ -1,5 +1,5 @@
-mod full;
 mod disk;
+mod full;
 mod kmsg;
 mod null;
 mod random;
@@ -47,11 +47,7 @@ impl DevFs {
         let tty_meta = Metadata::chr(4, "tty");
         devices.push((
             "tty".to_string(),
-            VfsNode::new(
-                dummy_blockdev(),
-                tty_meta,
-                Arc::new(RwLock::new(TtyDev)),
-            ),
+            VfsNode::new(dummy_blockdev(), tty_meta, Arc::new(RwLock::new(TtyDev))),
         ));
         let zero_meta = Metadata::chr(5, "zero");
         devices.push((
@@ -183,11 +179,7 @@ impl FileSystem for DevFs {
             return Err(());
         }
 
-        if let Some((_, node)) = self
-            .file_structure
-            .iter()
-            .find(|(p, _)| p.as_str() == rel)
-        {
+        if let Some((_, node)) = self.file_structure.iter().find(|(p, _)| p.as_str() == rel) {
             let mut out = node.clone();
             if rel == "disk0" {
                 if let Some(sz) = disk_size_bytes() {
@@ -245,11 +237,7 @@ impl FileSystem for DevFs {
             return Err(());
         }
 
-        if let Some((_, node)) = self
-            .file_structure
-            .iter()
-            .find(|(p, _)| p.as_str() == rel)
-        {
+        if let Some((_, node)) = self.file_structure.iter().find(|(p, _)| p.as_str() == rel) {
             let mut out = node.metadata.clone();
             if rel == "disk0" {
                 if let Some(sz) = disk_size_bytes() {
@@ -283,8 +271,8 @@ impl DevFs {
             return true;
         }
 
-        self.file_structure.iter().any(|(p, node)| {
-            p.as_str() == path && node.metadata.file_type == FileType::Dir
-        })
+        self.file_structure
+            .iter()
+            .any(|(p, node)| p.as_str() == path && node.metadata.file_type == FileType::Dir)
     }
 }

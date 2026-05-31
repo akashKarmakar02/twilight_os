@@ -428,7 +428,9 @@ impl TwilightFsShared {
     #[inline]
     pub(crate) fn invalidate_file_inode(&self, inode_no: u32) {
         let generation = self.generation();
-        self.file_cache.lock().invalidate_inode(generation, inode_no);
+        self.file_cache
+            .lock()
+            .invalidate_inode(generation, inode_no);
     }
 
     #[inline]
@@ -1023,7 +1025,8 @@ impl TwilightFs {
             }
 
             if entry_idx == 0 {
-                read_tfs_block(self.device.lock().as_mut(), zone, &mut buf).map_err(|_| InvalidInode)?;
+                read_tfs_block(self.device.lock().as_mut(), zone, &mut buf)
+                    .map_err(|_| InvalidInode)?;
             }
 
             let offset = entry_idx * dir_entry_size;
@@ -1222,7 +1225,9 @@ impl TwilightFs {
             return Err(FileNotFound);
         }
 
-        let parent_inode = self.read_inode(parent_inode_num).map_err(|_| InvalidInode)?;
+        let parent_inode = self
+            .read_inode(parent_inode_num)
+            .map_err(|_| InvalidInode)?;
         let dir_index = self.ensure_dir_index_entry(parent_inode_num, &parent_inode)?;
         if dir_index.names.contains_key(name) {
             return Err(FileAlreadyExists);
@@ -1389,7 +1394,8 @@ impl TwilightFs {
 
                 let zone = if entry == 0 {
                     let new_zone = get_new_zone(self)?;
-                    single_indirect_block[i * 4..i * 4 + 4].copy_from_slice(&new_zone.to_le_bytes());
+                    single_indirect_block[i * 4..i * 4 + 4]
+                        .copy_from_slice(&new_zone.to_le_bytes());
                     single_indirect_dirty = true;
                     new_zone
                 } else {
@@ -1562,7 +1568,8 @@ impl TwilightFs {
             inode.direct_slot_set(i, zone);
         }
         inode.size = bytes_written as u64;
-        self.write_inode(inode_num, &inode).map_err(|_| InvalidInode)?;
+        self.write_inode(inode_num, &inode)
+            .map_err(|_| InvalidInode)?;
 
         for zone in preallocated {
             let _ = self.dealloc_zone(zone);
@@ -1652,7 +1659,9 @@ impl TwilightFs {
             return Err(FileNameTooLong);
         }
 
-        let parent_inode = self.read_inode(parent_inode_num).map_err(|_| InvalidInode)?;
+        let parent_inode = self
+            .read_inode(parent_inode_num)
+            .map_err(|_| InvalidInode)?;
         let dir_index = self.ensure_dir_index_entry(parent_inode_num, &parent_inode)?;
         if dir_index.names.contains_key(name) {
             return Err(FileAlreadyExists);

@@ -31,6 +31,8 @@ pub fn init_tty() {
 pub fn put_char_in_tty(c: u8) {
     let tty = get_tty();
     tty.put_input(c);
+    // Wake processes that are blocked waiting for TTY input
+    crate::sys::console::tty::notify_input_waiters();
 }
 
 pub fn init_console() {

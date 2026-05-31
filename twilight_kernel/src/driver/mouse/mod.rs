@@ -2,9 +2,9 @@ pub mod ps2;
 
 use crate::arch::x86_64::halt;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
+use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const PS2_PACKET_SIZE: usize = 3;
 

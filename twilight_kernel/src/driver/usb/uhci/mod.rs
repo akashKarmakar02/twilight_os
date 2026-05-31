@@ -57,9 +57,17 @@ impl UHci {
             }
 
             if (status & USBSTS_HCHALTED) != 0 {
-                log!("UHCI({:#x}): controller halted (USBSTS={:#x})", self.io_base, status);
+                log!(
+                    "UHCI({:#x}): controller halted (USBSTS={:#x})",
+                    self.io_base,
+                    status
+                );
             } else if (status & (USBSTS_USBERRINT | USBSTS_HSE | USBSTS_HC_PROCESS_ERR)) != 0 {
-                log!("UHCI({:#x}): interrupt error status={:#x}", self.io_base, status);
+                log!(
+                    "UHCI({:#x}): interrupt error status={:#x}",
+                    self.io_base,
+                    status
+                );
             }
 
             return (status
@@ -1264,8 +1272,8 @@ impl InterruptTransfer for UhciInterruptTransfer {
             | (3u32 << TD_STATUS_ERRCNT_SHIFT)
             | TD_STATUS_IOC
             | keep;
-        td.token = (td.token & !TD_TOKEN_TOGGLE)
-            | if self.data_toggle { TD_TOKEN_TOGGLE } else { 0 };
+        td.token =
+            (td.token & !TD_TOKEN_TOGGLE) | if self.data_toggle { TD_TOKEN_TOGGLE } else { 0 };
         // Keep buffer pointer intact and reprogram token toggle from software state.
         if !self.last_poll_had_error {
             self.data_toggle = !self.data_toggle;

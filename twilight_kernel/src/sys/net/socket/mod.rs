@@ -3,19 +3,17 @@ use crate::sys;
 pub mod tcp;
 pub mod udp;
 
+use crate::driver::disk::ata::{FileIO, IO};
+use crate::task::executor::sleep;
 use alloc::vec;
 use lazy_static::lazy_static;
 use smoltcp::iface::SocketSet;
 use smoltcp::time::Duration;
-use spin::Mutex;
-use crate::task::executor::sleep;
-use crate::driver::disk::ata::{FileIO, IO};
 use smoltcp::wire::{IpAddress, IpEndpoint};
+use spin::Mutex;
 
 lazy_static! {
-    pub static ref SOCKETS: Mutex<SocketSet<'static>> = {
-        Mutex::new(SocketSet::new(vec![]))
-    };
+    pub static ref SOCKETS: Mutex<SocketSet<'static>> = { Mutex::new(SocketSet::new(vec![])) };
 }
 
 #[derive(Debug)]

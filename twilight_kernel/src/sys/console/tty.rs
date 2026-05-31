@@ -1,17 +1,20 @@
 #![allow(dead_code)]
 
-use crate::arch::x86_64::halt;
 use crate::driver::keyboard::KeyboardListener;
 use crate::driver::timer::pit::uptime_duration;
 use crate::sys::console::TTY;
 use crate::sys::console::framebuffer::FramebufferTerminal;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
+use crate::utils::sync::WaitQueue;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::fmt::Write;
 use core::{fmt, mem};
 use spin::Mutex;
 use twilight_common::syscall::types::EFAULT;
+
+/// Wait queue for processes blocked on TTY keyboard input.
+static INPUT_WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
 // x86_64/musl
 const IOCTL_TIOCGWINSZ: u64 = 0x5413;
@@ -220,7 +223,17 @@ impl Tty {
             if let Some(c) = self.pop_input_now() {
                 return c;
             }
-            halt();
+            // Yield the CPU via the scheduler instead of spinning in HLT.
+            // await_io() sets the process to AwaitingIo and context-switches
+            // to another runnable process. The keyboard IRQ handler will
+            // wake us back via INPUT_WAIT_QUEUE.notify_all().
+            crate::serial_println!(
+                "[tty] pid={} waiting for input, yielding via await_io",
+                crate::sys::proc::id()
+            );
+            INPUT_WAIT_QUEUE.prepare_current();
+            crate::sys::proc::await_io();
+            INPUT_WAIT_QUEUE.finish_wait(crate::sys::proc::id());
         }
     }
 
@@ -334,7 +347,9 @@ impl Tty {
                 if Self::elapsed_ms_since(start) >= vtime_ms {
                     return 0;
                 }
-                halt();
+                INPUT_WAIT_QUEUE.prepare_current();
+                crate::sys::proc::await_io();
+                INPUT_WAIT_QUEUE.finish_wait(crate::sys::proc::id());
             }
         }
 
@@ -375,7 +390,9 @@ impl Tty {
             if Self::elapsed_ms_since(deadline_start) >= vtime_ms {
                 break;
             }
-            halt();
+            INPUT_WAIT_QUEUE.prepare_current();
+            crate::sys::proc::await_io();
+            INPUT_WAIT_QUEUE.finish_wait(crate::sys::proc::id());
         }
 
         i
@@ -774,8 +791,15 @@ impl KeyboardListener for Tty {
     fn on_key(&self, key: u8, released: bool) {
         if !released {
             self.input_buffer.lock().push_back(key);
+            // Wake any processes blocked in pop_input_blocking()
+            INPUT_WAIT_QUEUE.notify_all();
         }
     }
+}
+
+/// Notify the TTY input wait queue (called from keyboard interrupt path).
+pub fn notify_input_waiters() {
+    INPUT_WAIT_QUEUE.notify_all();
 }
 
 impl VfsNodeOps for Tty {

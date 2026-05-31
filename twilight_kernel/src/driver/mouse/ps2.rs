@@ -1,4 +1,4 @@
-use super::{enqueue_packet, PS2_PACKET_SIZE};
+use super::{PS2_PACKET_SIZE, enqueue_packet};
 use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;

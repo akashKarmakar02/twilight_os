@@ -299,8 +299,28 @@ pub extern "sysv64" fn syscall_handler(
         }
     };
 
+    if syscall_number == SYS_FORK || syscall_number == SYS_WAIT4 || syscall_number == SYS_EXECVE {
+        serial_println!(
+            "[syscall] pid={} nr={} res={} rip={:#x} rsp={:#x}",
+            crate::sys::proc::id(),
+            syscall_number,
+            res,
+            _stack_frame.instruction_pointer.as_u64(),
+            _stack_frame.stack_pointer.as_u64(),
+        );
+    }
+
     regs.rax = res as u64;
     crate::sys::proc::maybe_schedule();
+
+    if syscall_number == SYS_FORK || syscall_number == SYS_WAIT4 || syscall_number == SYS_EXECVE {
+        serial_println!(
+            "[syscall] pid={} nr={} return rax={:#x}",
+            crate::sys::proc::id(),
+            syscall_number,
+            regs.rax,
+        );
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]

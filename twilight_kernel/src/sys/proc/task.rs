@@ -2,9 +2,10 @@ use crate::arch::x86_64::io;
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::phys_to_virt;
 use crate::sys::proc::Process;
+use x86_64::VirtAddr;
+use x86_64::instructions::interrupts;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{FrameAllocator, Size4KiB};
-use x86_64::VirtAddr;
 
 #[derive(Default)]
 #[repr(C)]
@@ -156,9 +157,8 @@ pub fn allocate_switch_stack() -> Result<VirtAddr, MapToError<Size4KiB>> {
     Ok(stack_virt_addr)
 }
 
-
 pub fn switch_tasks(prev_task: &mut Process, next_task: &mut Process) {
-    unsafe {
+    interrupts::without_interrupts(|| unsafe {
         if let Some(fpu) = prev_task.fpu_storage.as_mut() {
             xsave(fpu);
         }
@@ -175,10 +175,11 @@ pub fn switch_tasks(prev_task: &mut Process, next_task: &mut Process) {
 
         prev_task.fs_base = io::get_fsbase()();
         prev_task.gs_base = io::get_inactive_gsbase()();
-        
+
         io::set_fsbase()(next_task.fs_base);
+        io::wrmsr(io::IA32_GS_BASE, &*next_task.kernel_gs as *const _ as u64);
         io::set_inactive_gsbase()(next_task.gs_base);
-        
+
         task_spinup(&mut prev_task.context, next_task.context);
-    }
+    });
 }

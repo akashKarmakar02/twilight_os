@@ -1,18 +1,18 @@
 use super::{Task, TaskId};
-use alloc::{collections::BTreeMap, sync::Arc};
 use alloc::task::Wake;
-use x86_64::instructions::interrupts;
-use core::task::{Context, Poll, Waker};
+use alloc::{collections::BTreeMap, sync::Arc};
 use conquer_once::spin::OnceCell;
+use core::task::{Context, Poll, Waker};
 use crossbeam_queue::ArrayQueue;
 use spin::Mutex;
+use x86_64::instructions::interrupts;
 
 pub static EXECUTOR: OnceCell<Mutex<Executor>> = OnceCell::uninit();
 
 pub fn init_executor() {
-    EXECUTOR.try_init_once(|| {
-        Mutex::new(Executor::new())
-    }).unwrap()
+    EXECUTOR
+        .try_init_once(|| Mutex::new(Executor::new()))
+        .unwrap()
 }
 
 pub fn sleep(duration: f64) {
@@ -30,7 +30,6 @@ pub fn halt() {
     }
 }
 
-
 pub struct Executor {
     tasks: BTreeMap<TaskId, Task>,
     task_queue: Arc<ArrayQueue<TaskId>>,
@@ -46,7 +45,6 @@ struct TaskWaker {
 }
 
 impl TaskWaker {
-
     fn new(task_id: TaskId, task_queue: Arc<ArrayQueue<TaskId>>) -> Waker {
         Waker::from(Arc::new(TaskWaker {
             task_id,
@@ -58,7 +56,6 @@ impl TaskWaker {
         self.task_queue.push(self.task_id).expect("task_queue full");
     }
 }
-
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {

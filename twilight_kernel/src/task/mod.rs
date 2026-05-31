@@ -1,10 +1,10 @@
-pub mod simple_executor;
 pub mod executor;
+pub mod simple_executor;
 
 use alloc::boxed::Box;
 use core::pin::Pin;
-use core::task::{Context, Poll};
 use core::sync::atomic::{AtomicU64, Ordering};
+use core::task::{Context, Poll};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TaskId(u64);

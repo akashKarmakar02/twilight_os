@@ -1,20 +1,20 @@
+use crate::driver::disk::dummy_blockdev;
+use crate::kernel_utils::install::INITRAMFS;
+use crate::serial_println;
+use crate::sys::fs::ram_fs::initramfs::CpioError;
+use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, Metadata, VfsNode, VfsNodeOps};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::min;
-use crate::kernel_utils::install::INITRAMFS;
-use crate::serial_println;
-use crate::driver::disk::dummy_blockdev;
-use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, Metadata, VfsNode, VfsNodeOps};
-use crate::sys::fs::ram_fs::initramfs::CpioError;
 use spin::rwlock::RwLock;
 
 pub mod initramfs;
 
 pub enum Node {
     File { data: Vec<u8> },
-    Dir  { children: BTreeMap<String, Node> },
+    Dir { children: BTreeMap<String, Node> },
     Symlink { target: String },
 }
 
@@ -31,7 +31,9 @@ impl InitramfsFs {
         while let Some(entry_res) = initramfs.next() {
             match entry_res {
                 Ok(entry) => {
-                    let Some(name) = entry.filename() else { continue };
+                    let Some(name) = entry.filename() else {
+                        continue;
+                    };
                     let path = name.trim_matches('/');
                     if path.is_empty() {
                         continue;
@@ -46,13 +48,13 @@ impl InitramfsFs {
                             if entry.header.is_directory() {
                                 current
                                     .entry(comp.to_string())
-                                    .or_insert_with(|| Node::Dir { children: BTreeMap::new() });
+                                    .or_insert_with(|| Node::Dir {
+                                        children: BTreeMap::new(),
+                                    });
                             } else if entry.header.is_symlink() {
-                                let target = core::str::from_utf8(entry.data).unwrap_or("").to_string();
-                                current.insert(
-                                    comp.to_string(),
-                                    Node::Symlink { target },
-                                );
+                                let target =
+                                    core::str::from_utf8(entry.data).unwrap_or("").to_string();
+                                current.insert(comp.to_string(), Node::Symlink { target });
                             } else if entry.header.is_regular_file() {
                                 current.insert(
                                     comp.to_string(),
@@ -62,10 +64,11 @@ impl InitramfsFs {
                                 );
                             }
                         } else {
-                            current = match current
-                                .entry(comp.to_string())
-                                .or_insert_with(|| Node::Dir { children: BTreeMap::new() })
-                            {
+                            current = match current.entry(comp.to_string()).or_insert_with(|| {
+                                Node::Dir {
+                                    children: BTreeMap::new(),
+                                }
+                            }) {
                                 Node::Dir { children } => children,
                                 _ => {
                                     serial_println!(
@@ -90,9 +93,7 @@ impl InitramfsFs {
             children: root_children,
         };
 
-        Self {
-            root,
-        }
+        Self { root }
     }
 
     fn split_path<'a>(&self, path: &'a str) -> Vec<&'a str> {
@@ -108,10 +109,7 @@ impl InitramfsFs {
         }
         let mut h: u32 = 5381;
         for b in path.as_bytes() {
-            h = h
-                .wrapping_shl(5)
-                .wrapping_add(h)
-                .wrapping_add(*b as u32);
+            h = h.wrapping_shl(5).wrapping_add(h).wrapping_add(*b as u32);
         }
         h
     }
@@ -248,9 +246,9 @@ impl FileSystem for InitramfsFs {
         let ops: Arc<RwLock<dyn VfsNodeOps>> = match node {
             Node::Dir { .. } => Arc::new(RwLock::new(RamDir)),
             Node::File { data } => Arc::new(RwLock::new(RamFile { data: data.clone() })),
-            Node::Symlink { target } => {
-                Arc::new(RwLock::new(RamSymlink { target: target.clone() }))
-            }
+            Node::Symlink { target } => Arc::new(RwLock::new(RamSymlink {
+                target: target.clone(),
+            })),
         };
 
         Ok(VfsNode::new(dummy_blockdev(), meta, ops))
@@ -269,7 +267,9 @@ impl FileSystem for InitramfsFs {
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
         let comps = self.split_path(path);
         let node = self.get_node(&comps).ok_or(())?;
-        let Node::Dir { children } = node else { return Err(()) };
+        let Node::Dir { children } = node else {
+            return Err(());
+        };
 
         let mut entries = Vec::new();
         for (name, _child) in children.iter() {

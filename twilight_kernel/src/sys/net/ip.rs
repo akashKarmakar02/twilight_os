@@ -1,10 +1,10 @@
+use crate::driver::disk::ata::{FileIO, IO};
+use crate::driver::nic::NET;
+use crate::log;
 use alloc::format;
 use alloc::string::String;
 use core::str::FromStr;
 use smoltcp::wire::IpCidr;
-use crate::driver::disk::ata::{FileIO, IO};
-use crate::driver::nic::NET;
-use crate::log;
 
 #[derive(Debug, Clone)]
 pub struct NetIp;
@@ -57,4 +57,3 @@ impl FileIO for NetIp {
         }
     }
 }
-

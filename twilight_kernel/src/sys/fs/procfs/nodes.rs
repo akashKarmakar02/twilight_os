@@ -44,7 +44,13 @@ fn build_cpuinfo() -> String {
 
     let (family, model, stepping) = cpuid
         .get_feature_info()
-        .map(|f| (f.family_id() as u32, f.model_id() as u32, f.stepping_id() as u32))
+        .map(|f| {
+            (
+                f.family_id() as u32,
+                f.model_id() as u32,
+                f.stepping_id() as u32,
+            )
+        })
         .unwrap_or((0, 0, 0));
 
     let mhz = cpu_mhz();

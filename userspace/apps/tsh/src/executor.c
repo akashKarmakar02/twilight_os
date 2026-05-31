@@ -32,6 +32,15 @@ int run_command(char *const argv[], int background) {
   pid_t pid = fork();
   if (pid == 0) {
     // Child
+    if (background) {
+      int p[2];
+      if (pipe(p) == 0) {
+        dup2(p[0], 0);
+        close(p[0]);
+        // leave p[1] open so the pipe is never closed, and reading p[0] blocks forever.
+        // wait, httpd uses poll() to check if it's readable. Since p[1] is open but never written to, poll() returns 0.
+      }
+    }
     syscall(SYS_execve, path, argv, envp);
     // If we're here, exec failed
     fprintf(stderr, "tsh: %s: %s\n", argv[0], strerror(errno));

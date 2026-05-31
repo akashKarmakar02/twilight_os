@@ -1,11 +1,11 @@
+use crate::driver::disk::BlockDeviceIO;
+use crate::sys::fs::partition;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp;
-use crate::driver::disk::BlockDeviceIO;
-use crate::sys::fs::partition;
 
 pub enum FatEntry<'a> {
     Directory(&'a str),
@@ -13,7 +13,7 @@ pub enum FatEntry<'a> {
 }
 
 pub mod runtime;
-pub use runtime::{detect_fat16_partition, Fat16Fs};
+pub use runtime::{Fat16Fs, detect_fat16_partition};
 #[derive(Debug)]
 pub enum FatError {
     InvalidPath,
@@ -87,10 +87,7 @@ impl<'a> FatBuilder<'a> {
             return Err(FatError::InvalidPath);
         }
 
-        let file_name = components
-            .last()
-            .ok_or(FatError::InvalidPath)?
-            .to_string();
+        let file_name = components.last().ok_or(FatError::InvalidPath)?.to_string();
         let parent_components = &components[..components.len() - 1];
         let parent_id = self.ensure_directory(parent_components)?;
 
@@ -102,7 +99,9 @@ impl<'a> FatBuilder<'a> {
         let file_id = self.files.len();
         self.files
             .push(FileEntry::new(file_name, data, forced_short));
-        self.directories[parent_id].entries.push(DirItem::File(file_id));
+        self.directories[parent_id]
+            .entries
+            .push(DirItem::File(file_id));
 
         Ok(())
     }
@@ -214,10 +213,7 @@ impl<'a> FatBuilder<'a> {
 
         entry_count += 1; // end marker
         let total_bytes = entry_count * 32;
-        let clusters = cmp::max(
-            1,
-            (total_bytes + cluster_bytes - 1) / cluster_bytes,
-        );
+        let clusters = cmp::max(1, (total_bytes + cluster_bytes - 1) / cluster_bytes);
         self.directories[dir_id].cluster_count = clusters as u32;
 
         for entry in entries {
@@ -305,10 +301,10 @@ struct Fat16Layout {
 
 impl Fat16Layout {
     fn new(start_lba: u32, total_sectors: u32) -> Result<Self, FatError> {
-        let root_dir_sectors = ((u32::from(ROOT_DIR_ENTRIES) * 32) + (u32::from(BYTES_PER_SECTOR) - 1))
+        let root_dir_sectors = ((u32::from(ROOT_DIR_ENTRIES) * 32)
+            + (u32::from(BYTES_PER_SECTOR) - 1))
             / u32::from(BYTES_PER_SECTOR);
-        let (fat_size, total_clusters) =
-            compute_fat16_size(total_sectors, root_dir_sectors)?;
+        let (fat_size, total_clusters) = compute_fat16_size(total_sectors, root_dir_sectors)?;
         let data_start =
             start_lba + u32::from(RESERVED_SECTORS) + NUM_FATS * fat_size + root_dir_sectors;
         Ok(Self {
@@ -376,10 +372,7 @@ impl<'a, 'b> Fat16Formatter<'a, 'b> {
         for entry in entries.iter() {
             match *entry {
                 DirItem::Dir(child) => {
-                    self.process_directory(
-                        child,
-                        self.builder.directories[dir_id].cluster,
-                    )?;
+                    self.process_directory(child, self.builder.directories[dir_id].cluster)?;
                 }
                 DirItem::File(file_id) => {
                     self.write_file(file_id)?;
@@ -387,10 +380,7 @@ impl<'a, 'b> Fat16Formatter<'a, 'b> {
             }
         }
 
-        let buffer = self.build_directory_buffer(
-            dir_id,
-            parent_cluster.unwrap_or(0),
-        )?;
+        let buffer = self.build_directory_buffer(dir_id, parent_cluster.unwrap_or(0))?;
         let cluster = self.builder.directories[dir_id]
             .cluster
             .expect("cluster assigned");
@@ -430,10 +420,7 @@ impl<'a, 'b> Fat16Formatter<'a, 'b> {
             return Ok(());
         }
 
-        let clusters = clusters_for_size(
-            data.len(),
-            self.layout.cluster_size_bytes,
-        );
+        let clusters = clusters_for_size(data.len(), self.layout.cluster_size_bytes);
         let start = self.allocate_chain(clusters)?;
         self.builder.files[file_id].first_cluster = Some(start);
         self.builder.files[file_id].cluster_count = clusters;
@@ -514,15 +501,12 @@ impl<'a, 'b> Fat16Formatter<'a, 'b> {
         dir_id: usize,
         parent_cluster: u32,
     ) -> Result<Vec<u8>, FatError> {
-        let cluster_bytes =
-            (self.builder.directories[dir_id].cluster_count as usize)
-                * self.layout.cluster_size_bytes;
+        let cluster_bytes = (self.builder.directories[dir_id].cluster_count as usize)
+            * self.layout.cluster_size_bytes;
         let mut buffer = vec![0u8; cluster_bytes];
         let mut offset = 0usize;
 
-        let self_cluster = self.builder.directories[dir_id]
-            .cluster
-            .unwrap_or(0);
+        let self_cluster = self.builder.directories[dir_id].cluster.unwrap_or(0);
 
         let dot_entry = make_short_entry(b".          ", 0x10, self_cluster, 0);
         buffer[offset..offset + 32].copy_from_slice(&dot_entry);
@@ -544,11 +528,8 @@ impl<'a, 'b> Fat16Formatter<'a, 'b> {
                         .unwrap_or_else(|| fallback_short_name(name, true));
                     let lfn = build_lfn_entries(name, short);
                     offset = write_entries(&mut buffer, offset, &lfn)?;
-                    let dir_cluster = self.builder.directories[child]
-                        .cluster
-                        .unwrap_or(0);
-                    let short_entry =
-                        make_short_entry(&short, 0x10, dir_cluster, 0);
+                    let dir_cluster = self.builder.directories[child].cluster.unwrap_or(0);
+                    let short_entry = make_short_entry(&short, 0x10, dir_cluster, 0);
                     if offset + 32 > buffer.len() {
                         return Err(FatError::NoSpace);
                     }
@@ -564,8 +545,7 @@ impl<'a, 'b> Fat16Formatter<'a, 'b> {
                     offset = write_entries(&mut buffer, offset, &lfn)?;
                     let start_cluster = file.first_cluster.unwrap_or(0);
                     let size = file.data.len() as u32;
-                    let short_entry =
-                        make_short_entry(&short, 0x20, start_cluster, size);
+                    let short_entry = make_short_entry(&short, 0x20, start_cluster, size);
                     if offset + 32 > buffer.len() {
                         return Err(FatError::NoSpace);
                     }
@@ -655,12 +635,7 @@ fn write_entries(
     Ok(offset)
 }
 
-fn make_short_entry(
-    short: &[u8; 11],
-    attr: u8,
-    first_cluster: u32,
-    size: u32,
-) -> [u8; 32] {
+fn make_short_entry(short: &[u8; 11], attr: u8, first_cluster: u32, size: u32) -> [u8; 32] {
     let mut entry = [0u8; 32];
     entry[..11].copy_from_slice(short);
     entry[11] = attr;
@@ -694,10 +669,7 @@ fn build_lfn_entries(name: &str, short: [u8; 11]) -> Vec<[u8; 32]> {
         entry[12] = 0x00;
         entry[13] = checksum;
         entry[26..28].copy_from_slice(&0u16.to_le_bytes());
-        fill_name_chunk(
-            &mut entry,
-            &utf16[chunk_index * 13..(chunk_index + 1) * 13],
-        );
+        fill_name_chunk(&mut entry, &utf16[chunk_index * 13..(chunk_index + 1) * 13]);
         entries.push(entry);
     }
     entries
@@ -873,7 +845,10 @@ fn forced_short_for_file(name: &str) -> Option<[u8; 11]> {
 }
 
 fn equals_ignore_case(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.chars().zip(b.chars()).all(|(x, y)| x.eq_ignore_ascii_case(&y))
+    a.len() == b.len()
+        && a.chars()
+            .zip(b.chars())
+            .all(|(x, y)| x.eq_ignore_ascii_case(&y))
 }
 
 struct ShortNameRegistry {

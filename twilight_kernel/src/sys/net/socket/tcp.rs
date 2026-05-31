@@ -1,6 +1,5 @@
 use crate::{println, sys};
 
-
 use super::SOCKETS;
 use super::random_port;
 
@@ -271,7 +270,6 @@ impl TcpSocket {
 
         Err(())
     }
-
 }
 
 impl Drop for TcpSocket {

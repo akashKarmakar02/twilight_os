@@ -1,12 +1,12 @@
+use crate::driver::timer::pit::uptime;
+use crate::println;
 use alloc::vec;
 use alloc::vec::Vec;
 use bit_field::BitField;
 use lazy_static::lazy_static;
 use spin::Mutex;
-use x86_64::instructions::port::Port;
 use x86_64::PhysAddr;
-use crate::driver::timer::pit::uptime;
-use crate::println;
+use x86_64::instructions::port::Port;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceConfig {
@@ -51,9 +51,7 @@ impl DeviceConfig {
         let mut base_addresses: [u32; 6] = [0; 6];
         for i in 0..6 {
             let offset = 0x10 + ((i as u8) << 2);
-            let mut register = ConfigRegister::new(
-                bus, device, function, offset
-            );
+            let mut register = ConfigRegister::new(bus, device, function, offset);
             base_addresses[i] = register.read();
         }
 
@@ -78,9 +76,7 @@ impl DeviceConfig {
     }
 
     pub fn enable_bus_mastering(&self) {
-        let mut register = ConfigRegister::new(
-            self.bus, self.device, self.function, 0x04
-        );
+        let mut register = ConfigRegister::new(self.bus, self.device, self.function, 0x04);
         let mut data = register.read();
         data.set_bit(2, true);
         register.write(data);
@@ -95,18 +91,22 @@ impl DeviceConfig {
         let bar0 = self.base_addresses[0];
         let bar1 = self.base_addresses[1];
         let addr = match bar0.get_bits(1..3) {
-            0 => { // 32 bits
+            0 => {
+                // 32 bits
                 (bar0 & 0xFFFFFFF0) as u64
             }
-            1 => { // 16 bits
+            1 => {
+                // 16 bits
                 (bar0 & 0x0000FFF0) as u64
             }
-            2 => { // 64 bits
+            2 => {
+                // 64 bits
                 let l = (bar0 & 0xFFFFFFF0) as u64;
                 let h = (bar1 & 0xFFFFFFF0) as u64;
                 l + (h << 32)
             }
-            _ => { // TODO
+            _ => {
+                // TODO
                 panic!("Unknown base address size");
             }
         };
@@ -159,11 +159,10 @@ fn check_device(bus: u8, device: u8) {
     }
 }
 
-
 pub fn lookup_device_name(vendor: u16, device: u16) -> &'static str {
     match (vendor, device) {
         // Intel
-        (0x8086, 0x1237) => "Intel 82441FX PMC (Host Bridge)",         // Common in QEMU
+        (0x8086, 0x1237) => "Intel 82441FX PMC (Host Bridge)", // Common in QEMU
         (0x8086, 0x7000) => "Intel 82371SB PIIX3 ISA (Southbridge)",
         (0x8086, 0x100e) => "Intel PRO/1000 MT Desktop Adapter",
         (0x8086, 0x10d3) => "Intel 82574L Gigabit Network Connection",
@@ -222,7 +221,13 @@ fn add_device(bus: u8, device: u8, function: u8) {
     let uptime = uptime();
     println!(
         "\x1b[93m[{:.6}]\x1b[0m PCI {:04X}:{:02X}:{:02X} [{:04X}:{:04X}] {}",
-        uptime, bus, device, function, config.vendor_id, config.device_id, lookup_device_name(config.vendor_id, config.device_id)
+        uptime,
+        bus,
+        device,
+        function,
+        config.vendor_id,
+        config.device_id,
+        lookup_device_name(config.vendor_id, config.device_id)
     );
 }
 
@@ -286,9 +291,7 @@ pub fn init() {
         // switch to IDE legacy mode for the ATA driver.
         if dev.class == 0x01 && dev.subclass == 0x01 {
             // IDE Controller
-            let mut register = ConfigRegister::new(
-                dev.bus, dev.device, dev.function, 0x08
-            );
+            let mut register = ConfigRegister::new(dev.bus, dev.device, dev.function, 0x08);
             let mut data = register.read();
             let prog_offset = 8; // The programing interface start at bit 8
 

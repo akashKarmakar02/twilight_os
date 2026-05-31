@@ -3,10 +3,10 @@ use crate::sys::fs::vfs::{BlockDev, FileType, Metadata, VfsNode, VfsNodeOps};
 use crate::task::executor::halt;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
 use twilight_common::syscall::types::{EAGAIN, EPIPE};
-use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 pub const IOCTL_PIPE_GET_ERRNO: u64 = 0x5457_0001; // "TW" private
 pub const IOCTL_PIPE_GET_LAST_WRITE: u64 = 0x5457_0002;
@@ -211,10 +211,16 @@ pub fn make_pipe_nodes(nonblock: bool) -> (VfsNode, VfsNode) {
         modified_time: 0,
     };
 
-    let r_end: Arc<RwLock<dyn VfsNodeOps>> =
-        Arc::new(RwLock::new(PipeEnd::new(inner.clone(), PipeEndKind::Read, nonblock)));
-    let w_end: Arc<RwLock<dyn VfsNodeOps>> =
-        Arc::new(RwLock::new(PipeEnd::new(inner.clone(), PipeEndKind::Write, nonblock)));
+    let r_end: Arc<RwLock<dyn VfsNodeOps>> = Arc::new(RwLock::new(PipeEnd::new(
+        inner.clone(),
+        PipeEndKind::Read,
+        nonblock,
+    )));
+    let w_end: Arc<RwLock<dyn VfsNodeOps>> = Arc::new(RwLock::new(PipeEnd::new(
+        inner.clone(),
+        PipeEndKind::Write,
+        nonblock,
+    )));
 
     let dev = dummy_blockdev();
     let r_node = VfsNode::new(dev.clone(), meta_r, r_end);

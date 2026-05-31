@@ -33,6 +33,7 @@ pub fn init() {
 
 pub fn pit_tick_isr() {
     TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::sys::proc::on_timer_tick();
 }
 
 #[inline]

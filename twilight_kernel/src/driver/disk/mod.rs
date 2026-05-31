@@ -40,14 +40,20 @@ impl BlockDeviceIO for UsbBlkHandle {
     fn block_size(&self) -> usize {
         #[allow(static_mut_refs)]
         unsafe {
-            USB_BLOCK_DEVICE.as_ref().map(|dev| dev.block_size()).unwrap_or(0)
+            USB_BLOCK_DEVICE
+                .as_ref()
+                .map(|dev| dev.block_size())
+                .unwrap_or(0)
         }
     }
 
     fn block_count(&self) -> usize {
         #[allow(static_mut_refs)]
         unsafe {
-            USB_BLOCK_DEVICE.as_ref().map(|dev| dev.block_count()).unwrap_or(0)
+            USB_BLOCK_DEVICE
+                .as_ref()
+                .map(|dev| dev.block_count())
+                .unwrap_or(0)
         }
     }
 

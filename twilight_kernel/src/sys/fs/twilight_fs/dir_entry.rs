@@ -8,7 +8,7 @@ pub struct DirEntry {
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct DirIndexEntry {
-    pub name_hash: u32,     // e.g. fnv1a32 / xxhash32 (pick one)
+    pub name_hash: u32, // e.g. fnv1a32 / xxhash32 (pick one)
     pub inode: u32,
     pub dirent_offset: u32, // offset within dir data (bytes) or entry number
     pub _pad: u32,

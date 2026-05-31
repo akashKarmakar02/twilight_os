@@ -1,8 +1,8 @@
-use crate::{driver, serial_println};
 use crate::driver::disk::AtaBlockDevice;
 use crate::sys::fs::partition;
 use crate::sys::fs::partition::PartitionEntry;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, Metadata, VfsNode, VfsNodeOps};
+use crate::{driver, serial_println};
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -169,7 +169,9 @@ impl Fat32Inner {
     }
 
     fn max_cluster_number(&self) -> u32 {
-        let data_sectors = self.partition_sectors.saturating_sub(self.first_data_sector);
+        let data_sectors = self
+            .partition_sectors
+            .saturating_sub(self.first_data_sector);
         (data_sectors / self.sectors_per_cluster as u32).saturating_add(1)
     }
 
@@ -198,14 +200,12 @@ impl Fat32Inner {
 
         let mut sector = [0u8; 512];
         self.read_sector(self.fat_start_sector + sector_offset as u32, &mut sector)?;
-        Ok(
-            u32::from_le_bytes([
-                sector[byte_offset],
-                sector[byte_offset + 1],
-                sector[byte_offset + 2],
-                sector[byte_offset + 3],
-            ]) & 0x0FFF_FFFF,
-        )
+        Ok(u32::from_le_bytes([
+            sector[byte_offset],
+            sector[byte_offset + 1],
+            sector[byte_offset + 2],
+            sector[byte_offset + 3],
+        ]) & 0x0FFF_FFFF)
     }
 
     fn read_directory(&mut self, cluster: u32) -> Result<Vec<FatDirEntry>, ()> {
@@ -571,11 +571,13 @@ fn detect_fat32_partition_mbr(bus: u8, dsk: u8) -> Option<PartitionEntry> {
 
     let entries = partition::decode_entries(&sector);
     entries.into_iter().find(|entry| {
-        matches!(entry.partition_type, 
+        matches!(
+            entry.partition_type,
             partition::FAT32_CHS_PARTITION_TYPE
                 | partition::FAT32_LBA_PARTITION_TYPE
                 | partition::EFI_SYSTEM_PARTITION_TYPE
                 | partition::FAT16_CHS_PARTITION_TYPE
-                | partition::FAT16_LBA_PARTITION_TYPE)
+                | partition::FAT16_LBA_PARTITION_TYPE
+        )
     })
 }
