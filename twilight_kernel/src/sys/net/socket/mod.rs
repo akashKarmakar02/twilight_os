@@ -13,7 +13,9 @@ use crate::driver::disk::ata::{FileIO, IO};
 use smoltcp::wire::{IpAddress, IpEndpoint};
 
 lazy_static! {
-    pub static ref SOCKETS: Mutex<SocketSet<'static>> = Mutex::new(SocketSet::new(vec![]));
+    pub static ref SOCKETS: Mutex<SocketSet<'static>> = {
+        Mutex::new(SocketSet::new(vec![]))
+    };
 }
 
 #[derive(Debug)]

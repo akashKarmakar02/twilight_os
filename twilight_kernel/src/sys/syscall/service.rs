@@ -6,7 +6,6 @@ use crate::sys::console::get_tty;
 use crate::sys::fs::pipe::{IOCTL_PIPE_GET_ERRNO, IOCTL_PIPE_GET_LAST_WRITE, make_pipe_nodes};
 use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
 use crate::sys::kmsg::IOCTL_KMSG_GET_HEAD;
-use crate::sys::net::bind_map::GLOBAL_PORT_MAP;
 use crate::sys::net::socket::{SocketFile, tcp::TcpSocket, udp::UdpSocket};
 use crate::sys::proc::{FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, USER_STACK_SIZE};
 use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
@@ -2657,11 +2656,6 @@ pub fn bind(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
     };
 
     #[allow(static_mut_refs)]
-    if unsafe {GLOBAL_PORT_MAP.lock().contains_key(&port.clone())} {
-        return -1;
-    }
-
-    #[allow(static_mut_refs)]
     let proc_opt = unsafe {
         PROCESS_TABLE
             .get_mut()
@@ -2679,9 +2673,6 @@ pub fn bind(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
     let OpenFileKind::Socket(sock) = &mut file.kind else {
         return -(ENOTSOCK as i64);
     };
-
-    #[allow(static_mut_refs)]
-    unsafe { GLOBAL_PORT_MAP.lock().insert(port, process.pid); }
 
     match sock.bind(port) {
         Ok(()) => 0,
