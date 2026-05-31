@@ -14,7 +14,7 @@ use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
 use crate::sys::proc::switch::read_cr3;
-use crate::sys::proc::task::{Context, FpuState, allocate_switch_stack, switch_tasks, xrstor};
+use crate::sys::proc::task::{Context, FpuState, allocate_switch_stack, switch_tasks};
 use crate::sys::proc::user::USER_ENV;
 use crate::utils::{StackHelper, sync::WaitQueue};
 use alloc::alloc::alloc_zeroed;

@@ -13,7 +13,7 @@ use smoltcp::wire::{IpAddress, IpEndpoint};
 use spin::Mutex;
 
 lazy_static! {
-    pub static ref SOCKETS: Mutex<SocketSet<'static>> = { Mutex::new(SocketSet::new(vec![])) };
+    pub static ref SOCKETS: Mutex<SocketSet<'static>> = Mutex::new(SocketSet::new(vec![]));
 }
 
 #[derive(Debug)]
