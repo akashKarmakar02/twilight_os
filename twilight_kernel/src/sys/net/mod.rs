@@ -6,6 +6,7 @@ pub mod ip;
 pub mod mac;
 pub mod usage;
 pub mod socket;
+pub mod bind_map;
 
 pub fn time() -> Instant {
     let mut cmos = CMOS::new();

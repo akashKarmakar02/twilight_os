@@ -1,4 +1,3 @@
-use crate::println;
 use crate::sys::memory::phys_mem_offset;
 use core::ptr::{read_volatile, write_volatile};
 
@@ -68,7 +67,6 @@ pub fn init() {
 }
 
 fn calibrate_timer() {
-    println!("Calibrating APIC timer...");
 
     // 1. Setup PIT for 10ms wait
     // We'll trust our existing pit::sleep_ns or just busy wait on it.
@@ -90,7 +88,6 @@ fn calibrate_timer() {
     };
 
     let ticks_per_ms = ticks_in_10ms / 10;
-    println!("APIC Timer: {} ticks/ms", ticks_per_ms);
 
     // Target: 1000Hz -> 1ms per tick
     let interval = ticks_per_ms; // 1 ms
