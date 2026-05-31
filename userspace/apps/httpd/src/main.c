@@ -9,7 +9,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-static const char *k_root = "/var/www";
+static const char *k_root_default = "/var/www";
 
 static void write_all(int fd, const void *buf, size_t len) {
   const uint8_t *p = (const uint8_t *)buf;
@@ -88,7 +88,7 @@ static int is_safe_path(const char *url_path) {
   return 1;
 }
 
-static void build_fs_path(char *out, size_t out_cap, const char *url_path) {
+static void build_fs_path(char *out, size_t out_cap, const char *k_root, const char *url_path) {
   // strip query string
   char path[1024];
   strncpy(path, url_path, sizeof(path) - 1);
@@ -145,7 +145,7 @@ static void send_file(int cfd, int code, const char *reason,
   close(f);
 }
 
-static void try_send_404(int cfd) {
+static void try_send_404(int cfd, const char *k_root) {
   char p[256];
   snprintf(p, sizeof(p), "%s/404.html", k_root);
   const char *ctype = "text/html; charset=utf-8";
@@ -161,7 +161,7 @@ static void try_send_404(int cfd) {
       "<!doctype html><html><body><h1>404 Not Found</h1></body></html>\n");
 }
 
-static void handle_client(int cfd) {
+static void handle_client(int cfd, const char *k_root) {
   char req[4096];
   ssize_t n = read(cfd, req, sizeof(req) - 1);
   if (n <= 0)
@@ -200,9 +200,9 @@ static void handle_client(int cfd) {
   }
 
   char fs_path[1400];
-  build_fs_path(fs_path, sizeof(fs_path), path);
+  build_fs_path(fs_path, sizeof(fs_path), k_root, path);
   if (fs_path[0] == 0) {
-    try_send_404(cfd);
+    try_send_404(cfd, k_root);
     return;
   }
 
@@ -216,14 +216,14 @@ static void handle_client(int cfd) {
     }
     
     if (!ctype) {
-        try_send_404(cfd);
+        try_send_404(cfd, k_root);
         return;
     }
   }
 
   int test = open(fs_path, O_RDONLY);
   if (test < 0) {
-    try_send_404(cfd);
+    try_send_404(cfd, k_root);
     return;
   }
   close(test);
@@ -231,7 +231,7 @@ static void handle_client(int cfd) {
   send_file(cfd, 200, "OK", fs_path, ctype);
 }
 
-int main(void) {
+int main(int argc, char const *argv[]) {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s < 0) {
     const char *msg = "httpd: socket failed\n";
@@ -255,8 +255,9 @@ int main(void) {
   addr.sin_family = AF_INET;
   addr.sin_port = htons(80);
   addr.sin_addr.s_addr = htonl(0); // 0.0.0.0
+  int ret_val =  bind(s, (struct sockaddr *)&addr, sizeof(addr));
 
-  if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+  if (ret_val != 0) {
     char buf[128];
     snprintf(buf, sizeof(buf), "httpd: bind failed: %s\n", strerror(errno));
     write_all(2, buf, strlen(buf));
@@ -269,6 +270,21 @@ int main(void) {
     write_all(2, msg, strlen(msg));
     close(s);
     return 1;
+  }
+
+  printf("%d\n", argc);
+  char *path;
+  if (argc <= 1) {
+    path = k_root_default;
+  } else {
+    char *given_path = argv[1];
+    if (given_path[0] == "/") {
+      path = given_path;
+    } else if ((given_path[0] == "." && given_path[1] == "/") || (given_path[0] == ".")) {
+      char cwd_buf[512];
+      getcwd(cwd_buf, 512);
+      path = cwd_buf;
+    }
   }
 
   const char *ready = "httpd: serving /var/www on port 80\n";
@@ -317,7 +333,7 @@ int main(void) {
         (void)fcntl(cfd, F_SETFL, cfl & ~O_NONBLOCK);
       }
 
-      handle_client(cfd);
+      handle_client(cfd, path);
       close(cfd);
     }
   }
