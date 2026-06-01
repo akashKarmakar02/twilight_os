@@ -7,16 +7,16 @@ pub mod superblock;
 
 use crate::driver;
 use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
-use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO, UsbBlkHandle};
+use crate::driver::disk::{BlockDeviceIO, UsbBlkHandle, BLOCK_DEVICE};
 use crate::driver::timer::cmos::CMOS;
-use crate::sys::fs::MFS;
 use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
+use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
+use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::twilight_fs::FsError::{
     FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode,
 };
-use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
-use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
+use crate::sys::fs::MFS;
 use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -26,8 +26,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
 use spin::rwlock::RwLock;
+use spin::Mutex;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
 static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);
@@ -251,6 +251,21 @@ impl PathLookupCache {
             }
         }
     }
+
+    fn remove_prefix(&mut self, generation: usize, prefix: &str) {
+        self.ensure_generation(generation);
+
+        let is_match = |path: &str| {
+            path == prefix
+                || path
+                    .strip_prefix(prefix)
+                    .map(|suffix| suffix.starts_with('/'))
+                    .unwrap_or(false)
+        };
+
+        self.map.retain(|path, _| !is_match(path.as_str()));
+        self.order.retain(|path| !is_match(path.as_str()));
+    }
 }
 
 #[derive(Default)]
@@ -356,6 +371,13 @@ impl DirIndexCache {
         self.map.get(&parent_ino).cloned()
     }
 
+    fn lookup(&mut self, generation: usize, parent_ino: u32, name: &str) -> Option<u32> {
+        self.ensure_generation(generation);
+        self.map
+            .get(&parent_ino)
+            .and_then(|entry| entry.names.get(name).copied())
+    }
+
     fn insert(&mut self, generation: usize, parent_ino: u32, entry: DirIndexEntry) {
         self.ensure_generation(generation);
 
@@ -381,19 +403,32 @@ impl DirIndexCache {
     ) {
         self.ensure_generation(generation);
 
-        if !self.map.contains_key(&parent_ino) {
-            self.order.push_back(parent_ino);
+        if let Some(entry) = self.map.get_mut(&parent_ino) {
+            entry.names.insert(name, inode_no);
+            entry.next_free_slot_hint = next_free_slot_hint;
         }
+    }
 
-        let entry = self.map.entry(parent_ino).or_default();
-        entry.names.insert(name, inode_no);
-        entry.next_free_slot_hint = next_free_slot_hint;
+    fn remove(&mut self, generation: usize, parent_ino: u32, name: &str) {
+        self.ensure_generation(generation);
 
-        while self.order.len() > DIR_INDEX_CACHE_CAPACITY {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
-            }
+        if let Some(entry) = self.map.get_mut(&parent_ino) {
+            entry.names.remove(name);
+            entry.next_free_slot_hint = 0;
         }
+    }
+
+    fn rename(
+        &mut self,
+        generation: usize,
+        old_parent_ino: u32,
+        old_name: &str,
+        new_parent_ino: u32,
+        new_name: String,
+        inode_no: u32,
+    ) {
+        self.remove(generation, old_parent_ino, old_name);
+        self.update_after_insert(generation, new_parent_ino, new_name, inode_no, 0);
     }
 }
 
@@ -446,6 +481,12 @@ impl TwilightFsShared {
     }
 
     #[inline]
+    pub(crate) fn remove_lookup_prefix(&self, prefix: &str) {
+        let generation = self.generation();
+        self.lookup_cache.lock().remove_prefix(generation, prefix);
+    }
+
+    #[inline]
     pub(crate) fn read_cached_file_slice(
         &self,
         inode_no: u32,
@@ -471,6 +512,14 @@ impl TwilightFsShared {
     }
 
     #[inline]
+    fn dir_index_lookup(&self, parent_ino: u32, name: &str) -> Option<u32> {
+        let generation = self.generation();
+        self.dir_index_cache
+            .lock()
+            .lookup(generation, parent_ino, name)
+    }
+
+    #[inline]
     fn dir_index_set(&self, parent_ino: u32, entry: DirIndexEntry) {
         let generation = self.generation();
         self.dir_index_cache
@@ -493,6 +542,34 @@ impl TwilightFsShared {
             name,
             inode_no,
             next_free_slot_hint,
+        );
+    }
+
+    #[inline]
+    fn dir_index_remove(&self, parent_ino: u32, name: &str) {
+        let generation = self.generation();
+        self.dir_index_cache
+            .lock()
+            .remove(generation, parent_ino, name);
+    }
+
+    #[inline]
+    fn dir_index_rename(
+        &self,
+        old_parent_ino: u32,
+        old_name: &str,
+        new_parent_ino: u32,
+        new_name: String,
+        inode_no: u32,
+    ) {
+        let generation = self.generation();
+        self.dir_index_cache.lock().rename(
+            generation,
+            old_parent_ino,
+            old_name,
+            new_parent_ino,
+            new_name,
+            inode_no,
         );
     }
 }
@@ -1702,36 +1779,10 @@ impl TwilightFs {
             return Ok(None);
         }
 
-        let dir_entry_size = size_of::<DirEntry>();
-        let entries_per_block = self.superblock.block_size as usize / dir_entry_size;
-        let mut buffer = [0u8; FS_BLOCK_SIZE];
-
-        for i in 0..Inode::DIRECT_SLOT_COUNT {
-            let zone = parent_inode.direct_slot_get(i);
-            if zone == 0 {
-                continue;
-            }
-
-            read_tfs_block(self.device.lock().as_mut(), zone, &mut buffer).unwrap();
-
-            for i in 0..entries_per_block {
-                let offset = i * dir_entry_size;
-                let entry =
-                    unsafe { core::ptr::read(buffer[offset..].as_ptr() as *const DirEntry) };
-
-                if entry.inode != 0 {
-                    let entry_name = core::str::from_utf8(&entry.name)
-                        .unwrap_or("")
-                        .trim_end_matches('\0');
-
-                    if entry_name == name {
-                        return Ok(Some(entry.inode));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        let _ = self
+            .ensure_dir_index_entry(parent_inode_num, &parent_inode)
+            .map_err(|_| "Failed to build directory index")?;
+        Ok(self.shared.dir_index_lookup(parent_inode_num, name))
     }
 
     fn split_parent_and_name(path: &str) -> Result<(String, String), FsError> {
@@ -1752,6 +1803,14 @@ impl TwilightFs {
         };
 
         Ok((parent, name.to_string()))
+    }
+
+    fn join_parent_and_name(parent: &str, name: &str) -> String {
+        if parent == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", parent, name)
+        }
     }
 
     fn find_dir_entry_slot(
@@ -1892,7 +1951,23 @@ impl TwilightFs {
             self.clear_dir_entry_slot(old_parent_inode_num, old_zone, old_offset)?;
         }
 
-        self.shared.invalidate_namespace();
+        let old_full_path = Self::join_parent_and_name(old_parent_path.as_str(), old_name.as_str());
+        let new_full_path = Self::join_parent_and_name(new_parent_path.as_str(), new_name.as_str());
+
+        if old_parent_inode_num == new_parent_inode_num {
+            self.shared.dir_index_rename(
+                old_parent_inode_num,
+                old_name.as_str(),
+                new_parent_inode_num,
+                new_name,
+                old_inode_num,
+            );
+        } else {
+            self.shared
+                .dir_index_remove(old_parent_inode_num, old_name.as_str());
+        }
+        self.shared.remove_lookup_prefix(old_full_path.as_str());
+        self.shared.remove_lookup_prefix(new_full_path.as_str());
         Ok(())
     }
 
@@ -2072,7 +2147,10 @@ impl TwilightFs {
                     }
                     self.write_inode(parent_inode_num, &parent_inode).unwrap();
 
-                    self.shared.invalidate_namespace();
+                    let target_path = Self::join_parent_and_name(parent_path.as_str(), target_name);
+                    self.shared.dir_index_remove(parent_inode_num, target_name);
+                    self.shared.remove_lookup_prefix(target_path.as_str());
+                    self.shared.invalidate_file_inode(inode_num);
                     return Ok(());
                 }
             }
@@ -2194,9 +2272,6 @@ impl FileSystem for TwilightFs {
 
     fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
         if let Ok(inode_num) = self.resolve_path(parent_dir) {
-            if let Ok(_) = self.resolve_path(format!("{}/{}", parent_dir, path).as_str()) {
-                return Err(());
-            }
             let inode = self.read_inode(inode_num).unwrap();
             if inode.is_dir() {
                 if let Err(_) = self.create_dir(inode_num, path) {
@@ -2245,13 +2320,11 @@ impl FileSystem for TwilightFs {
 
     fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
         if let Ok(inode_num) = self.resolve_path(parent_path) {
-            if let Ok(_) = self.resolve_path(format!("{}/{}", parent_path, filename).as_str()) {
-                return Err(());
-            }
             let inode = self.read_inode(inode_num).unwrap();
             if inode.is_dir() {
-                self.create_file(inode_num, filename).unwrap();
-                Ok(())
+                self.create_file(inode_num, filename)
+                    .map(|_| ())
+                    .map_err(|_| ())
             } else {
                 Err(())
             }

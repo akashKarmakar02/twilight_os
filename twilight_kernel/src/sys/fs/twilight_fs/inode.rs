@@ -392,19 +392,86 @@ impl VfsNodeOps for TFSVfsNode {
     fn write(&mut self, device: &mut BlockDev, lba: usize, data: &[u8]) -> Result<(), ()> {
         const BLOCK_SIZE: usize = 2048;
 
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let write_end = lba.checked_add(data.len()).ok_or(())?;
+        let blocks_for_len = |len: usize| -> usize {
+            if len == 0 {
+                0
+            } else {
+                (len + BLOCK_SIZE - 1) / BLOCK_SIZE
+            }
+        };
+
         let mut bytes_written: usize = 0;
         let mut remaining: usize = data.len();
         let mut pos: usize = lba;
 
-        let mut preallocated = if pos >= self.inode.size as usize {
-            let blks = (remaining + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            let meta = blks / 512 + 3;
-            self.ctx
-                .lock()
-                .alloc_zones(blks + meta)
-                .unwrap_or(Vec::new())
-        } else {
-            Vec::new()
+        let mut direct_zones = [0u32; Inode::DIRECT_SLOT_COUNT];
+        for (i, slot) in direct_zones.iter_mut().enumerate() {
+            *slot = self.inode.direct_slot_get(i);
+        }
+
+        let mut preallocated = {
+            let current_size = self.inode.size as usize;
+            let current_blocks = blocks_for_len(current_size);
+            let end_blocks = blocks_for_len(write_end);
+            let touched_blocks = ((lba % BLOCK_SIZE) + data.len() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            let mut missing_data = if lba <= current_size {
+                end_blocks.saturating_sub(current_blocks)
+            } else {
+                touched_blocks
+            };
+
+            let direct_blocks = Inode::DIRECT_SLOT_COUNT;
+            let indirect_entries = (BLOCK_SIZE / 4) - 1;
+            let double_start = direct_blocks + indirect_entries;
+            let start_block = lba / BLOCK_SIZE;
+            let mut metadata = 0usize;
+            let data_missing_start = if lba <= current_size {
+                current_blocks
+            } else {
+                start_block
+            };
+
+            for block in data_missing_start..core::cmp::min(end_blocks, direct_blocks) {
+                if direct_zones[block] != 0 {
+                    missing_data = missing_data.saturating_sub(1);
+                }
+            }
+
+            if start_block < double_start
+                && end_blocks > direct_blocks
+                && self.inode.single_indirect_get() == 0
+            {
+                metadata += 1;
+            }
+
+            if end_blocks > double_start {
+                let double_entries = indirect_entries * indirect_entries;
+                let double_end = double_start.saturating_add(double_entries);
+                let touched_start = core::cmp::max(start_block, double_start);
+                let touched_end = core::cmp::min(end_blocks, double_end);
+
+                if touched_start < touched_end {
+                    if self.inode.double_indirect_get() == 0 {
+                        metadata += 1;
+                    }
+
+                    let first_l1 = (touched_start - double_start) / indirect_entries;
+                    let last_l1 = (touched_end - 1 - double_start) / indirect_entries;
+                    metadata += last_l1.saturating_sub(first_l1) + 1;
+                }
+            }
+
+            let count = missing_data + metadata;
+            if count == 0 {
+                Vec::new()
+            } else {
+                self.ctx.lock().alloc_zones(count).unwrap_or(Vec::new())
+            }
         };
         // Preserve ascending allocation order while using pop().
         preallocated.reverse();
@@ -420,14 +487,11 @@ impl VfsNodeOps for TFSVfsNode {
         struct WriteOp {
             zone: u32,
             data_offset: usize,
+            block_offset: usize,
             len: usize,
+            new_block: bool,
         }
         let mut write_ops: Vec<WriteOp> = Vec::with_capacity((data.len() / BLOCK_SIZE) + 2);
-
-        let mut direct_zones = [0u32; Inode::DIRECT_SLOT_COUNT];
-        for (i, slot) in direct_zones.iter_mut().enumerate() {
-            *slot = self.inode.direct_slot_get(i);
-        }
 
         while remaining > 0 {
             let block_idx = pos / BLOCK_SIZE;
@@ -438,20 +502,20 @@ impl VfsNodeOps for TFSVfsNode {
             let offset_in_block = pos % BLOCK_SIZE;
             let max_copy = BLOCK_SIZE - offset_in_block;
             let copy_size = core::cmp::min(remaining, max_copy);
+            let mut new_block = false;
 
             if direct_zones[block_idx] == 0 {
                 let zone = get_new_zone(&mut self.ctx)?;
                 direct_zones[block_idx] = zone;
-                if offset_in_block > 0 || copy_size < BLOCK_SIZE {
-                    let zero = [0u8; BLOCK_SIZE];
-                    write_tfs_block(device.lock().as_mut(), zone, &zero).map_err(|_| ())?;
-                }
+                new_block = true;
             }
 
             write_ops.push(WriteOp {
                 zone: direct_zones[block_idx],
                 data_offset: bytes_written,
+                block_offset: offset_in_block,
                 len: copy_size,
+                new_block,
             });
 
             bytes_written += copy_size;
@@ -463,21 +527,23 @@ impl VfsNodeOps for TFSVfsNode {
             let ind_cap = (BLOCK_SIZE / 4) - 1;
             let direct_blocks = direct_zones.len();
 
+            let mut single_indirect_new = false;
             if self.inode.single_indirect_get() == 0 {
                 let zone = get_new_zone(&mut self.ctx)?;
                 self.inode.single_indirect_set(zone);
-                let zero_block = [0u8; BLOCK_SIZE];
-                write_tfs_block(device.lock().as_mut(), zone, &zero_block).map_err(|_| ())?;
+                single_indirect_new = true;
             }
 
             let mut indirect_block = [0u8; BLOCK_SIZE];
-            read_tfs_block(
-                device.lock().as_mut(),
-                self.inode.single_indirect_get(),
-                &mut indirect_block,
-            )
-            .map_err(|_| ())?;
-            let mut indirect_dirty = false;
+            let mut indirect_dirty = single_indirect_new;
+            if !single_indirect_new {
+                read_tfs_block(
+                    device.lock().as_mut(),
+                    self.inode.single_indirect_get(),
+                    &mut indirect_block,
+                )
+                .map_err(|_| ())?;
+            }
 
             while remaining > 0 {
                 let logical_block = pos / BLOCK_SIZE;
@@ -492,6 +558,7 @@ impl VfsNodeOps for TFSVfsNode {
                 let offset_in_block = pos % BLOCK_SIZE;
                 let max_copy = BLOCK_SIZE - offset_in_block;
                 let copy_size = core::cmp::min(remaining, max_copy);
+                let mut new_block = false;
 
                 let entry_off = idx * 4;
                 let mut zone = u32::from_le_bytes(
@@ -502,16 +569,15 @@ impl VfsNodeOps for TFSVfsNode {
                     zone = get_new_zone(&mut self.ctx)?;
                     indirect_block[entry_off..entry_off + 4].copy_from_slice(&zone.to_le_bytes());
                     indirect_dirty = true;
-                    if offset_in_block > 0 || copy_size < BLOCK_SIZE {
-                        let zero = [0u8; BLOCK_SIZE];
-                        write_tfs_block(device.lock().as_mut(), zone, &zero).map_err(|_| ())?;
-                    }
+                    new_block = true;
                 }
 
                 write_ops.push(WriteOp {
                     zone,
                     data_offset: bytes_written,
+                    block_offset: offset_in_block,
                     len: copy_size,
+                    new_block,
                 });
 
                 bytes_written += copy_size;
@@ -533,25 +599,22 @@ impl VfsNodeOps for TFSVfsNode {
             let zone_entries = BLOCK_SIZE / 4;
             let ind_cap = zone_entries - 1;
 
+            let mut double_indirect_new = false;
             if self.inode.double_indirect_get() == 0 {
                 self.inode.double_indirect_set(get_new_zone(&mut self.ctx)?);
-                let zero_block = [0u8; BLOCK_SIZE];
-                write_tfs_block(
-                    device.lock().as_mut(),
-                    self.inode.double_indirect_get(),
-                    &zero_block,
-                )
-                .map_err(|_| ())?;
+                double_indirect_new = true;
             }
 
             let mut double_root = [0u8; BLOCK_SIZE];
-            read_tfs_block(
-                device.lock().as_mut(),
-                self.inode.double_indirect_get(),
-                &mut double_root,
-            )
-            .map_err(|_| ())?;
-            let mut double_root_dirty = false;
+            let mut double_root_dirty = double_indirect_new;
+            if !double_indirect_new {
+                read_tfs_block(
+                    device.lock().as_mut(),
+                    self.inode.double_indirect_get(),
+                    &mut double_root,
+                )
+                .map_err(|_| ())?;
+            }
 
             let mut logical_block = pos / BLOCK_SIZE;
 
@@ -568,19 +631,22 @@ impl VfsNodeOps for TFSVfsNode {
                         .try_into()
                         .unwrap(),
                 );
+                let mut l1_new = false;
 
                 if l1_zone == 0 {
                     l1_zone = get_new_zone(&mut self.ctx)?;
                     double_root[l1_entry_off..l1_entry_off + 4]
                         .copy_from_slice(&l1_zone.to_le_bytes());
                     double_root_dirty = true;
-                    let zero = [0u8; BLOCK_SIZE];
-                    write_tfs_block(device.lock().as_mut(), l1_zone, &zero).map_err(|_| ())?;
+                    l1_new = true;
                 }
 
                 let mut l2_block = [0u8; BLOCK_SIZE];
-                read_tfs_block(device.lock().as_mut(), l1_zone, &mut l2_block).map_err(|_| ())?;
-                let mut l2_dirty = false;
+                let mut l2_dirty = l1_new;
+                if !l1_new {
+                    read_tfs_block(device.lock().as_mut(), l1_zone, &mut l2_block)
+                        .map_err(|_| ())?;
+                }
 
                 let mut l2_idx = rel_blk % zone_entries;
 
@@ -588,6 +654,7 @@ impl VfsNodeOps for TFSVfsNode {
                     let offset_in_block = pos % BLOCK_SIZE;
                     let max_copy = BLOCK_SIZE - offset_in_block;
                     let copy_size = core::cmp::min(remaining, max_copy);
+                    let mut new_block = false;
 
                     let l2_entry_off = l2_idx * 4;
                     let mut data_zone = u32::from_le_bytes(
@@ -599,17 +666,15 @@ impl VfsNodeOps for TFSVfsNode {
                         l2_block[l2_entry_off..l2_entry_off + 4]
                             .copy_from_slice(&data_zone.to_le_bytes());
                         l2_dirty = true;
-                        if offset_in_block > 0 || copy_size < BLOCK_SIZE {
-                            let zero = [0u8; BLOCK_SIZE];
-                            write_tfs_block(device.lock().as_mut(), data_zone, &zero)
-                                .map_err(|_| ())?;
-                        }
+                        new_block = true;
                     }
 
                     write_ops.push(WriteOp {
                         zone: data_zone,
                         data_offset: bytes_written,
+                        block_offset: offset_in_block,
                         len: copy_size,
+                        new_block,
                     });
 
                     bytes_written += copy_size;
@@ -650,6 +715,8 @@ impl VfsNodeOps for TFSVfsNode {
                     if curr.zone == prev.zone + 1
                         && prev.len == BLOCK_SIZE
                         && curr.len == BLOCK_SIZE
+                        && prev.block_offset == 0
+                        && curr.block_offset == 0
                         && prev.data_offset + prev.len == curr.data_offset
                     {
                         j += 1;
@@ -670,13 +737,8 @@ impl VfsNodeOps for TFSVfsNode {
                         .map_err(|_| ())?;
                 } else {
                     let op = &write_ops[i];
-                    let block_offset = if i == 0 && (lba % BLOCK_SIZE != 0) {
-                        lba % BLOCK_SIZE
-                    } else {
-                        0
-                    };
 
-                    if op.len == BLOCK_SIZE && block_offset == 0 {
+                    if op.len == BLOCK_SIZE && op.block_offset == 0 {
                         write_tfs_block(
                             device.lock().as_mut(),
                             op.zone,
@@ -688,10 +750,12 @@ impl VfsNodeOps for TFSVfsNode {
                         .map_err(|_| ())?;
                     } else {
                         let mut buffer = [0u8; BLOCK_SIZE];
-                        if read_tfs_block(device.lock().as_mut(), op.zone, &mut buffer).is_err() {
+                        if !op.new_block
+                            && read_tfs_block(device.lock().as_mut(), op.zone, &mut buffer).is_err()
+                        {
                             return Err(());
                         }
-                        buffer[block_offset..block_offset + op.len]
+                        buffer[op.block_offset..op.block_offset + op.len]
                             .copy_from_slice(&data[op.data_offset..op.data_offset + op.len]);
                         write_tfs_block(device.lock().as_mut(), op.zone, &buffer)
                             .map_err(|_| ())?;
@@ -701,20 +765,15 @@ impl VfsNodeOps for TFSVfsNode {
                 i = j;
             }
         } else {
-            for (idx, op) in write_ops.iter().enumerate() {
+            for op in write_ops.iter() {
                 let mut buffer = [0u8; BLOCK_SIZE];
-                let block_offset = if idx == 0 && (lba % BLOCK_SIZE != 0) {
-                    lba % BLOCK_SIZE
-                } else {
-                    0
-                };
 
-                if op.len < BLOCK_SIZE {
+                if !op.new_block && op.len < BLOCK_SIZE {
                     read_tfs_block(device.lock().as_mut(), op.zone, &mut buffer).map_err(|_| ())?;
                     self.apply_crypto(op.zone as u64, &mut buffer);
                 }
 
-                buffer[block_offset..block_offset + op.len]
+                buffer[op.block_offset..op.block_offset + op.len]
                     .copy_from_slice(&data[op.data_offset..op.data_offset + op.len]);
                 self.apply_crypto(op.zone as u64, &mut buffer);
                 write_tfs_block(device.lock().as_mut(), op.zone, &buffer).map_err(|_| ())?;
