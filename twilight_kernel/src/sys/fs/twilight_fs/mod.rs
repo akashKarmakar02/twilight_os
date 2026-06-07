@@ -7,16 +7,16 @@ pub mod superblock;
 
 use crate::driver;
 use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
-use crate::driver::disk::{BlockDeviceIO, UsbBlkHandle, BLOCK_DEVICE};
+use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO, UsbBlkHandle};
 use crate::driver::timer::cmos::CMOS;
+use crate::sys::fs::MFS;
 use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
-use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
-use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::twilight_fs::FsError::{
     FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode,
 };
+use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
+use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
-use crate::sys::fs::MFS;
 use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -26,8 +26,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::rwlock::RwLock;
 use spin::Mutex;
+use spin::rwlock::RwLock;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
 static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);
@@ -1714,6 +1714,7 @@ impl TwilightFs {
                                 uid: inode.uid,
                                 size: inode.size as usize,
                                 file_type,
+                                mode: inode.mode,
                                 access_time: to_u32_saturating(inode.access_time),
                                 created_time: to_u32_saturating(inode.created_time),
                                 modified_time: to_u32_saturating(inode.modified_time),
@@ -2248,6 +2249,7 @@ impl FileSystem for TwilightFs {
                 Metadata {
                     file_type,
                     size: inode.size as usize,
+                    mode: inode.mode,
                     gid: inode.gid,
                     uid: inode.uid,
                     name: path.split("/").last().unwrap().to_string(),
@@ -2342,6 +2344,7 @@ impl FileSystem for TwilightFs {
                 Ok(Metadata {
                     file_type: FileType::Dir,
                     size: inode.size as usize,
+                    mode: inode.mode,
                     name: name.to_string(),
                     gid: inode.gid,
                     uid: inode.uid,
@@ -2354,6 +2357,7 @@ impl FileSystem for TwilightFs {
                 Ok(Metadata {
                     file_type: FileType::File,
                     size: inode.size as usize,
+                    mode: inode.mode,
                     name: name.to_string(),
                     ino: inode_num,
                     gid: inode.gid,

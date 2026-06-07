@@ -41,6 +41,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_RT_SIGPROCMASK => {
             service::rt_sigprocmask(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize)
         }
+        SYS_RT_SIGSUSPEND => service::rt_sigsuspend(arg1 as usize, arg2 as usize),
         SYS_OPEN => {
             let upath = UserPtr(arg1 as *const u8);
 
@@ -84,6 +85,11 @@ pub extern "sysv64" fn syscall_handler(
         SYS_PIPE => service::pipe(arg1 as usize),
         SYS_SCHED_YIELD => service::sched_yield(),
         SYS_GETPID => service::getpid(),
+        SYS_SETPGID => service::setpgid(arg1 as i32, arg2 as i32),
+        SYS_GETPPID => service::getppid(),
+        SYS_GETPGRP => service::getpgrp(),
+        SYS_GETPGID => service::getpgid(arg1 as i32),
+        SYS_GETSID => service::getsid(arg1 as i32),
         SYS_SOCKET => service::socket(arg1 as i32, arg2 as i32, arg3 as i32),
         SYS_CONNECT => service::connect(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_BIND => service::bind(arg1 as i32, arg2 as usize, arg3 as usize),

@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 use core::{fmt, mem};
 use spin::Mutex;
-use twilight_common::syscall::types::EFAULT;
+use twilight_common::syscall::types::{EFAULT, EINVAL};
 
 /// Wait queue for processes blocked on TTY keyboard input.
 static INPUT_WAIT_QUEUE: WaitQueue = WaitQueue::new();
@@ -22,6 +22,9 @@ const IOCTL_TCGETS: u64 = 0x5401;
 const IOCTL_TCSETS: u64 = 0x5402;
 const IOCTL_TCSETSW: u64 = 0x5403;
 const IOCTL_TCSETSF: u64 = 0x5404;
+const IOCTL_TIOCGPGRP: u64 = 0x540F;
+const IOCTL_TIOCSPGRP: u64 = 0x5410;
+const IOCTL_TIOCSCTTY: u64 = 0x540E;
 
 // Order matches Linux <termios.h> (x86_64/musl)
 pub const VINTR: usize = 0;
@@ -151,6 +154,23 @@ pub struct Tty {
     termios: Termios,
     output_buffer: Mutex<VecDeque<u8>>,
     input_buffer: Mutex<VecDeque<u8>>,
+    foreground_pgid: u16,
+
+    /// State machine for filtering escape sequences in canonical mode input.
+    input_esc_state: InputEscState,
+}
+
+/// Tracks escape sequence parsing on the *input* side (canonical mode only).
+/// When we see \x1b in canonical mode, we buffer bytes until we know
+/// whether it's a CSI sequence (arrow key etc.) — then discard it.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum InputEscState {
+    /// Normal character input.
+    Ground,
+    /// Saw \x1b, waiting for [ or timeout.
+    Esc,
+    /// Inside CSI (\x1b[), waiting for final byte (0x40..0x7E).
+    Csi,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -185,6 +205,8 @@ impl Tty {
             csi_buf: Vec::with_capacity(32),
             sgr_bold: false,
             termios: tios,
+            input_esc_state: InputEscState::Ground,
+            foreground_pgid: 0,
         }
     }
 
@@ -227,10 +249,6 @@ impl Tty {
             // await_io() sets the process to AwaitingIo and context-switches
             // to another runnable process. The keyboard IRQ handler will
             // wake us back via INPUT_WAIT_QUEUE.notify_all().
-            crate::serial_println!(
-                "[tty] pid={} waiting for input, yielding via await_io",
-                crate::sys::proc::id()
-            );
             INPUT_WAIT_QUEUE.prepare_current();
             crate::sys::proc::await_io();
             INPUT_WAIT_QUEUE.finish_wait(crate::sys::proc::id());
@@ -257,18 +275,103 @@ impl Tty {
 
     fn read_canonical(&self, buf: &mut [u8]) -> usize {
         let mut i = 0;
+        // Local escape state for filtering input escape sequences.
+        // In canonical mode, escape sequences (arrow keys etc.) should be
+        // silently discarded — they only become meaningful in raw mode.
+        let mut esc_state = InputEscState::Ground;
 
         while i < buf.len() {
             let c = self.canonicalize_input(self.pop_input_blocking());
 
+            // ── Escape sequence filter ──────────────────────────────
+            // In canonical mode, when the keyboard sends \x1b[A (Up arrow),
+            // we must discard the entire sequence instead of echoing garbage.
+            match esc_state {
+                InputEscState::Ground => {
+                    if c == 0x1B {
+                        esc_state = InputEscState::Esc;
+                        continue; // consume the ESC byte
+                    }
+                }
+                InputEscState::Esc => {
+                    if c == b'[' {
+                        esc_state = InputEscState::Csi;
+                        continue; // consume the '['
+                    } else {
+                        // Not a CSI sequence — discard the lone ESC and
+                        // fall through to process `c` normally.
+                        esc_state = InputEscState::Ground;
+                        // Don't continue; let `c` be processed below.
+                    }
+                }
+                InputEscState::Csi => {
+                    // CSI parameter bytes are 0x30..0x3F, intermediate 0x20..0x2F.
+                    // Final byte is 0x40..0x7E — that terminates the sequence.
+                    if (0x40..=0x7E).contains(&c) {
+                        // Final byte reached — discard the entire sequence.
+                        esc_state = InputEscState::Ground;
+                        continue;
+                    }
+                    // Still in parameter/intermediate bytes — keep consuming.
+                    continue;
+                }
+            }
+
+            // ── VEOF (Ctrl+D) ──────────────────────────────────────
             if c == self.termios.c_cc[VEOF] {
-                // Canonical VEOF: return pending line (or 0 if empty).
                 break;
             }
 
+            // ── ISIG: signal characters ────────────────────────────
+            if self.isig {
+                if c == self.termios.c_cc[VINTR] {
+                    // Ctrl+C: discard input, let the keyboard-level handler
+                    // deal with the actual signal for now.
+                    i = 0;
+                    if self.echo {
+                        crate::print!("^C\n");
+                    }
+                    continue;
+                }
+                if c == self.termios.c_cc[VQUIT] {
+                    i = 0;
+                    if self.echo {
+                        crate::print!("^\\\n");
+                    }
+                    continue;
+                }
+            }
+
             match c {
+                // ── VERASE (Backspace / DEL) ───────────────────────
                 0x08 | 0x7F => {
                     if i > 0 {
+                        i -= 1;
+                        if self.echo {
+                            crate::print!("\x08 \x08");
+                        }
+                    }
+                }
+                // ── VKILL (Ctrl+U): erase entire line ─────────────
+                c if c == self.termios.c_cc[VKILL] => {
+                    if self.echo {
+                        // Erase all echoed characters by backspacing over them.
+                        for _ in 0..i {
+                            crate::print!("\x08 \x08");
+                        }
+                    }
+                    i = 0;
+                }
+                // ── VWERASE (Ctrl+W): erase last word ─────────────
+                c if c == self.termios.c_cc[VWERASE] => {
+                    // Skip trailing whitespace, then delete until next whitespace.
+                    while i > 0 && buf[i - 1] == b' ' {
+                        i -= 1;
+                        if self.echo {
+                            crate::print!("\x08 \x08");
+                        }
+                    }
+                    while i > 0 && buf[i - 1] != b' ' {
                         i -= 1;
                         if self.echo {
                             crate::print!("\x08 \x08");
@@ -878,6 +981,32 @@ impl VfsNodeOps for Tty {
                 if cmd == IOCTL_TCSETSF {
                     self.input_buffer.lock().clear();
                 }
+            }
+            IOCTL_TIOCGPGRP => {
+                if arg == 0 {
+                    return Ok(-(EFAULT as i64));
+                }
+                let pgid = if self.foreground_pgid == 0 {
+                    crate::sys::proc::current_process_group_id()
+                } else {
+                    self.foreground_pgid
+                };
+                unsafe {
+                    *(arg as *mut i32) = pgid as i32;
+                }
+            }
+            IOCTL_TIOCSPGRP => {
+                if arg == 0 {
+                    return Ok(-(EFAULT as i64));
+                }
+                let pgid = unsafe { *(arg as *const i32) };
+                if pgid <= 0 || pgid > u16::MAX as i32 {
+                    return Ok(-(EINVAL as i64));
+                }
+                self.foreground_pgid = pgid as u16;
+            }
+            IOCTL_TIOCSCTTY => {
+                // Set controlling terminal. Accept as no-op.
             }
             _ => {
                 return Ok(0);

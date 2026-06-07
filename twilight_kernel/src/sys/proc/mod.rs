@@ -317,6 +317,8 @@ pub struct Process {
     pub page_table_frame: PhysFrame,
     pub pid: u16,
     pub parent_pid: u16,
+    pub pgid: u16,
+    pub sid: u16,
     pub state: ProcessState,
     pub addr_size_vec: Vec<(u64, usize)>,
     pub pwd: String,
@@ -446,6 +448,7 @@ impl Process {
 
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let proc_mm = Box::new(ProcMM::new(max_end as usize));
+        let sid = process_session_id(parent_pid).unwrap_or(pid);
 
         let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
 
@@ -478,6 +481,8 @@ impl Process {
             fd_table: Vec::new(),
             proc_mm,
             parent_pid,
+            pgid: pid,
+            sid,
             stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
             stdio_fd_flags: [0; 3],
             stdio_target: [-1; 3],
@@ -813,6 +818,8 @@ impl Process {
             fs_base: live_fs_base,
             proc_mm: self.proc_mm.clone(), // Need to implement Clone for ProcMM or manually deep copy
             parent_pid: self.pid,
+            pgid: self.pgid,
+            sid: self.sid,
             stdio_flags: self.stdio_flags,
             stdio_fd_flags: self.stdio_fd_flags,
             stdio_target: self.stdio_target,
@@ -841,6 +848,27 @@ impl Process {
 
 pub fn id() -> u16 {
     PID.load(Ordering::SeqCst)
+}
+
+pub fn process_group_id(pid: u16) -> Option<u16> {
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut()? };
+    table
+        .proc_list
+        .iter()
+        .find(|p| p.pid == pid)
+        .map(|p| p.pgid)
+}
+
+pub fn process_session_id(pid: u16) -> Option<u16> {
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut()? };
+    table.proc_list.iter().find(|p| p.pid == pid).map(|p| p.sid)
+}
+
+pub fn current_process_group_id() -> u16 {
+    let current = id();
+    process_group_id(current).unwrap_or(current)
 }
 
 pub fn poll_wait_queue() -> &'static WaitQueue {
@@ -1243,6 +1271,8 @@ pub fn init() {
                 fs_base: VirtAddr::zero(),
                 proc_mm,
                 parent_pid: 1,
+                pgid: pid,
+                sid: pid,
                 stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
                 stdio_fd_flags: [0; 3],
                 stdio_target: [-1; 3],
@@ -1267,6 +1297,8 @@ pub fn init() {
         gs_base: VirtAddr::zero(),
         proc_mm: Box::new(ProcMM::new(0)),
         parent_pid: 1,
+        pgid: 1,
+        sid: 1,
         pid: 1,
         pwd: String::from("/"),
         context_switch_rsp: VirtAddr::zero(),

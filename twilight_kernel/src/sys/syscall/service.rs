@@ -120,12 +120,7 @@ fn check_encrypted_home_access(path: &str) -> Result<(), i64> {
 #[inline(always)]
 fn fill_stat_from_meta(out: &mut Stat, meta: &sys::fs::vfs::Metadata) {
     out.st_size = meta.size as i64;
-    out.st_mode = match meta.file_type {
-        FileType::File => 0o100666,        // regular file: rw-rw-rw-
-        FileType::Dir => 0o040755,         // directory: rwxr-xr-x
-        FileType::CharDevice => 0o020666,  // char device: rw-rw-rw-
-        FileType::BlockDevice => 0o060660, // block device: rw-rw----
-    };
+    out.st_mode = meta.mode as u32;
     out.st_uid = meta.uid;
     out.st_gid = meta.gid;
     out.st_ino = meta.ino as u64;
@@ -1820,12 +1815,7 @@ pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
                 let metadata = node.metadata.clone();
 
                 user_stat.st_size = metadata.size as i64;
-                user_stat.st_mode = match metadata.file_type {
-                    FileType::File => 0o100666,
-                    FileType::Dir => 0o040755,
-                    FileType::CharDevice => 0o020666,
-                    FileType::BlockDevice => 0o060660,
-                };
+                user_stat.st_mode = metadata.mode as u32;
                 user_stat.st_uid = node.metadata.uid;
                 user_stat.st_gid = node.metadata.gid;
                 user_stat.st_ino = metadata.ino as u64;
@@ -3189,6 +3179,79 @@ pub fn getpid() -> i64 {
     crate::sys::proc::id() as i64
 }
 
+pub fn getppid() -> i64 {
+    let current_pid = crate::sys::proc::id();
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    match table.proc_list.iter().find(|p| p.pid == current_pid) {
+        Some(process) => process.parent_pid as i64,
+        None => -(ESRCH as i64),
+    }
+}
+
+pub fn getpgrp() -> i64 {
+    getpgid(0)
+}
+
+pub fn getpgid(pid: i32) -> i64 {
+    if pid < 0 || pid > u16::MAX as i32 {
+        return -(EINVAL as i64);
+    }
+
+    let target_pid = if pid == 0 {
+        crate::sys::proc::id()
+    } else {
+        pid as u16
+    };
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    match table.proc_list.iter().find(|p| p.pid == target_pid) {
+        Some(process) => process.pgid as i64,
+        None => -(ESRCH as i64),
+    }
+}
+
+pub fn setpgid(pid: i32, pgid: i32) -> i64 {
+    if pid < 0 || pgid < 0 || pid > u16::MAX as i32 || pgid > u16::MAX as i32 {
+        return -(EINVAL as i64);
+    }
+
+    let current_pid = crate::sys::proc::id();
+    let target_pid = if pid == 0 { current_pid } else { pid as u16 };
+    let new_pgid = if pgid == 0 { target_pid } else { pgid as u16 };
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    match table.proc_list.iter_mut().find(|p| p.pid == target_pid) {
+        Some(process) => {
+            process.pgid = new_pgid;
+            0
+        }
+        None => -(ESRCH as i64),
+    }
+}
+
+pub fn getsid(pid: i32) -> i64 {
+    if pid < 0 || pid > u16::MAX as i32 {
+        return -(EINVAL as i64);
+    }
+
+    let target_pid = if pid == 0 {
+        crate::sys::proc::id()
+    } else {
+        pid as u16
+    };
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    match table.proc_list.iter().find(|p| p.pid == target_pid) {
+        Some(process) => process.sid as i64,
+        None => -(ESRCH as i64),
+    }
+}
+
 pub fn rt_sigaction(_signum: i32, _act: usize, _oldact: usize, _sigsetsize: usize) -> i64 {
     // No signal support yet; report success so glibc can proceed.
     0
@@ -3200,6 +3263,13 @@ pub fn rt_sigprocmask(_how: i32, _set: usize, oldset: usize, sigsetsize: usize) 
         unsafe { core::ptr::write_bytes(oldset as *mut u8, 0, sigsetsize) };
     }
     0
+}
+
+pub fn rt_sigsuspend(_mask: usize, _sigsetsize: usize) -> i64 {
+    // No signal delivery yet. Linux rt_sigsuspend only returns after a signal
+    // handler runs, with -EINTR. Return that now so libc/shell wait loops can
+    // re-check child/job state instead of spinning on ENOSYS.
+    -(EINTR as i64)
 }
 
 pub fn tgkill(tgid: i32, tid: i32, _sig: i32) -> i64 {

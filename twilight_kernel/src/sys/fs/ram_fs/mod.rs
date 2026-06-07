@@ -135,11 +135,17 @@ impl InitramfsFs {
             Node::File { data } => (FileType::File, data.len()),
             Node::Symlink { target } => (FileType::File, target.len()),
         };
+        let mode = match node {
+            Node::Dir { .. } => 0o040755,
+            Node::File { .. } => 0o100777,
+            Node::Symlink { .. } => 0o120777,
+        };
 
         Some(Metadata {
             ino,
             name: name.to_string(),
             file_type,
+            mode,
             size,
             created_time: 0,
             uid: 0,
