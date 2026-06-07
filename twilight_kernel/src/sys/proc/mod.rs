@@ -153,8 +153,24 @@ pub enum ProcessState {
     Running,
     Sleeping,
     Waiting,
+    SignalWait,
     AwaitingIo,
+    Stopped,
     Dead,
+}
+
+pub const SIGNAL_COUNT: usize = 65;
+pub const SIGCHLD: usize = 17;
+pub const SIGKILL: usize = 9;
+pub const SIGSTOP: usize = 19;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SignalAction {
+    pub handler: u64,
+    pub mask: [u64; 2],
+    pub flags: u64,
+    pub restorer: u64,
 }
 
 pub struct ProcessTable {
@@ -329,11 +345,51 @@ pub struct Process {
     pub stdio_target: [i32; 3],
     pub proc_mm: Box<ProcMM>,
     pub exit_code: i32,
+    pub wait_status: i32,
+    pub wait_reported: bool,
     pub preempt_frame: u64, // saved RSP to PreemptFrame on this task's kernel stack
     pub pending_io: bool,
+    pub signal_actions: [SignalAction; SIGNAL_COUNT],
+    pub signal_mask: [u64; 2],
+    pub pending_signals: u64,
+    pub sigsuspend_saved_mask: [u64; 2],
+    pub in_sigsuspend: bool,
 }
 
 impl Process {
+    pub fn queue_signal(&mut self, sig: usize) {
+        if !(1..=64).contains(&sig) {
+            return;
+        }
+        self.pending_signals |= signal_bit(sig);
+        if matches!(
+            self.state,
+            ProcessState::Waiting | ProcessState::SignalWait | ProcessState::AwaitingIo
+        ) {
+            self.state = ProcessState::Running;
+            self.pending_io = false;
+        }
+    }
+
+    pub fn has_unblocked_signal(&self) -> bool {
+        self.next_unblocked_signal().is_some()
+    }
+
+    pub fn next_unblocked_signal(&self) -> Option<usize> {
+        let unblocked = self.pending_signals & !self.signal_mask[0];
+        if unblocked == 0 {
+            None
+        } else {
+            Some(unblocked.trailing_zeros() as usize + 1)
+        }
+    }
+
+    pub fn dequeue_signal(&mut self, sig: usize) {
+        if (1..=64).contains(&sig) {
+            self.pending_signals &= !signal_bit(sig);
+        }
+    }
+
     pub fn new(
         content_buf: Vec<u8>,
         pwd: &str,
@@ -487,8 +543,15 @@ impl Process {
             stdio_fd_flags: [0; 3],
             stdio_target: [-1; 3],
             exit_code: 0,
+            wait_status: 0,
+            wait_reported: false,
             preempt_frame: 0,
             pending_io: false,
+            signal_actions: [SignalAction::default(); SIGNAL_COUNT],
+            signal_mask: [0; 2],
+            pending_signals: 0,
+            sigsuspend_saved_mask: [0; 2],
+            in_sigsuspend: false,
         };
         Ok(p)
     }
@@ -824,8 +887,15 @@ impl Process {
             stdio_fd_flags: self.stdio_fd_flags,
             stdio_target: self.stdio_target,
             exit_code: 0,
+            wait_status: 0,
+            wait_reported: false,
             preempt_frame: 0,
             pending_io: false,
+            signal_actions: self.signal_actions,
+            signal_mask: self.signal_mask,
+            pending_signals: 0,
+            sigsuspend_saved_mask: [0; 2],
+            in_sigsuspend: false,
         };
 
         crate::serial_println!("[fork] child={} ready", pid);
@@ -871,6 +941,23 @@ pub fn current_process_group_id() -> u16 {
     process_group_id(current).unwrap_or(current)
 }
 
+#[inline]
+pub fn signal_bit(sig: usize) -> u64 {
+    1u64 << (sig - 1)
+}
+
+pub fn queue_signal(pid: u16, sig: usize) -> bool {
+    #[allow(static_mut_refs)]
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return false;
+    };
+    let Some(process) = table.get_process(pid) else {
+        return false;
+    };
+    process.queue_signal(sig);
+    true
+}
+
 pub fn poll_wait_queue() -> &'static WaitQueue {
     &POLL_WAIT_QUEUE
 }
@@ -897,12 +984,19 @@ pub fn exit(code: i32) {
     crate::serial_println!("[exit] pid={} parent={}", current_pid, parent_pid);
     slice[cur_idx].state = ProcessState::Dead;
     slice[cur_idx].exit_code = code;
+    slice[cur_idx].wait_status = (code & 0xff) << 8;
+    slice[cur_idx].wait_reported = false;
 
-    if let Some(parent_idx) = find_process_index(slice, parent_pid)
-        && matches!(slice[parent_idx].state, ProcessState::Waiting)
-    {
-        crate::serial_println!("[exit] wake parent pid={}", parent_pid);
-        slice[parent_idx].state = ProcessState::Running;
+    if let Some(parent_idx) = find_process_index(slice, parent_pid) {
+        slice[parent_idx].queue_signal(SIGCHLD);
+        if matches!(
+            slice[parent_idx].state,
+            ProcessState::Waiting | ProcessState::SignalWait | ProcessState::AwaitingIo
+        ) {
+            crate::serial_println!("[exit] wake parent pid={}", parent_pid);
+            slice[parent_idx].state = ProcessState::Running;
+            slice[parent_idx].pending_io = false;
+        }
     }
 
     let next_idx = find_process_index(slice, parent_pid)
@@ -1031,7 +1125,7 @@ pub fn wake_process(pid: u16) {
             process.state = ProcessState::Running;
             process.pending_io = false;
         }
-        ProcessState::Dead => {}
+        ProcessState::Dead | ProcessState::Stopped => {}
         _ => {
             process.pending_io = true;
         }
@@ -1277,8 +1371,15 @@ pub fn init() {
                 stdio_fd_flags: [0; 3],
                 stdio_target: [-1; 3],
                 exit_code: 0,
+                wait_status: 0,
+                wait_reported: false,
                 preempt_frame: 0,
                 pending_io: false,
+                signal_actions: [SignalAction::default(); SIGNAL_COUNT],
+                signal_mask: [0; 2],
+                pending_signals: 0,
+                sigsuspend_saved_mask: [0; 2],
+                in_sigsuspend: false,
             })
     }
 
@@ -1314,8 +1415,15 @@ pub fn init() {
         stdio_fd_flags: [0; 3],
         stdio_target: [-1; 3],
         exit_code: 0,
+        wait_status: 0,
+        wait_reported: false,
         preempt_frame: 0,
         pending_io: false,
+        signal_actions: [SignalAction::default(); SIGNAL_COUNT],
+        signal_mask: [0; 2],
+        pending_signals: 0,
+        sigsuspend_saved_mask: [0; 2],
+        in_sigsuspend: false,
     };
 
     idle_task.gs_base = VirtAddr::new(&*idle_task.kernel_gs as *const _ as u64);

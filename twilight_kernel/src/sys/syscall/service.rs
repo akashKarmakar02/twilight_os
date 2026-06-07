@@ -8,7 +8,10 @@ use crate::sys::fs::vfs::{FileType, VFS, VfsNodeOps};
 use crate::sys::kmsg::IOCTL_KMSG_GET_HEAD;
 use crate::sys::net::bind_map::GLOBAL_PORT_MAP;
 use crate::sys::net::socket::{SocketFile, tcp::TcpSocket, udp::UdpSocket};
-use crate::sys::proc::{FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, USER_STACK_SIZE};
+use crate::sys::proc::{
+    FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, SIGCHLD, SIGKILL, SIGSTOP,
+    SignalAction, USER_STACK_SIZE, signal_bit,
+};
 use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
 use crate::task::executor::halt;
@@ -1105,6 +1108,7 @@ pub fn fork(
 pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i64 {
     let current_pid = crate::sys::proc::id();
     let wnohang = 1;
+    let wuntraced = 2;
     crate::serial_println!(
         "[wait4] pid={} target={} options={:#x}",
         current_pid,
@@ -1114,8 +1118,9 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
 
     loop {
         let mut reaped_pid = None;
-        let mut exit_code = 0;
+        let mut wait_status = 0;
         let mut has_children = false;
+        let mut stopped_pid = None;
 
         {
             #[allow(static_mut_refs)]
@@ -1131,7 +1136,14 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
                         has_children = true;
                         if matches!(p.state, crate::sys::proc::ProcessState::Dead) {
                             remove_idx = Some(i);
-                            exit_code = p.exit_code;
+                            wait_status = p.wait_status;
+                            break;
+                        } else if (options & wuntraced) != 0
+                            && matches!(p.state, crate::sys::proc::ProcessState::Stopped)
+                            && !p.wait_reported
+                        {
+                            stopped_pid = Some(i);
+                            wait_status = p.wait_status;
                             break;
                         }
                     }
@@ -1143,13 +1155,18 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
                     reaped_pid = Some(p.pid);
                     let table_frame = p.page_table_frame;
                     crate::serial_println!(
-                        "[wait4] pid={} reap child={} code={}",
+                        "[wait4] pid={} reap child={} status={:#x}",
                         current_pid,
                         p.pid,
-                        p.exit_code,
+                        p.wait_status,
                     );
                     p.cleanup(table_frame);
                     core::mem::forget(p);
+                }
+            } else if let Some(idx) = stopped_pid {
+                if let Some(p) = table.proc_list.get_mut(idx) {
+                    p.wait_reported = true;
+                    reaped_pid = Some(p.pid);
                 }
             } else if !has_children {
                 crate::serial_println!("[wait4] pid={} no children", current_pid);
@@ -1160,8 +1177,7 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
         if let Some(rpid) = reaped_pid {
             if status_ptr != 0 {
                 let status_ref = unsafe { &mut *(status_ptr as *mut i32) };
-                // status format: (exit_code << 8) & 0xFF00
-                *status_ref = (exit_code << 8) & 0xFF00;
+                *status_ref = wait_status;
             }
             return rpid as i64;
         }
@@ -3179,6 +3195,251 @@ pub fn getpid() -> i64 {
     crate::sys::proc::id() as i64
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Rusage {
+    ru_utime: Timeval,
+    ru_stime: Timeval,
+    ru_maxrss: i64,
+    ru_ixrss: i64,
+    ru_idrss: i64,
+    ru_isrss: i64,
+    ru_minflt: i64,
+    ru_majflt: i64,
+    ru_nswap: i64,
+    ru_inblock: i64,
+    ru_oublock: i64,
+    ru_msgsnd: i64,
+    ru_msgrcv: i64,
+    ru_nsignals: i64,
+    ru_nvcsw: i64,
+    ru_nivcsw: i64,
+    reserved: [i64; 16],
+}
+
+pub fn getrusage(who: i32, usage: usize) -> i64 {
+    const RUSAGE_CHILDREN: i32 = -1;
+    const RUSAGE_SELF: i32 = 0;
+    const RUSAGE_THREAD: i32 = 1;
+
+    if usage == 0 {
+        return -(EFAULT as i64);
+    }
+    if !matches!(who, RUSAGE_CHILDREN | RUSAGE_SELF | RUSAGE_THREAD) {
+        return -(EINVAL as i64);
+    }
+
+    unsafe {
+        *(usage as *mut Rusage) = Rusage::default();
+    }
+    0
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct LinuxSigAction {
+    handler: u64,
+    flags: u64,
+    restorer: u64,
+    mask: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct UserSignalFrame {
+    magic: u64,
+    old_mask: [u64; 2],
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    rbp: u64,
+    rbx: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rdi: u64,
+    rsi: u64,
+    rdx: u64,
+    rcx: u64,
+    rax: u64,
+    rip: u64,
+    rsp: u64,
+    rflags: u64,
+}
+
+const SIGNAL_FRAME_MAGIC: u64 = 0x5457_5349_4746_524d;
+const SIG_IGN: u64 = 1;
+const SIGHUP: usize = 1;
+const SIGINT: usize = 2;
+const SIGQUIT: usize = 3;
+const SIGPIPE: usize = 13;
+const SIGALRM: usize = 14;
+const SIGTERM: usize = 15;
+const SIGCONT: usize = 18;
+const SIGTSTP: usize = 20;
+const SIGTTIN: usize = 21;
+const SIGTTOU: usize = 22;
+const SA_NODEFER: u64 = 0x4000_0000;
+
+fn valid_signal(sig: i32) -> bool {
+    (0..=64).contains(&sig)
+}
+
+fn is_fatal_default(sig: usize) -> bool {
+    matches!(
+        sig,
+        SIGHUP | SIGINT | SIGQUIT | SIGKILL | SIGPIPE | SIGALRM | SIGTERM
+    )
+}
+
+fn is_stop_default(sig: usize) -> bool {
+    matches!(sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU)
+}
+
+fn linux_sigaction_from(action: SignalAction) -> LinuxSigAction {
+    LinuxSigAction {
+        handler: action.handler,
+        flags: action.flags,
+        restorer: action.restorer,
+        mask: action.mask[0],
+    }
+}
+
+fn signal_action_from(action: LinuxSigAction) -> SignalAction {
+    SignalAction {
+        handler: action.handler,
+        mask: [action.mask & !signal_bit(SIGKILL) & !signal_bit(SIGSTOP), 0],
+        flags: action.flags,
+        restorer: action.restorer,
+    }
+}
+
+fn notify_parent_for_child_event(processes: &mut [Process], parent_pid: u16) {
+    if let Some(parent) = processes.iter_mut().find(|p| p.pid == parent_pid) {
+        parent.queue_signal(SIGCHLD);
+    }
+}
+
+fn apply_signal_to_process(process: &mut Process, sig: usize) -> Option<u16> {
+    if sig == 0 {
+        return None;
+    }
+
+    if sig == SIGCONT {
+        if matches!(process.state, crate::sys::proc::ProcessState::Stopped) {
+            process.state = crate::sys::proc::ProcessState::Running;
+            process.wait_status = 0xffff;
+            process.wait_reported = false;
+        }
+        process.queue_signal(sig);
+        return Some(process.parent_pid);
+    }
+
+    let action = process.signal_actions[sig];
+    if action.handler == SIG_IGN && sig != SIGKILL && sig != SIGSTOP {
+        return None;
+    }
+    if action.handler > SIG_IGN {
+        process.queue_signal(sig);
+        return None;
+    }
+
+    if is_stop_default(sig) {
+        process.state = crate::sys::proc::ProcessState::Stopped;
+        process.wait_status = ((sig as i32) << 8) | 0x7f;
+        process.wait_reported = false;
+        return Some(process.parent_pid);
+    }
+
+    if is_fatal_default(sig) {
+        process.state = crate::sys::proc::ProcessState::Dead;
+        process.wait_status = sig as i32 & 0x7f;
+        process.wait_reported = false;
+        return Some(process.parent_pid);
+    }
+
+    process.queue_signal(sig);
+    None
+}
+
+pub fn kill(pid: i32, sig: i32) -> i64 {
+    if !valid_signal(sig) {
+        return -(EINVAL as i64);
+    }
+
+    let current_pid = crate::sys::proc::id();
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let current_pgid = table
+        .proc_list
+        .iter()
+        .find(|p| p.pid == current_pid)
+        .map(|p| p.pgid)
+        .unwrap_or(current_pid);
+    let target_pgid = if pid < -1 {
+        match pid.checked_neg() {
+            Some(pgid) if pgid <= u16::MAX as i32 => Some(pgid as u16),
+            _ => return -(EINVAL as i64),
+        }
+    } else {
+        None
+    };
+
+    let targets = table
+        .proc_list
+        .iter()
+        .filter(|p| match pid {
+            n if n > 0 && n <= u16::MAX as i32 => p.pid == n as u16,
+            n if n > 0 => false,
+            0 => p.pgid == current_pgid,
+            -1 => p.pid > 1,
+            _ => p.pgid == target_pgid.unwrap(),
+        })
+        .map(|p| p.pid)
+        .collect::<Vec<u16>>();
+
+    if targets.is_empty() {
+        return -(ESRCH as i64);
+    }
+    if sig == 0 {
+        return 0;
+    }
+
+    let mut parents_to_notify = Vec::new();
+    let slice = table.proc_list.make_contiguous();
+    for target in targets {
+        if let Some(process) = slice.iter_mut().find(|p| p.pid == target) {
+            if let Some(parent_pid) = apply_signal_to_process(process, sig as usize) {
+                parents_to_notify.push(parent_pid);
+            }
+        }
+    }
+    for parent_pid in parents_to_notify {
+        notify_parent_for_child_event(slice, parent_pid);
+    }
+    let current_should_yield = slice.iter().any(|p| {
+        p.pid == current_pid
+            && matches!(
+                p.state,
+                crate::sys::proc::ProcessState::Dead | crate::sys::proc::ProcessState::Stopped
+            )
+    });
+    if current_should_yield {
+        crate::sys::proc::schedule_now();
+    }
+
+    0
+}
+
 pub fn getppid() -> i64 {
     let current_pid = crate::sys::proc::id();
 
@@ -3252,24 +3513,259 @@ pub fn getsid(pid: i32) -> i64 {
     }
 }
 
-pub fn rt_sigaction(_signum: i32, _act: usize, _oldact: usize, _sigsetsize: usize) -> i64 {
-    // No signal support yet; report success so glibc can proceed.
+pub fn rt_sigaction(signum: i32, act: usize, oldact: usize, _sigsetsize: usize) -> i64 {
+    if !(1..=64).contains(&signum) || signum as usize == SIGKILL || signum as usize == SIGSTOP {
+        return -(EINVAL as i64);
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let idx = signum as usize;
+    if oldact != 0 {
+        unsafe {
+            *(oldact as *mut LinuxSigAction) = linux_sigaction_from(process.signal_actions[idx]);
+        }
+    }
+    if act != 0 {
+        let user_action = unsafe { *(act as *const LinuxSigAction) };
+        process.signal_actions[idx] = signal_action_from(user_action);
+    }
+
     0
 }
 
-pub fn rt_sigprocmask(_how: i32, _set: usize, oldset: usize, sigsetsize: usize) -> i64 {
-    // No signal masks yet; return an empty mask.
-    if oldset != 0 && sigsetsize != 0 {
-        unsafe { core::ptr::write_bytes(oldset as *mut u8, 0, sigsetsize) };
+pub fn rt_sigprocmask(how: i32, set: usize, oldset: usize, sigsetsize: usize) -> i64 {
+    let copy_len = core::cmp::min(sigsetsize, core::mem::size_of::<[u64; 2]>());
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    if oldset != 0 && copy_len != 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                process.signal_mask.as_ptr() as *const u8,
+                oldset as *mut u8,
+                copy_len,
+            )
+        };
+    }
+    if set != 0 {
+        let mut new_mask = [0u64; 2];
+        if copy_len != 0 {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    set as *const u8,
+                    new_mask.as_mut_ptr() as *mut u8,
+                    copy_len,
+                )
+            };
+        }
+        new_mask[0] &= !signal_bit(SIGKILL) & !signal_bit(SIGSTOP);
+        match how {
+            0 => process.signal_mask[0] |= new_mask[0],
+            1 => process.signal_mask[0] &= !new_mask[0],
+            2 => process.signal_mask = new_mask,
+            _ => return -(EINVAL as i64),
+        }
     }
     0
 }
 
-pub fn rt_sigsuspend(_mask: usize, _sigsetsize: usize) -> i64 {
-    // No signal delivery yet. Linux rt_sigsuspend only returns after a signal
-    // handler runs, with -EINTR. Return that now so libc/shell wait loops can
-    // re-check child/job state instead of spinning on ENOSYS.
+pub fn rt_sigsuspend(mask: usize, sigsetsize: usize) -> i64 {
+    if mask == 0 {
+        return -(EFAULT as i64);
+    }
+    let copy_len = core::cmp::min(sigsetsize, core::mem::size_of::<[u64; 2]>());
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let mut new_mask = [0u64; 2];
+    if copy_len != 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                mask as *const u8,
+                new_mask.as_mut_ptr() as *mut u8,
+                copy_len,
+            )
+        };
+    }
+    new_mask[0] &= !signal_bit(SIGKILL) & !signal_bit(SIGSTOP);
+    process.sigsuspend_saved_mask = process.signal_mask;
+    process.signal_mask = new_mask;
+    process.in_sigsuspend = true;
+
+    if !process.has_unblocked_signal() {
+        process.state = crate::sys::proc::ProcessState::SignalWait;
+        crate::sys::proc::schedule_now();
+    }
+
     -(EINTR as i64)
+}
+
+pub fn deliver_pending_signal(
+    stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
+    regs: &mut crate::arch::x86_64::idt::Registers,
+) {
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return;
+    };
+    let Some(sig) = process.next_unblocked_signal() else {
+        return;
+    };
+
+    let action = process.signal_actions[sig];
+    if action.handler <= SIG_IGN || action.restorer == 0 {
+        process.dequeue_signal(sig);
+        if process.in_sigsuspend {
+            process.signal_mask = process.sigsuspend_saved_mask;
+            process.in_sigsuspend = false;
+        }
+        return;
+    }
+
+    process.dequeue_signal(sig);
+    let effective_mask = process.signal_mask;
+    let old_mask = if process.in_sigsuspend {
+        process.in_sigsuspend = false;
+        process.sigsuspend_saved_mask
+    } else {
+        process.signal_mask
+    };
+
+    let old_rsp = stack_frame.stack_pointer.as_u64();
+    let frame_addr = (old_rsp - core::mem::size_of::<UserSignalFrame>() as u64) & !0xf;
+    let ret_slot = frame_addr - 8;
+    let ret_addr = ret_slot as *mut u64;
+    let frame_ptr = frame_addr as *mut UserSignalFrame;
+
+    unsafe {
+        *ret_addr = action.restorer;
+        *frame_ptr = UserSignalFrame {
+            magic: SIGNAL_FRAME_MAGIC,
+            old_mask,
+            r15: regs.r15,
+            r14: regs.r14,
+            r13: regs.r13,
+            r12: regs.r12,
+            rbp: regs.rbp,
+            rbx: regs.rbx,
+            r11: regs.r11,
+            r10: regs.r10,
+            r9: regs.r9,
+            r8: regs.r8,
+            rdi: regs.rdi,
+            rsi: regs.rsi,
+            rdx: regs.rdx,
+            rcx: regs.rcx,
+            rax: regs.rax,
+            rip: stack_frame.instruction_pointer.as_u64(),
+            rsp: old_rsp,
+            rflags: stack_frame.cpu_flags.bits(),
+        };
+    }
+
+    process.signal_mask = [
+        effective_mask[0] | action.mask[0],
+        effective_mask[1] | action.mask[1],
+    ];
+    if (action.flags & SA_NODEFER) == 0 {
+        process.signal_mask[0] |= signal_bit(sig);
+    }
+    process.signal_mask[0] &= !signal_bit(SIGKILL) & !signal_bit(SIGSTOP);
+
+    regs.rdi = sig as u64;
+    regs.rsi = 0;
+    regs.rdx = 0;
+
+    unsafe {
+        let frame_value =
+            stack_frame as *mut _ as *mut x86_64::structures::idt::InterruptStackFrameValue;
+        (*frame_value).instruction_pointer = x86_64::VirtAddr::new(action.handler);
+        (*frame_value).stack_pointer = x86_64::VirtAddr::new(ret_slot);
+    }
+}
+
+pub fn rt_sigreturn(
+    stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
+    regs: &mut crate::arch::x86_64::idt::Registers,
+) -> bool {
+    let frame_addr = stack_frame.stack_pointer.as_u64();
+    let frame_ptr = frame_addr as *const UserSignalFrame;
+    let frame = unsafe { *frame_ptr };
+    if frame.magic != SIGNAL_FRAME_MAGIC {
+        return false;
+    }
+
+    regs.r15 = frame.r15;
+    regs.r14 = frame.r14;
+    regs.r13 = frame.r13;
+    regs.r12 = frame.r12;
+    regs.rbp = frame.rbp;
+    regs.rbx = frame.rbx;
+    regs.r11 = frame.r11;
+    regs.r10 = frame.r10;
+    regs.r9 = frame.r9;
+    regs.r8 = frame.r8;
+    regs.rdi = frame.rdi;
+    regs.rsi = frame.rsi;
+    regs.rdx = frame.rdx;
+    regs.rcx = frame.rcx;
+    regs.rax = frame.rax;
+
+    #[allow(static_mut_refs)]
+    if let Some(process) = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    } {
+        process.signal_mask = frame.old_mask;
+        process.signal_mask[0] &= !signal_bit(SIGKILL) & !signal_bit(SIGSTOP);
+    }
+
+    unsafe {
+        let frame_value =
+            stack_frame as *mut _ as *mut x86_64::structures::idt::InterruptStackFrameValue;
+        (*frame_value).instruction_pointer = x86_64::VirtAddr::new(frame.rip);
+        (*frame_value).stack_pointer = x86_64::VirtAddr::new(frame.rsp);
+        (*frame_value).cpu_flags =
+            x86_64::registers::rflags::RFlags::from_bits_truncate(frame.rflags);
+    }
+
+    true
 }
 
 pub fn tgkill(tgid: i32, tid: i32, _sig: i32) -> i64 {
