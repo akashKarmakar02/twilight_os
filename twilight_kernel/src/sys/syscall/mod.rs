@@ -26,6 +26,7 @@ pub extern "sysv64" fn syscall_handler(
     let arg5 = regs.r8;
     let arg6 = regs.r9;
 
+    let mut restored_from_signal = false;
     let res = match syscall_number {
         SYS_READ => {
             let ptr = arg2 as *mut u8;
@@ -41,6 +42,16 @@ pub extern "sysv64" fn syscall_handler(
         SYS_RT_SIGPROCMASK => {
             service::rt_sigprocmask(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize)
         }
+        SYS_RT_SIGRETURN => {
+            restored_from_signal = service::rt_sigreturn(_stack_frame, regs);
+            if restored_from_signal {
+                0
+            } else {
+                -(EFAULT as i64)
+            }
+        }
+        SYS_RT_SIGSUSPEND => service::rt_sigsuspend(arg1 as usize, arg2 as usize),
+        SYS_SIGALTSTACK => service::sigaltstack(arg1 as usize, arg2 as usize),
         SYS_OPEN => {
             let upath = UserPtr(arg1 as *const u8);
 
@@ -84,6 +95,11 @@ pub extern "sysv64" fn syscall_handler(
         SYS_PIPE => service::pipe(arg1 as usize),
         SYS_SCHED_YIELD => service::sched_yield(),
         SYS_GETPID => service::getpid(),
+        SYS_SETPGID => service::setpgid(arg1 as i32, arg2 as i32),
+        SYS_GETPPID => service::getppid(),
+        SYS_GETPGRP => service::getpgrp(),
+        SYS_GETPGID => service::getpgid(arg1 as i32),
+        SYS_GETSID => service::getsid(arg1 as i32),
         SYS_SOCKET => service::socket(arg1 as i32, arg2 as i32, arg3 as i32),
         SYS_CONNECT => service::connect(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_BIND => service::bind(arg1 as i32, arg2 as usize, arg3 as usize),
@@ -132,6 +148,7 @@ pub extern "sysv64" fn syscall_handler(
             regs,
         ),
         SYS_EXIT => service::exit(arg1 as i32),
+        SYS_KILL => service::kill(arg1 as i32, arg2 as i32),
         SYS_UNAME => service::uname(arg1 as usize),
         SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
         SYS_CHDIR => service::chdir(arg1 as usize),
@@ -139,6 +156,8 @@ pub extern "sysv64" fn syscall_handler(
         SYS_MKDIR => service::mkdir(arg1 as usize, arg2 as usize),
         SYS_RMDIR => service::rmdir(arg1 as usize),
         SYS_UNLINK => service::unlink(arg1 as usize),
+        SYS_READLINK => service::readlink(arg1 as usize, arg2 as usize, arg3 as usize),
+        SYS_GETRUSAGE => service::getrusage(arg1 as i32, arg2 as usize),
         SYS_GETUID => service::geteuid(),
         SYS_GETGID => service::getegid(),
         SYS_SET_UID => service::setuid(arg1),
@@ -146,6 +165,9 @@ pub extern "sysv64" fn syscall_handler(
         SYS_GET_EUID => service::geteuid(),
         SYS_GET_EGID => service::getegid(),
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
+        SYS_LISTXATTR => service::listxattr(arg1 as usize, arg2 as usize, arg3 as usize),
+        SYS_LLISTXATTR => service::llistxattr(arg1 as usize, arg2 as usize, arg3 as usize),
+        SYS_FLISTXATTR => service::flistxattr(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_GET_TID => crate::sys::proc::id() as i64,
         SYS_TIME => {
             let out_ptr = arg1 as *mut i64; // time_t is i64
@@ -310,7 +332,10 @@ pub extern "sysv64" fn syscall_handler(
         );
     }
 
-    regs.rax = res as u64;
+    if !restored_from_signal {
+        regs.rax = res as u64;
+        service::deliver_pending_signal(_stack_frame, regs);
+    }
     crate::sys::proc::maybe_schedule();
 
     if syscall_number == SYS_FORK || syscall_number == SYS_WAIT4 || syscall_number == SYS_EXECVE {

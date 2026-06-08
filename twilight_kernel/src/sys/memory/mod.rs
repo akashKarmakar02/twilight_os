@@ -166,31 +166,41 @@ pub fn alloc_pages(
 
     let flags = make_flags(is_writable, is_executable);
 
-    with_frame_allocator(|frame_allocator| {
+    with_frame_allocator(|frame_allocator| -> Result<(), ()> {
         for page in pages {
-            if let Some(frame) = frame_allocator.allocate_frame() {
-                let frame_ptr = phys_to_virt(frame.start_address()).as_mut_ptr::<u8>();
-                unsafe {
-                    ptr::write_bytes(frame_ptr, 0, Size4KiB::SIZE as usize);
-                }
+            let Some(frame) = frame_allocator.allocate_frame() else {
+                log!("Could not allocate frame for {:?}", page);
+                return Err(());
+            };
 
-                let res = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
-                if let Ok(mapping) = res {
+            let frame_ptr = phys_to_virt(frame.start_address()).as_mut_ptr::<u8>();
+            unsafe {
+                ptr::write_bytes(frame_ptr, 0, Size4KiB::SIZE as usize);
+            }
+
+            let res = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
+            if let Ok(mapping) = res {
+                mapping.flush();
+            } else if mapper.translate_page(page).is_ok() {
+                unsafe {
+                    frame_allocator.deallocate_frame(frame);
+                }
+                if let Ok(mapping) = unsafe { mapper.update_flags(page, flags) } {
                     mapping.flush();
                 } else {
-                    if let Ok(_old_frame) = mapper.translate_page(page) {
-                        if let Ok(mapping) = unsafe { mapper.update_flags(page, flags) } {
-                            mapping.flush();
-                        } else {
-                            serial_println!("Failed to update page flag");
-                        }
-                    }
+                    serial_println!("Failed to update page flag for {:?}", page);
+                    return Err(());
                 }
             } else {
-                log!("Could not allocate frame for {:?}", page);
+                serial_println!("Failed to map user page {:?}", page);
+                unsafe {
+                    frame_allocator.deallocate_frame(frame);
+                }
+                return Err(());
             }
         }
-    });
+        Ok(())
+    })?;
 
     Ok(())
 }

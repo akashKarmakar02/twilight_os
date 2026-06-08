@@ -467,6 +467,7 @@ fn copy_file(path: &str, data: &[u8], verbose: bool, cache: &mut Option<(String,
     // Create and write file
     match fs.create_file(cur_inode, file_name) {
         Ok(file_inode) => {
+            ensure_bin_executable(&mut fs, file_inode, path);
             if let Err(e) = fs.write_file(file_inode, data) {
                 println!("Failed to write to '{}': {:?}", path, e);
             } else if verbose {
@@ -477,6 +478,9 @@ fn copy_file(path: &str, data: &[u8], verbose: bool, cache: &mut Option<(String,
             }
         }
         Err(FsError::FileAlreadyExists) => {
+            if let Ok(Some(file_inode)) = fs.find_dir_entry(cur_inode, file_name) {
+                ensure_bin_executable(&mut fs, file_inode, path);
+            }
             if verbose {
                 println!("Skipped (exists) {}", path);
             }
@@ -485,4 +489,24 @@ fn copy_file(path: &str, data: &[u8], verbose: bool, cache: &mut Option<(String,
             println!("Failed to create file '{}': {:?}", path, e);
         }
     }
+}
+
+fn ensure_bin_executable(fs: &mut crate::fs::twilight_fs::TwilightFs, inode_num: u32, path: &str) {
+    if !is_bin_file(path) {
+        return;
+    }
+
+    let Ok(mut inode) = fs.read_inode(inode_num) else {
+        return;
+    };
+    let new_mode = inode.mode | 0o111;
+    if new_mode != inode.mode {
+        inode.mode = new_mode;
+        let _ = fs.write_inode(inode_num, &inode);
+    }
+}
+
+fn is_bin_file(path: &str) -> bool {
+    path.strip_prefix("/bin/")
+        .map_or(false, |name| !name.is_empty())
 }

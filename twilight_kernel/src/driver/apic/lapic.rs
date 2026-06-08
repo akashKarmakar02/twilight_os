@@ -67,7 +67,6 @@ pub fn init() {
 }
 
 fn calibrate_timer() {
-
     // 1. Setup PIT for 10ms wait
     // We'll trust our existing pit::sleep_ns or just busy wait on it.
     // However, we need to handle the case where we might be running inside an interrupt context or similar logic?

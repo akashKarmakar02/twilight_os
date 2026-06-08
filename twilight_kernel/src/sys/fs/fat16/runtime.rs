@@ -368,6 +368,7 @@ impl FileSystem for Fat16Fs {
             } else {
                 FileType::File
             },
+            mode: if entry.is_dir() { 0o040755 } else { 0o100777 },
             size: entry.size as usize,
             name: entry.name.clone(),
             ino: 0,
@@ -406,6 +407,7 @@ impl FileSystem for Fat16Fs {
                 } else {
                     FileType::File
                 },
+                mode: if entry.is_dir() { 0o040755 } else { 0o100777 },
                 size: entry.size as usize,
                 name: entry.name,
                 ino: 0,
@@ -434,6 +436,7 @@ impl FileSystem for Fat16Fs {
             } else {
                 FileType::File
             },
+            mode: if entry.is_dir() { 0o040755 } else { 0o100777 },
             uid: 0,
             gid: 0,
             size: entry.size as usize,

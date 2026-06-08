@@ -125,6 +125,16 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    if from_user(&stack_frame) {
+        crate::serial_println!(
+            "[PROC {}] User #GP at RIP={:#x}, error={:#x}. Killing.",
+            crate::sys::proc::id(),
+            stack_frame.instruction_pointer.as_u64(),
+            error_code,
+        );
+        crate::sys::proc::terminate_current_by_signal(11);
+    }
+
     let rip = stack_frame.instruction_pointer.as_u64();
     let rip_ptr = rip as *const u8;
 

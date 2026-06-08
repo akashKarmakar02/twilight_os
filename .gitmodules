@@ -4,3 +4,6 @@
 [submodule "userspace/vi"]
 	path = userspace/vi
 	url = https://github.com/akashKarmakar02/viless.git
+[submodule "userspace/oksh"]
+	path = userspace/oksh
+	url = https://github.com/ibara/oksh.git
