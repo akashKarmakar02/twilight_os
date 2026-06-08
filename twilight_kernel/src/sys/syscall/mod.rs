@@ -51,6 +51,7 @@ pub extern "sysv64" fn syscall_handler(
             }
         }
         SYS_RT_SIGSUSPEND => service::rt_sigsuspend(arg1 as usize, arg2 as usize),
+        SYS_SIGALTSTACK => service::sigaltstack(arg1 as usize, arg2 as usize),
         SYS_OPEN => {
             let upath = UserPtr(arg1 as *const u8);
 
@@ -155,6 +156,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_MKDIR => service::mkdir(arg1 as usize, arg2 as usize),
         SYS_RMDIR => service::rmdir(arg1 as usize),
         SYS_UNLINK => service::unlink(arg1 as usize),
+        SYS_READLINK => service::readlink(arg1 as usize, arg2 as usize, arg3 as usize),
         SYS_GETRUSAGE => service::getrusage(arg1 as i32, arg2 as usize),
         SYS_GETUID => service::geteuid(),
         SYS_GETGID => service::getegid(),
@@ -163,6 +165,9 @@ pub extern "sysv64" fn syscall_handler(
         SYS_GET_EUID => service::geteuid(),
         SYS_GET_EGID => service::getegid(),
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
+        SYS_LISTXATTR => service::listxattr(arg1 as usize, arg2 as usize, arg3 as usize),
+        SYS_LLISTXATTR => service::llistxattr(arg1 as usize, arg2 as usize, arg3 as usize),
+        SYS_FLISTXATTR => service::flistxattr(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_GET_TID => crate::sys::proc::id() as i64,
         SYS_TIME => {
             let out_ptr = arg1 as *mut i64; // time_t is i64

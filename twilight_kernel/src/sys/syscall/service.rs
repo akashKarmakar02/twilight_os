@@ -10,7 +10,7 @@ use crate::sys::net::bind_map::GLOBAL_PORT_MAP;
 use crate::sys::net::socket::{SocketFile, tcp::TcpSocket, udp::UdpSocket};
 use crate::sys::proc::{
     FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, SIGCHLD, SIGKILL, SIGSTOP,
-    SignalAction, USER_STACK_SIZE, signal_bit,
+    SignalAction, SignalAltStack, USER_STACK_SIZE, signal_bit,
 };
 use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
 use crate::sys::syscall::utils::{UserPtr, copy_cstr_from_user, copy_user_ptr_array, format_path};
@@ -979,8 +979,16 @@ pub fn execev(
 
     // We execute on the current process.
     if let Some(p) = process_table.get_process(crate::sys::proc::id()) {
+        let trimmed_path = path.as_str().trim();
+        let exec_path = if trimmed_path.starts_with('/') {
+            normalize_path(trimmed_path)
+        } else {
+            normalize_path(&join_paths(&p.pwd, trimmed_path))
+        };
+
         match p.exec(&elf_buf, &argv_strs, &[]) {
             Ok((entry, sp)) => {
+                p.exe_path = exec_path;
                 crate::serial_println!(
                     "[execve] pid={} loaded path={} entry={:#x} sp={:#x}",
                     crate::sys::proc::id(),
@@ -3253,6 +3261,14 @@ struct LinuxSigAction {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+struct LinuxSigAltStack {
+    ss_sp: u64,
+    ss_flags: i32,
+    ss_size: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
 struct UserSignalFrame {
     magic: u64,
     old_mask: [u64; 2],
@@ -3289,6 +3305,56 @@ const SIGTSTP: usize = 20;
 const SIGTTIN: usize = 21;
 const SIGTTOU: usize = 22;
 const SA_NODEFER: u64 = 0x4000_0000;
+const SS_DISABLE: i32 = 2;
+
+fn linux_sigaltstack_from(stack: SignalAltStack) -> LinuxSigAltStack {
+    LinuxSigAltStack {
+        ss_sp: stack.sp,
+        ss_flags: stack.flags,
+        ss_size: stack.size,
+    }
+}
+
+fn signal_altstack_from(stack: LinuxSigAltStack) -> SignalAltStack {
+    if (stack.ss_flags & SS_DISABLE) != 0 {
+        SignalAltStack::default()
+    } else {
+        SignalAltStack {
+            sp: stack.ss_sp,
+            flags: 0,
+            size: stack.ss_size,
+        }
+    }
+}
+
+pub fn sigaltstack(new_stack: usize, old_stack: usize) -> i64 {
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    if old_stack != 0 {
+        unsafe {
+            *(old_stack as *mut LinuxSigAltStack) =
+                linux_sigaltstack_from(process.signal_alt_stack);
+        }
+    }
+    if new_stack != 0 {
+        let stack = unsafe { *(new_stack as *const LinuxSigAltStack) };
+        if stack.ss_flags & !SS_DISABLE != 0 {
+            return -(EINVAL as i64);
+        }
+        process.signal_alt_stack = signal_altstack_from(stack);
+    }
+
+    0
+}
 
 fn valid_signal(sig: i32) -> bool {
     (0..=64).contains(&sig)
@@ -3854,7 +3920,149 @@ pub fn futex(uaddr: usize, op: i32, val: u32, _timeout: usize, _uaddr2: usize, _
     }
 }
 
-pub fn readlinkat(dirfd: i32, path: usize, _buf_ptr: usize, _buf_len: usize) -> i64 {
+pub fn readlink(path: usize, buf_ptr: usize, buf_len: usize) -> i64 {
+    readlinkat(AT_FDCWD, path, buf_ptr, buf_len)
+}
+
+fn proc_exe_readlink_target(
+    full_path: &str,
+    current_pid: u16,
+    current_exe: &str,
+) -> Result<Option<String>, i64> {
+    if full_path == "/proc/self/exe" {
+        return Ok(Some(current_exe.to_string()));
+    }
+
+    let Some(rest) = full_path.strip_prefix("/proc/") else {
+        return Ok(None);
+    };
+    let Some(pid_part) = rest.strip_suffix("/exe") else {
+        return Ok(None);
+    };
+    if pid_part.is_empty() || pid_part.contains('/') {
+        return Ok(None);
+    }
+
+    let Ok(pid) = pid_part.parse::<u16>() else {
+        return Ok(None);
+    };
+    if pid == current_pid {
+        return Ok(Some(current_exe.to_string()));
+    }
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let Some(process) = table.proc_list.iter().find(|process| process.pid == pid) else {
+        return Err(-(ENOENT as i64));
+    };
+
+    Ok(Some(process.exe_path.clone()))
+}
+
+pub fn readlinkat(dirfd: i32, path: usize, buf_ptr: usize, buf_len: usize) -> i64 {
+    if path == 0 || buf_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+    if buf_len == 0 {
+        return -(EINVAL as i64);
+    }
+
+    let current_pid = crate::sys::proc::id();
+    #[allow(static_mut_refs)]
+    let (full_path, current_exe) = {
+        let proc_option = unsafe {
+            PROCESS_TABLE
+                .get_mut()
+                .unwrap()
+                .get_process(current_pid)
+        };
+        let Some(process) = proc_option else {
+            return -(ESRCH as i64);
+        };
+
+        let upath = UserPtr(path as *const u8);
+        let path_str = match copy_cstr_from_user(upath, 4096) {
+            Ok(s) => s,
+            _ => return -(EFAULT as i64),
+        };
+
+        let full_path = if path_str.starts_with('/') {
+            normalize_path(&path_str)
+        } else {
+            match base_for_dirfd(process, dirfd) {
+                Ok(base) => normalize_path(&join_paths(&base, &path_str)),
+                Err(e) => return e as i64,
+            }
+        };
+
+        (full_path, process.exe_path.clone())
+    };
+
+    let Some(target) = (match proc_exe_readlink_target(&full_path, current_pid, &current_exe) {
+        Ok(target) => target,
+        Err(code) => return code,
+    }) else {
+        #[allow(static_mut_refs)]
+        if unsafe { VFS.get_mut().metadata(&full_path).is_err() } {
+            return -(ENOENT as i64);
+        }
+
+        return -(EINVAL as i64);
+    };
+
+    let bytes = target.as_bytes();
+    let copy_len = core::cmp::min(buf_len, bytes.len());
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr as *mut u8, copy_len);
+    }
+
+    copy_len as i64
+}
+
+fn listxattr_for_path(path: usize, follow_relative_to_pwd: bool) -> i64 {
+    if path == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let path_str = match copy_cstr_from_user(UserPtr(path as *const u8), 4096) {
+        Ok(s) => s,
+        _ => return -(EFAULT as i64),
+    };
+
+    let full_path = if path_str.starts_with('/') || !follow_relative_to_pwd {
+        normalize_path(&path_str)
+    } else {
+        #[allow(static_mut_refs)]
+        let proc_option = unsafe {
+            PROCESS_TABLE
+                .get_mut()
+                .unwrap()
+                .get_process(crate::sys::proc::id())
+        };
+        let Some(process) = proc_option else {
+            return -(ESRCH as i64);
+        };
+
+        normalize_path(&join_paths(&process.pwd, &path_str))
+    };
+
+    #[allow(static_mut_refs)]
+    if unsafe { VFS.get_mut().metadata(&full_path).is_err() } {
+        return -(ENOENT as i64);
+    }
+
+    0
+}
+
+pub fn listxattr(path: usize, _list: usize, _size: usize) -> i64 {
+    listxattr_for_path(path, true)
+}
+
+pub fn llistxattr(path: usize, _list: usize, _size: usize) -> i64 {
+    listxattr_for_path(path, true)
+}
+
+pub fn flistxattr(fd: i32, _list: usize, _size: usize) -> i64 {
     #[allow(static_mut_refs)]
     let proc_option = unsafe {
         PROCESS_TABLE
@@ -3866,25 +4074,11 @@ pub fn readlinkat(dirfd: i32, path: usize, _buf_ptr: usize, _buf_len: usize) -> 
         return -(ESRCH as i64);
     };
 
-    let upath = UserPtr(path as *const u8);
-    let path_str = match copy_cstr_from_user(upath, 4096) {
-        Ok(s) => s,
-        _ => return -(EFAULT as i64),
-    };
-
-    let full_path = if path_str.starts_with('/') {
-        normalize_path(&path_str)
-    } else {
-        match base_for_dirfd(process, dirfd) {
-            Ok(base) => normalize_path(&join_paths(&base, &path_str)),
-            Err(e) => return e as i64,
-        }
-    };
-
-    #[allow(static_mut_refs)]
-    if unsafe { VFS.get_mut().metadata(&full_path).is_err() } {
-        return -(ENOENT as i64);
+    if fd < 3 {
+        return 0;
     }
-
-    -(EINVAL as i64)
+    match fd_slot(process, fd) {
+        Ok(_) => 0,
+        Err(code) => code as i64,
+    }
 }

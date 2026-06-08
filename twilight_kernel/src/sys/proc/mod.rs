@@ -29,7 +29,6 @@ use core::arch::naked_asm;
 use core::mem::size_of;
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU16, Ordering};
-use object::{Object, ObjectSegment, SegmentFlags};
 use spin::Once;
 use spin::mutex::Mutex;
 use twilight_common::syscall::types::{O_RDONLY, O_WRONLY};
@@ -47,6 +46,8 @@ const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_F000;
 pub const USER_STACK_SIZE: usize = 0x64000;
 const MAIN_DYN_LOAD_BASE: u64 = 0x4000_0000;
 const INTERP_DYN_LOAD_BASE: u64 = 0x6000_0000;
+const PAGE_SIZE_U64: u64 = 4096;
+const STATIC_TLS_SPILL_PAGES: u64 = 2;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
 static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
@@ -144,6 +145,7 @@ struct Elf64Phdr {
 const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
 const PT_PHDR: u32 = 6;
+const PT_TLS: u32 = 7;
 
 // ================== Process ==================
 
@@ -171,6 +173,24 @@ pub struct SignalAction {
     pub mask: [u64; 2],
     pub flags: u64,
     pub restorer: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SignalAltStack {
+    pub sp: u64,
+    pub flags: i32,
+    pub size: u64,
+}
+
+impl Default for SignalAltStack {
+    fn default() -> Self {
+        Self {
+            sp: 0,
+            flags: 2,
+            size: 0,
+        }
+    }
 }
 
 pub struct ProcessTable {
@@ -337,6 +357,7 @@ pub struct Process {
     pub sid: u16,
     pub state: ProcessState,
     pub addr_size_vec: Vec<(u64, usize)>,
+    pub exe_path: String,
     pub pwd: String,
     pub fd_table: Vec<Option<FdEntry>>,
     pub stdio_flags: [i32; 3],
@@ -354,6 +375,7 @@ pub struct Process {
     pub pending_signals: u64,
     pub sigsuspend_saved_mask: [u64; 2],
     pub in_sigsuspend: bool,
+    pub signal_alt_stack: SignalAltStack,
 }
 
 impl Process {
@@ -392,6 +414,7 @@ impl Process {
 
     pub fn new(
         content_buf: Vec<u8>,
+        exe_path: &str,
         pwd: &str,
         args: &[&str],
         parent_pid: u16,
@@ -429,6 +452,7 @@ impl Process {
         let phent: u64;
         let phnum: u64;
         let mut max_end: u64;
+        let needs_static_tls_spill: bool;
 
         if content_buf.get(0..4) == Some(&ELF_MAGIC) {
             match load_elf_image(
@@ -445,6 +469,7 @@ impl Process {
                     phent = main_img.phent;
                     phnum = main_img.phnum;
                     max_end = main_img.max_end;
+                    needs_static_tls_spill = main_img.has_tls && main_img.interp_path.is_none();
 
                     if let Some(interp_path) = main_img.interp_path {
                         match load_interpreter_image(
@@ -481,6 +506,10 @@ impl Process {
         } else {
             println!("ksh: invalid ELF file");
             return Err(());
+        }
+
+        if needs_static_tls_spill {
+            max_end = reserve_static_tls_spill(&mut mapper, &mut addr_size_vec, max_end)?;
         }
 
         let mut env = Vec::new();
@@ -530,6 +559,7 @@ impl Process {
             page_table_frame,
             state: ProcessState::Running,
             addr_size_vec,
+            exe_path: exe_path.to_string(),
             pwd: pwd.to_string(),
             kernel_gs: kgs,
             fs_base: VirtAddr::zero(),
@@ -552,6 +582,7 @@ impl Process {
             pending_signals: 0,
             sigsuspend_saved_mask: [0; 2],
             in_sigsuspend: false,
+            signal_alt_stack: SignalAltStack::default(),
         };
         Ok(p)
     }
@@ -594,6 +625,7 @@ impl Process {
         let phent: u64;
         let phnum: u64;
         let mut max_end: u64;
+        let needs_static_tls_spill: bool;
 
         if content_buf.get(0..4) == Some(&ELF_MAGIC) {
             match load_elf_image(
@@ -610,6 +642,7 @@ impl Process {
                     phent = main_img.phent;
                     phnum = main_img.phnum;
                     max_end = main_img.max_end;
+                    needs_static_tls_spill = main_img.has_tls && main_img.interp_path.is_none();
 
                     if let Some(interp_path) = main_img.interp_path {
                         // We must read the interpreter file.
@@ -654,6 +687,10 @@ impl Process {
         } else {
             println!("exec: invalid ELF file");
             return Err(());
+        }
+
+        if needs_static_tls_spill {
+            max_end = reserve_static_tls_spill(&mut mapper, &mut addr_size_vec, max_end)?;
         }
 
         let user_rsp = build_initial_stack(
@@ -874,6 +911,7 @@ impl Process {
             page_table_frame,
             state: ProcessState::Running,
             addr_size_vec: child_addr_size_vec,
+            exe_path: self.exe_path.clone(),
             pwd: self.pwd.clone(),
             fd_table: new_fd_table,
             kernel_gs: kgs,
@@ -896,6 +934,7 @@ impl Process {
             pending_signals: 0,
             sigsuspend_saved_mask: [0; 2],
             in_sigsuspend: false,
+            signal_alt_stack: self.signal_alt_stack,
         };
 
         crate::serial_println!("[fork] child={} ready", pid);
@@ -1012,6 +1051,60 @@ pub fn exit(code: i32) {
 
     crate::serial_println!(
         "[exit] switch dead pid={} -> pid={}",
+        current_pid,
+        slice[next_idx].pid,
+    );
+    switch_by_index(slice, cur_idx, next_idx);
+
+    loop {
+        crate::task::executor::halt();
+    }
+}
+
+pub fn terminate_current_by_signal(sig: i32) -> ! {
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+
+    let current_pid = id();
+    crate::serial_println!("[signal-exit] pid={} sig={}", current_pid, sig);
+
+    let slice = table.proc_list.make_contiguous();
+    let Some(cur_idx) = find_process_index(slice, current_pid) else {
+        loop {
+            crate::task::executor::halt();
+        }
+    };
+
+    let parent_pid = slice[cur_idx].parent_pid;
+    slice[cur_idx].state = ProcessState::Dead;
+    slice[cur_idx].exit_code = 128 + sig;
+    slice[cur_idx].wait_status = sig & 0x7f;
+    slice[cur_idx].wait_reported = false;
+
+    if let Some(parent_idx) = find_process_index(slice, parent_pid) {
+        slice[parent_idx].queue_signal(SIGCHLD);
+        if matches!(
+            slice[parent_idx].state,
+            ProcessState::Waiting | ProcessState::SignalWait | ProcessState::AwaitingIo
+        ) {
+            slice[parent_idx].state = ProcessState::Running;
+            slice[parent_idx].pending_io = false;
+        }
+    }
+
+    let next_idx = find_process_index(slice, parent_pid)
+        .filter(|&idx| matches!(slice[idx].state, ProcessState::Running))
+        .or_else(|| find_next_runnable_index(slice, cur_idx));
+
+    let Some(next_idx) = next_idx else {
+        crate::serial_println!("[signal-exit] pid={} no runnable target", current_pid);
+        loop {
+            crate::task::executor::halt();
+        }
+    };
+
+    crate::serial_println!(
+        "[signal-exit] switch dead pid={} -> pid={}",
         current_pid,
         slice[next_idx].pid,
     );
@@ -1352,6 +1445,7 @@ pub fn init() {
 
                 pid,
                 addr_size_vec: Vec::new(),
+                exe_path: "[kernel]".to_string(),
                 stack: 0,
                 stack_size: 0,
                 entry_point: 0,
@@ -1380,6 +1474,7 @@ pub fn init() {
                 pending_signals: 0,
                 sigsuspend_saved_mask: [0; 2],
                 in_sigsuspend: false,
+                signal_alt_stack: SignalAltStack::default(),
             })
     }
 
@@ -1407,6 +1502,7 @@ pub fn init() {
         fpu_storage: Some(FpuState::default()),
         entry_point: 0,
         addr_size_vec: Vec::new(),
+        exe_path: "[idle]".to_string(),
         page_table_frame: f,
         fd_table: Vec::new(),
         state: ProcessState::Running,
@@ -1424,6 +1520,7 @@ pub fn init() {
         pending_signals: 0,
         sigsuspend_saved_mask: [0; 2],
         in_sigsuspend: false,
+        signal_alt_stack: SignalAltStack::default(),
     };
 
     idle_task.gs_base = VirtAddr::new(&*idle_task.kernel_gs as *const _ as u64);
@@ -1604,6 +1701,7 @@ struct LoadedImage {
     phnum: u64,
     max_end: u64,
     load_base: u64,
+    has_tls: bool,
     interp_path: Option<String>,
 }
 
@@ -1618,11 +1716,19 @@ fn load_elf_image(
         return Err(());
     }
 
-    let obj = object::File::parse(content_buf).map_err(|_| ())?;
     let eh = unsafe { &*(content_buf.as_ptr() as *const Elf64Ehdr) };
     let e_phoff = eh.e_phoff;
     let e_phentsize = eh.e_phentsize as u64;
     let e_phnum = eh.e_phnum as u64;
+    if e_phentsize < core::mem::size_of::<Elf64Phdr>() as u64 {
+        return Err(());
+    }
+    if e_phoff
+        .checked_add(e_phentsize.saturating_mul(e_phnum))
+        .map_or(true, |end| end as usize > content_buf.len())
+    {
+        return Err(());
+    }
 
     let mut load_bias = 0;
     if eh.e_type == 3 {
@@ -1631,6 +1737,7 @@ fn load_elf_image(
 
     let mut phdr_va = 0;
     let mut interp_path = None;
+    let mut has_tls = false;
 
     for i in 0..e_phnum {
         let ph = unsafe {
@@ -1648,6 +1755,8 @@ fn load_elf_image(
                     interp_path = Some(s.trim_end_matches('\0').to_string());
                 }
             }
+        } else if ph.p_type == PT_TLS && ph.p_memsz != 0 {
+            has_tls = true;
         }
     }
 
@@ -1673,32 +1782,54 @@ fn load_elf_image(
     }
 
     let mut max_end = 0;
-    for segment in obj.segments() {
-        if let Ok(data) = segment.data() {
-            let size = segment.size() as usize;
-            if size == 0 {
-                continue;
-            }
-            let base_addr = load_bias + segment.address();
-            let seg_end = base_addr + size as u64;
-            if seg_end > max_end {
-                max_end = seg_end;
-            }
+    for i in 0..e_phnum {
+        let ph = unsafe {
+            &*(content_buf
+                .as_ptr()
+                .add((e_phoff + i * e_phentsize) as usize) as *const Elf64Phdr)
+        };
+        if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
+            continue;
+        }
+        if ph.p_filesz > ph.p_memsz {
+            return Err(());
+        }
+        if ph
+            .p_offset
+            .checked_add(ph.p_filesz)
+            .map_or(true, |end| end as usize > content_buf.len())
+        {
+            return Err(());
+        }
 
-            if let SegmentFlags::Elf { .. } = segment.flags() {
-                if alloc_pages(mapper, base_addr, size, true, true).is_err() {
-                    return Err(());
-                }
-                addr_size_vec.push((base_addr, size));
+        let seg_start = load_bias.checked_add(ph.p_vaddr).ok_or(())?;
+        let seg_file_end = seg_start.checked_add(ph.p_filesz).ok_or(())?;
+        let seg_mem_end = seg_start.checked_add(ph.p_memsz).ok_or(())?;
+        let map_start = align_down_u64(seg_start, 4096);
+        let map_end = align_up_u64(seg_mem_end, 4096).ok_or(())?;
+        let map_len = map_end.checked_sub(map_start).ok_or(())? as usize;
 
-                let src = data.as_ptr();
-                let dst = base_addr as *mut u8;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(src, dst, data.len());
-                    if size > data.len() {
-                        core::ptr::write_bytes(dst.add(data.len()), 0, size - data.len());
-                    }
-                }
+        if seg_mem_end > max_end {
+            max_end = seg_mem_end;
+        }
+
+        if alloc_pages(mapper, map_start, map_len, true, true).is_err() {
+            return Err(());
+        }
+        addr_size_vec.push((map_start, map_len));
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                content_buf.as_ptr().add(ph.p_offset as usize),
+                seg_start as *mut u8,
+                ph.p_filesz as usize,
+            );
+            if seg_mem_end > seg_file_end {
+                core::ptr::write_bytes(
+                    seg_file_end as *mut u8,
+                    0,
+                    (seg_mem_end - seg_file_end) as usize,
+                );
             }
         }
     }
@@ -1710,8 +1841,23 @@ fn load_elf_image(
         phnum: e_phnum,
         max_end,
         load_base: load_bias,
+        has_tls,
         interp_path,
     })
+}
+
+fn reserve_static_tls_spill(
+    mapper: &mut OffsetPageTable<'_>,
+    addr_size_vec: &mut Vec<(u64, usize)>,
+    max_end: u64,
+) -> Result<u64, ()> {
+    let spill_start = align_up_u64(max_end, PAGE_SIZE_U64).ok_or(())?;
+    let spill_len = PAGE_SIZE_U64
+        .checked_mul(STATIC_TLS_SPILL_PAGES)
+        .ok_or(())?;
+    alloc_pages(mapper, spill_start, spill_len as usize, true, false)?;
+    addr_size_vec.push((spill_start, spill_len as usize));
+    spill_start.checked_add(spill_len).ok_or(())
 }
 
 fn load_interpreter_image(
@@ -1736,4 +1882,12 @@ fn load_interpreter_image(
         Some(INTERP_DYN_LOAD_BASE),
         false,
     )
+}
+
+fn align_down_u64(value: u64, align: u64) -> u64 {
+    value & !(align - 1)
+}
+
+fn align_up_u64(value: u64, align: u64) -> Option<u64> {
+    Some((value.checked_add(align - 1)?) & !(align - 1))
 }

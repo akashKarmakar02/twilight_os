@@ -59,6 +59,11 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     }
 
     let is_file_backed = (flags & MAP_ANONYMOUS) == 0 && (fd as i64) != -1;
+    let map_len = if !is_file_backed && (flags & MAP_FIXED) == 0 {
+        len.checked_add(PAGE).unwrap_or(len)
+    } else {
+        len
+    };
 
     let va = if (flags & MAP_FIXED) != 0 {
         if addr == 0 || (addr as usize & (PAGE - 1)) != 0 {
@@ -67,7 +72,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         addr as usize
     } else {
         // ignore addr if 0; otherwise you can treat it as a hint later
-        match process.proc_mm.reserve_mmap_range(len) {
+        match process.proc_mm.reserve_mmap_range(map_len) {
             Some(v) => v,
             None => return ENOMEM,
         }
@@ -76,6 +81,20 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     // never map page 0
     if va == 0 {
         return EINVAL;
+    }
+
+    if prot == 0 {
+        if (flags & MAP_FIXED) == 0 {
+            process.proc_mm.track_mmap(va, map_len, MmapKind::Owned);
+        }
+        // crate::serial_println!(
+        //     "[mmap] pid={} prot-none addr={:#x} len={:#x} flags={:#x}",
+        //     crate::sys::proc::id(),
+        //     va,
+        //     len,
+        //     flags,
+        // );
+        return va as i64;
     }
 
     if is_file_backed {
@@ -141,10 +160,19 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         // Track as "shared" (close enough for now).
         process.proc_mm.track_mmap(va, len, MmapKind::Shared);
     } else {
-        if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, writable, executable) {
+        if let Err(_) = alloc_pages(&mut process.mapper, va as u64, map_len, writable, executable) {
             return ENOMEM;
         }
-        process.proc_mm.track_mmap(va, len, MmapKind::Owned);
+        process.proc_mm.track_mmap(va, map_len, MmapKind::Owned);
+        // crate::serial_println!(
+        //     "[mmap] pid={} anon addr={:#x} len={:#x} map_len={:#x} prot={:#x} flags={:#x}",
+        //     crate::sys::proc::id(),
+        //     va,
+        //     len,
+        //     map_len,
+        //     prot,
+        //     flags,
+        // );
     }
     // logger!(
     //     "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
