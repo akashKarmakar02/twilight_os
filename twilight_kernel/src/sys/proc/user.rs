@@ -73,7 +73,7 @@ fn parse_passwd_line(line: &str) -> Option<PasswdEntry> {
     let gid_s = parts.next()?;
     let gecos = parts.next().unwrap_or_default().to_string();
     let home = parts.next().unwrap_or("/").to_string();
-    let shell = parts.next().unwrap_or("/bin/tsh").trim_end().to_string(); // trim '\n'
+    let shell = parts.next().unwrap_or("/bin/oksh").trim_end().to_string(); // trim '\n'
 
     let uid = uid_s.parse().ok()?;
     let gid = gid_s.parse().ok()?;

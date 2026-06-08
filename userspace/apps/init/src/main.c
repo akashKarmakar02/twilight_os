@@ -30,9 +30,9 @@ void launch_shell_or_login() {
     char *envp[] = {"PATH=/bin", "HOME=/", NULL};
     execve("/bin/logind", argv, envp);
   } else {
-    char *argv[] = {"/bin/tsh", NULL};
+    char *argv[] = {"/bin/oksh", NULL};
     char *envp[] = {"PATH=/bin", "HOME=/", NULL};
-    execve("/bin/tsh", argv, envp);
+    execve("/bin/oksh", argv, envp);
   }
 }
 

@@ -812,8 +812,8 @@ static int create_user(const char *username, const char *password) {
   // Format: username:password:uid:gid:gecos:home:shell
   // gid = uid for now (no groups yet)
   // gecos = full name (empty for now)
-  // shell = /bin/tsh
-  fprintf(fp, "%s:%s:%u:%u::%s:/bin/tsh\n", username, hash, uid, uid, home_dir);
+  // shell = /bin/oksh
+  fprintf(fp, "%s:%s:%u:%u::%s:/bin/oksh\n", username, hash, uid, uid, home_dir);
 
   fclose(fp);
 
@@ -968,7 +968,7 @@ static int do_login(void) {
       if (field_idx >= 3 && strcmp(fields[0], username) == 0) {
         uid_t uid = (uid_t)atoi(fields[2]);
         char *home = field_idx >= 6 ? fields[5] : HOME_DIR_PREFIX;
-        char *shell = field_idx >= 7 ? fields[6] : "/bin/tsh";
+        char *shell = field_idx >= 7 ? fields[6] : "/bin/oksh";
         // Set UID/GID (requires root or appropriate privileges)
         //                if (setgid(gid) != 0) {
         //                    fprintf(stderr, "logind: warning: failed to
