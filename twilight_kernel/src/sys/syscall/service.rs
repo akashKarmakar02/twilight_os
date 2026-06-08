@@ -927,10 +927,87 @@ pub fn execve(
     execev(arg1, arg2, arg3, stack_frame)
 }
 
+fn resolve_exec_path(path: &str) -> Result<String, i64> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(-(ENOENT as i64));
+    }
+    if path.starts_with('/') {
+        return Ok(normalize_path(path));
+    }
+
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = process else {
+        return Err(-(ESRCH as i64));
+    };
+
+    Ok(normalize_path(&join_paths(&process.pwd, path)))
+}
+
+fn read_exec_file(path: &str) -> Result<Vec<u8>, i64> {
+    #[allow(static_mut_refs)]
+    let Ok(mut node) = (unsafe { VFS.read().open(path) }) else {
+        return Err(-(ENOENT as i64));
+    };
+
+    let size = node.metadata.size;
+    let mut buf = vec![0u8; size];
+    node.read(0, &mut buf).map_err(|_| -(EIO as i64))?;
+    Ok(buf)
+}
+
+fn parse_shebang(content: &[u8]) -> Result<Option<(String, Option<String>)>, i64> {
+    if !content.starts_with(b"#!") {
+        return Ok(None);
+    }
+
+    let line_end = content
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .unwrap_or(content.len());
+    let mut line = &content[2..line_end];
+    if line.ends_with(b"\r") {
+        line = &line[..line.len() - 1];
+    }
+
+    let line = core::str::from_utf8(line).map_err(|_| -(ENOEXEC as i64))?;
+    let mut parts = line.split_ascii_whitespace();
+    let Some(interpreter) = parts.next() else {
+        return Err(-(ENOEXEC as i64));
+    };
+    let interpreter_arg = parts.next().map(ToString::to_string);
+
+    let interpreter = match interpreter {
+        "/bin/oksh" => "/bin/oksh",
+        "/bin/bash" => "/bin/oksh",
+        _ => return Err(-(ENOEXEC as i64)),
+    };
+
+    Ok(Some((interpreter.to_string(), interpreter_arg)))
+}
+
+fn copy_envp(arg3: usize) -> Result<Vec<String>, i64> {
+    if arg3 == 0 {
+        return Ok(Vec::new());
+    }
+
+    copy_user_ptr_array(UserPtr(arg3 as *const usize), 128, 4096).map_err(|_| -(EFAULT as i64))
+}
+
+fn argv_refs(argv: &[String]) -> Vec<&str> {
+    argv.iter().map(|arg| arg.as_str()).collect()
+}
+
 pub fn execev(
     arg1: usize,
     arg2: usize,
-    _arg3: usize,
+    arg3: usize,
     stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
 ) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(arg1 as *const u8), 4096) else {
@@ -939,60 +1016,101 @@ pub fn execev(
             crate::sys::proc::id(),
             arg1
         );
-        return -1;
+        return -(EFAULT as i64);
     };
     crate::serial_println!("[execve] pid={} path={}", crate::sys::proc::id(), path);
 
-    #[allow(static_mut_refs)]
-    let Ok(mut elf_node) = (unsafe { VFS.read().open(path.as_str().trim()) }) else {
-        crate::serial_println!(
-            "[execve] pid={} open failed path={}",
-            crate::sys::proc::id(),
-            path
-        );
-        return -2;
+    let exec_path = match resolve_exec_path(&path) {
+        Ok(path) => path,
+        Err(code) => return code,
     };
 
-    let elf_size = elf_node.metadata.size;
-    let mut elf_buf = vec![0u8; elf_size];
-
-    let Ok(_) = elf_node.read(0, &mut elf_buf) else {
-        crate::serial_println!(
-            "[execve] pid={} read failed path={}",
-            crate::sys::proc::id(),
-            path
-        );
-        return -2;
+    let file_buf = match read_exec_file(&exec_path) {
+        Ok(buf) => buf,
+        Err(code) => {
+            let err_path = if exec_path.is_empty() {
+                path.as_str()
+            } else {
+                exec_path.as_str()
+            };
+            crate::serial_println!(
+                "[execve] pid={} open failed path={}",
+                crate::sys::proc::id(),
+                err_path
+            );
+            return code;
+        }
     };
 
     let argv = match copy_user_ptr_array(UserPtr(arg2 as *const usize), 128, 4096) {
         Ok(v) => v,
-        Err(_) => return -1, // EFAULT
+        Err(_) => return -(EFAULT as i64),
+    };
+    let env = match copy_envp(arg3) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
 
-    let argv_strs = argv.iter().map(|p| p.as_str()).collect::<Vec<&str>>();
+    let (image_buf, image_path, final_argv) = if file_buf.starts_with(&[0x7f, b'E', b'L', b'F']) {
+        (file_buf, exec_path.clone(), argv)
+    } else if let Some((interpreter, interpreter_arg)) = match parse_shebang(&file_buf) {
+        Ok(value) => value,
+        Err(code) => return code,
+    } {
+        let interpreter_buf = match read_exec_file(&interpreter) {
+            Ok(buf) => buf,
+            Err(code) => {
+                crate::serial_println!(
+                    "[execve] pid={} interpreter open failed path={}",
+                    crate::sys::proc::id(),
+                    interpreter
+                );
+                return code;
+            }
+        };
+        if interpreter_buf.starts_with(b"#!") || !interpreter_buf.starts_with(&[0x7f, b'E', b'L', b'F']) {
+            return -(ENOEXEC as i64);
+        }
 
-    // TODO: Env vars support (arg3)
+        let mut script_argv = Vec::new();
+        script_argv.push(interpreter.clone());
+        if let Some(arg) = interpreter_arg {
+            script_argv.push(arg);
+        }
+        script_argv.push(exec_path.clone());
+        for arg in argv.iter().skip(1) {
+            script_argv.push(arg.clone());
+        }
+
+        (interpreter_buf, interpreter, script_argv)
+    } else {
+        return -(ENOEXEC as i64);
+    };
+
+    if image_buf.is_empty() {
+        crate::serial_println!(
+            "[execve] pid={} empty executable path={}",
+            crate::sys::proc::id(),
+            image_path
+        );
+        return -(ENOEXEC as i64);
+    }
 
     #[allow(static_mut_refs)]
     let process_table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
 
     // We execute on the current process.
     if let Some(p) = process_table.get_process(crate::sys::proc::id()) {
-        let trimmed_path = path.as_str().trim();
-        let exec_path = if trimmed_path.starts_with('/') {
-            normalize_path(trimmed_path)
-        } else {
-            normalize_path(&join_paths(&p.pwd, trimmed_path))
-        };
+        let argv_strs = argv_refs(&final_argv);
+        let env_strs = argv_refs(&env);
 
-        match p.exec(&elf_buf, &argv_strs, &[]) {
+        match p.exec(&image_buf, &argv_strs, &env_strs) {
             Ok((entry, sp)) => {
-                p.exe_path = exec_path;
+                p.exe_path = image_path.clone();
                 crate::serial_println!(
                     "[execve] pid={} loaded path={} entry={:#x} sp={:#x}",
                     crate::sys::proc::id(),
-                    path,
+                    image_path,
                     entry,
                     sp,
                 );
@@ -1013,26 +1131,15 @@ pub fn execev(
                     (*frame_ptr).instruction_pointer = VirtAddr::new(entry);
                     (*frame_ptr).stack_pointer = VirtAddr::new(sp);
                 }
-
-                // We do NOT return 0. The return value (RAX) will be whatever is in regs.rax.
-                // However, conventionally execve success doesn't return.
-                // To be clean, we might want toゼロ RAX or set it to 0 in the `regs` passed to `execve`.
-                // But `regs` are not passed to `execev` currently.
-                // We'll trust that the syscall handler logic or crt0 handles entrance.
-                // Actually, syscall_handler does `regs.rax = res as u64`.
-                // If we return 0 here, RAX becomes 0.
-                // The process starts at `_start` with RAX=0. This is fine.
                 0
             }
             Err(_) => {
-                // If exec fails, we return error and the OLD process continues.
-                // Note: p.exec should atomic-fail (not modifying self if elf is bad).
                 crate::serial_println!(
                     "[execve] pid={} exec failed path={}",
                     crate::sys::proc::id(),
-                    path
+                    image_path,
                 );
-                -1
+                -(ENOEXEC as i64)
             }
         }
     } else {
