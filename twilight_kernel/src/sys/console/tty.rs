@@ -935,6 +935,7 @@ impl VfsNodeOps for Tty {
         } else {
             self.write_bytes_ansi(data);
         }
+        self.flush_output();
         Ok(())
     }
 

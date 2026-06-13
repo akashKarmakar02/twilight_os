@@ -1298,6 +1298,15 @@ impl TwilightFs {
 
     // TODO: move this to DirEntry impl
     pub fn create_file(&mut self, parent_inode_num: u32, name: &str) -> Result<u32, FsError> {
+        self.create_file_with_mode(parent_inode_num, name, 0o777)
+    }
+
+    fn create_file_with_mode(
+        &mut self,
+        parent_inode_num: u32,
+        name: &str,
+        mode: u16,
+    ) -> Result<u32, FsError> {
         if name.len() > 60 {
             return Err(FileNotFound);
         }
@@ -1315,7 +1324,7 @@ impl TwilightFs {
 
         let time = CMOS::new().unix_time();
 
-        let mut inode = Inode::new_file(time, 0o777);
+        let mut inode = Inode::new_file(time, mode);
         // Inherit encryption flag from parent directory
         if (parent_inode.flags & inode::IFLAG_ENCRYPTED) != 0 {
             inode.flags |= inode::IFLAG_ENCRYPTED;
@@ -1733,6 +1742,15 @@ impl TwilightFs {
 
     // TODO: move this to DirEntry impl
     pub fn create_dir(&mut self, parent_inode_num: u32, name: &str) -> Result<u32, FsError> {
+        self.create_dir_with_mode(parent_inode_num, name, 0o777)
+    }
+
+    fn create_dir_with_mode(
+        &mut self,
+        parent_inode_num: u32,
+        name: &str,
+        mode: u16,
+    ) -> Result<u32, FsError> {
         if name.len() > 60 {
             return Err(FileNameTooLong);
         }
@@ -1750,7 +1768,7 @@ impl TwilightFs {
 
         let time = CMOS::new().unix_time();
 
-        let mut inode = Inode::new_dir(time, 0o777);
+        let mut inode = Inode::new_dir(time, mode);
         if (parent_inode.flags & inode::IFLAG_ENCRYPTED) != 0 {
             inode.flags |= inode::IFLAG_ENCRYPTED;
         }
@@ -2272,11 +2290,11 @@ impl FileSystem for TwilightFs {
         }
     }
 
-    fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
+    fn mkdir(&mut self, parent_dir: &str, path: &str, mode: u16) -> Result<(), ()> {
         if let Ok(inode_num) = self.resolve_path(parent_dir) {
             let inode = self.read_inode(inode_num).unwrap();
             if inode.is_dir() {
-                if let Err(_) = self.create_dir(inode_num, path) {
+                if let Err(_) = self.create_dir_with_mode(inode_num, path, mode) {
                     Err(())
                 } else {
                     Ok(())
@@ -2320,11 +2338,11 @@ impl FileSystem for TwilightFs {
         }
     }
 
-    fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
+    fn touch(&mut self, parent_path: &str, filename: &str, mode: u16) -> Result<(), ()> {
         if let Ok(inode_num) = self.resolve_path(parent_path) {
             let inode = self.read_inode(inode_num).unwrap();
             if inode.is_dir() {
-                self.create_file(inode_num, filename)
+                self.create_file_with_mode(inode_num, filename, mode)
                     .map(|_| ())
                     .map_err(|_| ())
             } else {
@@ -2372,6 +2390,22 @@ impl FileSystem for TwilightFs {
         }
     }
 
+    fn chmod(&mut self, path: &str, mode: u16) -> Result<(), crate::sys::fs::vfs::VfsError> {
+        const CHMOD_MASK: u16 = 0o7777;
+        use crate::sys::fs::vfs::VfsError;
+
+        let inode_num = if path == "/" {
+            1
+        } else {
+            self.resolve_path(path).map_err(|_| VfsError::NotFound)?
+        };
+        let mut inode = self.read_inode(inode_num).map_err(|_| VfsError::Io)?;
+        inode.mode = (inode.mode & inode::MODE_TYPE_MASK) | (mode & CHMOD_MASK);
+        inode.change_time = CMOS::new().unix_time();
+        self.write_inode(inode_num, &inode)
+            .map_err(|_| VfsError::Io)
+    }
+
     fn set_attr(&mut self, path: &str, attr: u32, value: u32) -> Result<(), ()> {
         if attr != IFLAG_ENCRYPTED {
             return Err(());
@@ -2410,6 +2444,68 @@ impl FileSystem for TwilightFs {
             0
         })
     }
+
+    fn fs_type_name(&self) -> &'static str {
+        "twilightfs"
+    }
+
+    fn source_name(&self) -> &'static str {
+        "/dev/disk0"
+    }
+
+    fn stats(&mut self) -> Result<crate::sys::fs::vfs::FsStats, ()> {
+        let block_size = self.superblock.block_size as usize;
+        let bits_per_block = block_size * 8;
+        let data_zones = self
+            .superblock
+            .zones
+            .saturating_sub(self.superblock.first_data_zone) as usize;
+        let total_inodes = self.superblock.ninodes as usize;
+        let mut free_zones = 0u64;
+        let mut free_inodes = 0u64;
+        let mut buf = [0u8; FS_BLOCK_SIZE];
+
+        let zmap_start = self.superblock.imap_blocks + 1;
+        for block_idx in 0..self.superblock.zmap_blocks {
+            read_tfs_block(
+                self.device.lock().as_mut(),
+                zmap_start + block_idx,
+                &mut buf,
+            )
+            .map_err(|_| ())?;
+            let first_bit = block_idx as usize * bits_per_block;
+            let valid_bits = data_zones.saturating_sub(first_bit).min(bits_per_block);
+            for bit in 0..valid_bits {
+                if buf[bit / 8] & (1 << (bit % 8)) == 0 {
+                    free_zones += 1;
+                }
+            }
+        }
+
+        for block_idx in 0..self.superblock.imap_blocks {
+            read_tfs_block(self.device.lock().as_mut(), 1 + block_idx, &mut buf).map_err(|_| ())?;
+            let first_bit = block_idx as usize * bits_per_block;
+            let valid_bits = total_inodes.saturating_sub(first_bit).min(bits_per_block);
+            for bit in 0..valid_bits {
+                if buf[bit / 8] & (1 << (bit % 8)) == 0 {
+                    free_inodes += 1;
+                }
+            }
+        }
+
+        Ok(crate::sys::fs::vfs::FsStats {
+            fs_type: u32::from_le_bytes(*b"TFS0") as u64,
+            block_size: block_size as u64,
+            blocks: self.superblock.zones as u64,
+            blocks_free: free_zones,
+            blocks_available: free_zones,
+            files: self.superblock.ninodes as u64,
+            files_free: free_inodes,
+            name_length: 255,
+            fragment_size: block_size as u64,
+            flags: 0,
+        })
+    }
 }
 
 pub struct TfsProxy;
@@ -2420,9 +2516,9 @@ impl FileSystem for TfsProxy {
         unsafe { MFS.get_unchecked().lock() }.open(path)
     }
 
-    fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
+    fn mkdir(&mut self, parent_dir: &str, path: &str, mode: u16) -> Result<(), ()> {
         #[allow(static_mut_refs)]
-        unsafe { MFS.get_unchecked().lock() }.mkdir(parent_dir, path)
+        unsafe { MFS.get_unchecked().lock() }.mkdir(parent_dir, path, mode)
     }
 
     fn rmdir(&mut self, path: &str) -> Result<(), ()> {
@@ -2445,14 +2541,19 @@ impl FileSystem for TfsProxy {
         unsafe { MFS.get_unchecked().lock() }.rm(path)
     }
 
-    fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
+    fn touch(&mut self, parent_path: &str, filename: &str, mode: u16) -> Result<(), ()> {
         #[allow(static_mut_refs)]
-        unsafe { MFS.get_unchecked().lock() }.touch(parent_path, filename)
+        unsafe { MFS.get_unchecked().lock() }.touch(parent_path, filename, mode)
     }
 
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
         #[allow(static_mut_refs)]
         unsafe { MFS.get_unchecked().lock() }.metadata(path)
+    }
+
+    fn chmod(&mut self, path: &str, mode: u16) -> Result<(), crate::sys::fs::vfs::VfsError> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.chmod(path, mode)
     }
 
     fn set_attr(&mut self, path: &str, attr: u32, value: u32) -> Result<(), ()> {
@@ -2463,5 +2564,18 @@ impl FileSystem for TfsProxy {
     fn get_attr(&mut self, path: &str, attr: u32) -> Result<u32, ()> {
         #[allow(static_mut_refs)]
         unsafe { MFS.get_unchecked().lock() }.get_attr(path, attr)
+    }
+
+    fn fs_type_name(&self) -> &'static str {
+        "twilightfs"
+    }
+
+    fn source_name(&self) -> &'static str {
+        "/dev/disk0"
+    }
+
+    fn stats(&mut self) -> Result<crate::sys::fs::vfs::FsStats, ()> {
+        #[allow(static_mut_refs)]
+        unsafe { MFS.get_unchecked().lock() }.stats()
     }
 }

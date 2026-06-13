@@ -37,6 +37,7 @@ pub enum VfsError {
     AlreadyExists,
     Io,
     Invalid,
+    ReadOnly,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +99,20 @@ impl Metadata {
     }
 }
 pub type BlockDev = Arc<Mutex<Box<dyn BlockDeviceIO + Send>>>;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FsStats {
+    pub fs_type: u64,
+    pub block_size: u64,
+    pub blocks: u64,
+    pub blocks_free: u64,
+    pub blocks_available: u64,
+    pub files: u64,
+    pub files_free: u64,
+    pub name_length: u64,
+    pub fragment_size: u64,
+    pub flags: u64,
+}
 
 pub trait FsCtx {
     fn block_size(&self) -> usize;
@@ -236,25 +251,49 @@ pub trait VfsNodeOps: Send + Sync + 'static {
 
 pub trait FileSystem: Send + Sync + 'static {
     fn open(&mut self, path: &str) -> Result<VfsNode, ()>;
-    fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()>;
+    fn mkdir(&mut self, parent_dir: &str, path: &str, mode: u16) -> Result<(), ()>;
     fn rmdir(&mut self, path: &str) -> Result<(), ()>;
     fn rename(&mut self, _old_path: &str, _new_path: &str) -> Result<(), ()> {
         Err(())
     }
     fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()>;
     fn rm(&mut self, path: &str) -> Result<(), ()>;
-    fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()>;
+    fn touch(&mut self, parent_path: &str, filename: &str, mode: u16) -> Result<(), ()>;
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()>;
+    fn chmod(&mut self, _path: &str, _mode: u16) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
     fn set_attr(&mut self, _path: &str, _attr: u32, _value: u32) -> Result<(), ()> {
         Err(())
     }
     fn get_attr(&mut self, _path: &str, _attr: u32) -> Result<u32, ()> {
         Err(())
     }
+    fn fs_type_name(&self) -> &'static str {
+        "unknown"
+    }
+    fn source_name(&self) -> &'static str {
+        "none"
+    }
+    fn stats(&mut self) -> Result<FsStats, ()> {
+        Ok(FsStats {
+            block_size: 4096,
+            name_length: 255,
+            fragment_size: 4096,
+            ..FsStats::default()
+        })
+    }
+}
+
+pub struct MountPoint {
+    pub prefix: &'static str,
+    pub fs: Arc<Mutex<dyn FileSystem>>,
+    pub fs_type: &'static str,
+    pub source: &'static str,
 }
 
 pub struct Vfs {
-    pub mount_points: Vec<(&'static str, Arc<Mutex<dyn FileSystem>>)>,
+    pub mount_points: Vec<MountPoint>,
 }
 
 unsafe impl Send for Vfs {}
@@ -269,13 +308,26 @@ impl Vfs {
     }
 
     pub fn mount(&mut self, prefix: &'static str, fs: Arc<Mutex<dyn FileSystem>>) {
-        self.mount_points.push((prefix, fs));
+        let (fs_type, source) = {
+            let guard = fs.lock();
+            (guard.fs_type_name(), guard.source_name())
+        };
+        self.mount_points.push(MountPoint {
+            prefix,
+            fs,
+            fs_type,
+            source,
+        });
         self.mount_points
-            .sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()));
+            .sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
     }
 
     pub fn unmount(&mut self, prefix: &str) -> bool {
-        if let Some(i) = self.mount_points.iter().position(|(p, _)| *p == prefix) {
+        if let Some(i) = self
+            .mount_points
+            .iter()
+            .position(|mount| mount.prefix == prefix)
+        {
             self.mount_points.remove(i);
             true
         } else {
@@ -287,10 +339,12 @@ impl Vfs {
     fn route<'a>(&self, path: &'a str) -> Option<(&'a str, &Arc<Mutex<dyn FileSystem>>)> {
         self.mount_points
             .iter()
-            .find(|(p, _)| path.starts_with(*p) || ((path == ".") && (*p == "/")))
-            .map(|(prefix, fs)| {
-                let rel = &path[prefix.len()..];
-                (if rel.is_empty() { "/" } else { rel }, fs)
+            .find(|mount| {
+                path.starts_with(mount.prefix) || ((path == ".") && (mount.prefix == "/"))
+            })
+            .map(|mount| {
+                let rel = &path[mount.prefix.len()..];
+                (if rel.is_empty() { "/" } else { rel }, &mount.fs)
             })
     }
 
@@ -300,10 +354,10 @@ impl Vfs {
         guard.open(rel)
     }
 
-    pub fn mkdir(&self, parent_path: &str, path: &str) -> Result<(), ()> {
+    pub fn mkdir(&self, parent_path: &str, path: &str, mode: u16) -> Result<(), ()> {
         let (rel, fs) = self.route(parent_path).ok_or(())?;
         let mut guard = fs.lock();
-        guard.mkdir(rel, path)
+        guard.mkdir(rel, path, mode)
     }
 
     pub fn rmdir(&self, path: &str) -> Result<(), ()> {
@@ -334,16 +388,26 @@ impl Vfs {
         guard.rm(rel)
     }
 
-    pub fn touch(&self, parent_path: &str, filename: &str, _mode: u32) -> Result<(), ()> {
+    pub fn touch(&self, parent_path: &str, filename: &str, mode: u16) -> Result<(), ()> {
         let (rel, fs) = self.route(parent_path).ok_or(())?;
         let mut guard = fs.lock();
-        guard.touch(rel, filename)
+        guard.touch(rel, filename, mode)
     }
 
     pub fn metadata(&self, path: &str) -> Result<Metadata, ()> {
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
         guard.metadata(rel)
+    }
+
+    pub fn chmod(&self, path: &str, mode: u16) -> Result<(), VfsError> {
+        let (rel, fs) = self.route(path).ok_or(VfsError::NotFound)?;
+        fs.lock().chmod(rel, mode)
+    }
+
+    pub fn stats(&self, path: &str) -> Result<FsStats, ()> {
+        let (_, fs) = self.route(path).ok_or(())?;
+        fs.lock().stats()
     }
 
     pub fn set_attr(&self, path: &str, attr: u32, value: u32) -> Result<(), ()> {

@@ -113,10 +113,39 @@ fn build_version() -> String {
     "TwilightOS version 0.1.0-testing-build.x86_64 (#1 SMP PREEMPT)\n".into()
 }
 
+fn build_mountinfo() -> String {
+    let mut out = String::new();
+    #[allow(static_mut_refs)]
+    let vfs = unsafe { crate::sys::fs::vfs::VFS.get_mut() };
+    let root_id = 1usize;
+
+    if let Some(mount) = vfs.mount_points.iter().find(|mount| mount.prefix == "/") {
+        out.push_str(&format!(
+            "{root_id} 0 0:1 / / rw - {} {} rw\n",
+            mount.fs_type, mount.source
+        ));
+    }
+
+    let mut mount_id = root_id + 1;
+    for mount in &vfs.mount_points {
+        if mount.prefix == "/" {
+            continue;
+        }
+        out.push_str(&format!(
+            "{mount_id} {root_id} 0:{mount_id} / {} rw - {} {} rw\n",
+            mount.prefix, mount.fs_type, mount.source
+        ));
+        mount_id += 1;
+    }
+
+    out
+}
+
 pub struct CpuInfoNode;
 pub struct MemInfoNode;
 pub struct UptimeNode;
 pub struct VersionNode;
+pub struct MountInfoNode;
 
 impl VfsNodeOps for CpuInfoNode {
     fn read(&self, _device: &mut BlockDev, offset: usize, buf: &mut [u8]) -> Result<usize, ()> {
@@ -203,6 +232,29 @@ impl VfsNodeOps for VersionNode {
     fn ioctl(&mut self, _device: &mut BlockDev, cmd: u64, _arg: usize) -> Result<i64, ()> {
         match cmd {
             IOCTL_PROC_GET_SIZE => Ok(build_version().len() as i64),
+            _ => Ok(-(ENOTTY as i64)),
+        }
+    }
+    fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
+        Ok(-1)
+    }
+}
+
+impl VfsNodeOps for MountInfoNode {
+    fn read(&self, _device: &mut BlockDev, offset: usize, buf: &mut [u8]) -> Result<usize, ()> {
+        let s = build_mountinfo();
+        read_from_string(offset, buf, &s)
+    }
+    fn write(&mut self, _device: &mut BlockDev, _lba: usize, _data: &[u8]) -> Result<(), ()> {
+        Err(())
+    }
+    fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
+        Ok(true)
+    }
+    fn ioctl(&mut self, _device: &mut BlockDev, cmd: u64, _arg: usize) -> Result<i64, ()> {
+        match cmd {
+            // Avoid recursively locking ProcFs while ProcFs::open queries dynamic size.
+            IOCTL_PROC_GET_SIZE => Ok(0),
             _ => Ok(-(ENOTTY as i64)),
         }
     }

@@ -1,22 +1,17 @@
-use crate::driver::disk::dummy_blockdev;
-use crate::sys::fs::vfs::{BlockDev, FileType, Metadata, VfsNode, VfsNodeOps};
-use crate::task::executor::halt;
+use crate::sys::proc;
+use crate::utils::sync::WaitQueue;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 use spin::mutex::Mutex;
-use spin::rwlock::RwLock;
-use twilight_common::syscall::types::{EAGAIN, EPIPE};
+use twilight_common::syscall::types::{EAGAIN, EINTR, EPIPE};
 
-pub const IOCTL_PIPE_GET_ERRNO: u64 = 0x5457_0001; // "TW" private
-pub const IOCTL_PIPE_GET_LAST_WRITE: u64 = 0x5457_0002;
-
-const PIPE_CAPACITY: usize = 4096;
-
-static NEXT_PIPE_INO: AtomicU32 = AtomicU32::new(10_000);
+pub const PIPE_BUF: usize = 4096;
+const PIPE_CAPACITY: usize = PIPE_BUF;
+static NEXT_PIPE_ID: AtomicU32 = AtomicU32::new(10_000);
 
 struct PipeInner {
-    buf: VecDeque<u8>,
+    buffer: VecDeque<u8>,
     readers: usize,
     writers: usize,
 }
@@ -24,209 +19,196 @@ struct PipeInner {
 impl PipeInner {
     fn new() -> Self {
         Self {
-            buf: VecDeque::with_capacity(PIPE_CAPACITY),
-            readers: 0,
-            writers: 0,
+            buffer: VecDeque::with_capacity(PIPE_CAPACITY),
+            readers: 1,
+            writers: 1,
         }
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct PipeState {
+    id: u32,
+    inner: Mutex<PipeInner>,
+    readers: WaitQueue,
+    writers: WaitQueue,
+}
+
+impl PipeState {
+    fn new() -> Self {
+        Self {
+            id: NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed),
+            inner: Mutex::new(PipeInner::new()),
+            readers: WaitQueue::new(),
+            writers: WaitQueue::new(),
+        }
+    }
+
+    fn notify_state_change(&self) {
+        self.readers.notify_all();
+        self.writers.notify_all();
+        proc::poll_wait_queue().notify_all();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PipeEndKind {
     Read,
     Write,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PipePollState {
+    pub readable: bool,
+    pub writable: bool,
+    pub hangup: bool,
+    pub error: bool,
+}
+
 pub struct PipeEnd {
-    inner: Arc<Mutex<PipeInner>>,
+    state: Arc<PipeState>,
     kind: PipeEndKind,
-    nonblock: bool,
-    last_errno: AtomicI32, // positive errno
-    last_write: AtomicUsize,
 }
 
 impl PipeEnd {
-    fn new(inner: Arc<Mutex<PipeInner>>, kind: PipeEndKind, nonblock: bool) -> Self {
-        {
-            let mut g = inner.lock();
-            match kind {
-                PipeEndKind::Read => g.readers += 1,
-                PipeEndKind::Write => g.writers += 1,
-            }
+    fn new(state: Arc<PipeState>, kind: PipeEndKind) -> Self {
+        Self { state, kind }
+    }
+
+    pub fn read(&self, out: &mut [u8], nonblock: bool) -> Result<usize, i32> {
+        if self.kind != PipeEndKind::Read {
+            return Err(EPIPE);
         }
-        Self {
-            inner,
-            kind,
-            nonblock,
-            last_errno: AtomicI32::new(0),
-            last_write: AtomicUsize::new(0),
+        if out.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            let mut inner = self.state.inner.lock();
+
+            if !inner.buffer.is_empty() {
+                let count = out.len().min(inner.buffer.len());
+                for slot in &mut out[..count] {
+                    *slot = inner.buffer.pop_front().expect("pipe length checked");
+                }
+                drop(inner);
+                self.state.writers.notify_all();
+                proc::poll_wait_queue().notify_all();
+                return Ok(count);
+            }
+
+            if inner.writers == 0 {
+                return Ok(0);
+            }
+            if nonblock {
+                return Err(EAGAIN);
+            }
+            if proc::current_has_unblocked_signal() {
+                return Err(EINTR);
+            }
+
+            let pid = self.state.readers.prepare_current();
+            drop(inner);
+            proc::await_io();
+            self.state.readers.finish_wait(pid);
+
+            if proc::current_has_unblocked_signal() {
+                return Err(EINTR);
+            }
         }
     }
 
-    fn set_errno(&self, errno: i32) {
-        self.last_errno.store(errno, Ordering::Relaxed);
+    pub fn write(&self, data: &[u8], nonblock: bool) -> Result<usize, i32> {
+        if self.kind != PipeEndKind::Write {
+            return Err(EPIPE);
+        }
+        if data.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            let mut inner = self.state.inner.lock();
+
+            if inner.readers == 0 {
+                return Err(EPIPE);
+            }
+
+            let available = PIPE_CAPACITY.saturating_sub(inner.buffer.len());
+            let atomic_write = data.len() <= PIPE_BUF;
+            let can_write = if atomic_write {
+                available >= data.len()
+            } else {
+                available > 0
+            };
+
+            if can_write {
+                let count = if atomic_write {
+                    data.len()
+                } else {
+                    available.min(data.len())
+                };
+                inner.buffer.extend(data[..count].iter().copied());
+                drop(inner);
+                self.state.readers.notify_all();
+                proc::poll_wait_queue().notify_all();
+                return Ok(count);
+            }
+
+            if nonblock {
+                return Err(EAGAIN);
+            }
+            if proc::current_has_unblocked_signal() {
+                return Err(EINTR);
+            }
+
+            let pid = self.state.writers.prepare_current();
+            drop(inner);
+            proc::await_io();
+            self.state.writers.finish_wait(pid);
+
+            if proc::current_has_unblocked_signal() {
+                return Err(EINTR);
+            }
+        }
+    }
+
+    pub fn poll(&self) -> PipePollState {
+        let inner = self.state.inner.lock();
+        match self.kind {
+            PipeEndKind::Read => PipePollState {
+                readable: !inner.buffer.is_empty(),
+                hangup: inner.writers == 0,
+                ..PipePollState::default()
+            },
+            PipeEndKind::Write => PipePollState {
+                writable: inner.readers > 0 && inner.buffer.len() < PIPE_CAPACITY,
+                error: inner.readers == 0,
+                ..PipePollState::default()
+            },
+        }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.state.id
     }
 }
 
 impl Drop for PipeEnd {
     fn drop(&mut self) {
-        let mut g = self.inner.lock();
-        match self.kind {
-            PipeEndKind::Read => g.readers = g.readers.saturating_sub(1),
-            PipeEndKind::Write => g.writers = g.writers.saturating_sub(1),
+        {
+            let mut inner = self.state.inner.lock();
+            match self.kind {
+                PipeEndKind::Read => inner.readers = inner.readers.saturating_sub(1),
+                PipeEndKind::Write => inner.writers = inner.writers.saturating_sub(1),
+            }
         }
+        self.state.notify_state_change();
     }
 }
 
-impl VfsNodeOps for PipeEnd {
-    fn read(&self, _device: &mut BlockDev, _lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
-        if self.kind != PipeEndKind::Read {
-            self.set_errno(EPIPE);
-            return Err(());
-        }
-        if buf.is_empty() {
-            return Ok(0);
-        }
-
-        loop {
-            let mut inner = self.inner.lock();
-
-            if !inner.buf.is_empty() {
-                let mut n = 0usize;
-                while n < buf.len() {
-                    match inner.buf.pop_front() {
-                        Some(b) => {
-                            buf[n] = b;
-                            n += 1;
-                        }
-                        None => break,
-                    }
-                }
-                self.set_errno(0);
-                return Ok(n);
-            }
-
-            // Empty buffer: EOF if no writers.
-            if inner.writers == 0 {
-                self.set_errno(0);
-                return Ok(0);
-            }
-
-            if self.nonblock {
-                self.set_errno(EAGAIN);
-                return Err(());
-            }
-
-            drop(inner);
-            halt();
-        }
-    }
-
-    fn write(&mut self, _device: &mut BlockDev, _lba: usize, data: &[u8]) -> Result<(), ()> {
-        self.last_write.store(0, Ordering::Relaxed);
-
-        if self.kind != PipeEndKind::Write {
-            self.set_errno(EPIPE);
-            return Err(());
-        }
-        if data.is_empty() {
-            self.set_errno(0);
-            return Ok(());
-        }
-
-        loop {
-            let mut inner = self.inner.lock();
-
-            // No readers: EPIPE
-            if inner.readers == 0 {
-                self.set_errno(EPIPE);
-                return Err(());
-            }
-
-            let space = PIPE_CAPACITY.saturating_sub(inner.buf.len());
-            if space == 0 {
-                if self.nonblock {
-                    self.set_errno(EAGAIN);
-                    return Err(());
-                }
-                drop(inner);
-                halt();
-                continue;
-            }
-
-            let n = core::cmp::min(space, data.len());
-            inner.buf.extend(data[..n].iter().copied());
-            self.last_write.store(n, Ordering::Relaxed);
-            self.set_errno(0);
-            return Ok(());
-        }
-    }
-
-    fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
-        let inner = self.inner.lock();
-        match self.kind {
-            PipeEndKind::Read => Ok(!inner.buf.is_empty() || inner.writers == 0),
-            PipeEndKind::Write => Ok(inner.readers > 0 && inner.buf.len() < PIPE_CAPACITY),
-        }
-    }
-
-    fn ioctl(&mut self, _device: &mut BlockDev, cmd: u64, _arg: usize) -> Result<i64, ()> {
-        match cmd {
-            IOCTL_PIPE_GET_ERRNO => Ok(self.last_errno.load(Ordering::Relaxed) as i64),
-            IOCTL_PIPE_GET_LAST_WRITE => Ok(self.last_write.load(Ordering::Relaxed) as i64),
-            _ => Ok(0),
-        }
-    }
-
-    fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
-        Ok(-1)
-    }
-}
-
-pub fn make_pipe_nodes(nonblock: bool) -> (VfsNode, VfsNode) {
-    let inner = Arc::new(Mutex::new(PipeInner::new()));
-    let ino_r = NEXT_PIPE_INO.fetch_add(1, Ordering::Relaxed);
-    let ino_w = NEXT_PIPE_INO.fetch_add(1, Ordering::Relaxed);
-
-    let meta_r = Metadata {
-        ino: ino_r,
-        name: "pipe".into(),
-        uid: 0,
-        gid: 0,
-        file_type: FileType::CharDevice,
-        mode: 0o020666,
-        size: 0,
-        created_time: 0,
-        access_time: 0,
-        modified_time: 0,
-    };
-    let meta_w = Metadata {
-        ino: ino_w,
-        name: "pipe".into(),
-        file_type: FileType::CharDevice,
-        mode: 0o020666,
-        uid: 0,
-        gid: 0,
-        size: 0,
-        created_time: 0,
-        access_time: 0,
-        modified_time: 0,
-    };
-
-    let r_end: Arc<RwLock<dyn VfsNodeOps>> = Arc::new(RwLock::new(PipeEnd::new(
-        inner.clone(),
-        PipeEndKind::Read,
-        nonblock,
-    )));
-    let w_end: Arc<RwLock<dyn VfsNodeOps>> = Arc::new(RwLock::new(PipeEnd::new(
-        inner.clone(),
-        PipeEndKind::Write,
-        nonblock,
-    )));
-
-    let dev = dummy_blockdev();
-    let r_node = VfsNode::new(dev.clone(), meta_r, r_end);
-    let w_node = VfsNode::new(dev, meta_w, w_end);
-
-    (r_node, w_node)
+pub fn make_pipe_ends() -> (PipeEnd, PipeEnd) {
+    let state = Arc::new(PipeState::new());
+    (
+        PipeEnd::new(state.clone(), PipeEndKind::Read),
+        PipeEnd::new(state, PipeEndKind::Write),
+    )
 }

@@ -196,7 +196,7 @@ impl FileSystem for DevFs {
         Err(())
     }
 
-    fn mkdir(&mut self, _parent_dir: &str, _path: &str) -> Result<(), ()> {
+    fn mkdir(&mut self, _parent_dir: &str, _path: &str, _mode: u16) -> Result<(), ()> {
         Err(())
     }
     fn rmdir(&mut self, _path: &str) -> Result<(), ()> {
@@ -223,7 +223,7 @@ impl FileSystem for DevFs {
         Err(())
     }
 
-    fn touch(&mut self, _parent_path: &str, _filename: &str) -> Result<(), ()> {
+    fn touch(&mut self, _parent_path: &str, _filename: &str, _mode: u16) -> Result<(), ()> {
         Err(())
     }
 
@@ -252,6 +252,14 @@ impl FileSystem for DevFs {
         }
 
         Err(())
+    }
+
+    fn fs_type_name(&self) -> &'static str {
+        "devfs"
+    }
+
+    fn source_name(&self) -> &'static str {
+        "devfs"
     }
 }
 

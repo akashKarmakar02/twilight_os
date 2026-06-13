@@ -260,8 +260,8 @@ impl FileSystem for InitramfsFs {
         Ok(VfsNode::new(dummy_blockdev(), meta, ops))
     }
 
-    fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
-        let _ = (parent_dir, path);
+    fn mkdir(&mut self, parent_dir: &str, path: &str, mode: u16) -> Result<(), ()> {
+        let _ = (parent_dir, path, mode);
         Err(())
     }
 
@@ -293,13 +293,21 @@ impl FileSystem for InitramfsFs {
         Err(())
     }
 
-    fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
-        let _ = (parent_path, filename);
+    fn touch(&mut self, parent_path: &str, filename: &str, mode: u16) -> Result<(), ()> {
+        let _ = (parent_path, filename, mode);
         Err(())
     }
 
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
         let comps = self.split_path(path);
         self.node_metadata(&comps).ok_or(())
+    }
+
+    fn fs_type_name(&self) -> &'static str {
+        "ramfs"
+    }
+
+    fn source_name(&self) -> &'static str {
+        "initramfs"
     }
 }
