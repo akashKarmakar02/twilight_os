@@ -109,6 +109,36 @@ impl ProcFs {
             ),
         ));
 
+        files.push((
+            "self".to_string(),
+            VfsNode::new(
+                dummy_blockdev(),
+                Metadata::dir(1005, "self"),
+                Arc::new(RwLock::new(DirNodeOps)),
+            ),
+        ));
+
+        let mountinfo_meta = Metadata {
+            ino: 1006,
+            name: "mountinfo".into(),
+            file_type: FileType::File,
+            mode: 0o100444,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            created_time: 0,
+            access_time: 0,
+            modified_time: 0,
+        };
+        files.push((
+            "self/mountinfo".to_string(),
+            VfsNode::new(
+                dummy_blockdev(),
+                mountinfo_meta,
+                Arc::new(RwLock::new(nodes::MountInfoNode)),
+            ),
+        ));
+
         Self {
             file_structure: files,
         }
@@ -199,7 +229,7 @@ impl FileSystem for ProcFs {
         Err(())
     }
 
-    fn mkdir(&mut self, _parent_dir: &str, _path: &str) -> Result<(), ()> {
+    fn mkdir(&mut self, _parent_dir: &str, _path: &str, _mode: u16) -> Result<(), ()> {
         Err(())
     }
     fn rmdir(&mut self, _path: &str) -> Result<(), ()> {
@@ -226,7 +256,7 @@ impl FileSystem for ProcFs {
         Err(())
     }
 
-    fn touch(&mut self, _parent_path: &str, _filename: &str) -> Result<(), ()> {
+    fn touch(&mut self, _parent_path: &str, _filename: &str, _mode: u16) -> Result<(), ()> {
         Err(())
     }
 
@@ -256,5 +286,23 @@ impl FileSystem for ProcFs {
         }
 
         Err(())
+    }
+
+    fn fs_type_name(&self) -> &'static str {
+        "proc"
+    }
+
+    fn source_name(&self) -> &'static str {
+        "proc"
+    }
+
+    fn stats(&mut self) -> Result<crate::sys::fs::vfs::FsStats, ()> {
+        Ok(crate::sys::fs::vfs::FsStats {
+            fs_type: 0x9fa0,
+            block_size: 4096,
+            name_length: 255,
+            fragment_size: 4096,
+            ..crate::sys::fs::vfs::FsStats::default()
+        })
     }
 }

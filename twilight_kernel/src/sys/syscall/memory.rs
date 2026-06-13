@@ -103,10 +103,10 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         // - If it doesn't support mmap (ENOSYS), fall back to a generic "read file into pages"
         //   implementation for regular files (needed by dynamic loaders).
         let fd_i32 = fd as i32;
-        if fd_i32 < 0 || fd_i32 < 3 {
+        if fd_i32 < 0 {
             return EBADF;
         }
-        let idx = (fd_i32 - 3) as usize;
+        let idx = fd_i32 as usize;
         let Some(entry) = process.fd_table.get(idx).and_then(|slot| slot.as_ref()) else {
             return EBADF;
         };
@@ -115,6 +115,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         let file = file_ref.lock();
         let mut node_guard = match &file.kind {
             crate::sys::proc::OpenFileKind::Vfs(node_ref) => node_ref.lock(),
+            crate::sys::proc::OpenFileKind::Pipe(_) => return EINVAL,
             crate::sys::proc::OpenFileKind::Socket(_) => return EINVAL,
         };
         if node_guard.metadata.file_type == crate::sys::fs::vfs::FileType::Dir {
@@ -160,7 +161,13 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         // Track as "shared" (close enough for now).
         process.proc_mm.track_mmap(va, len, MmapKind::Shared);
     } else {
-        if let Err(_) = alloc_pages(&mut process.mapper, va as u64, map_len, writable, executable) {
+        if let Err(_) = alloc_pages(
+            &mut process.mapper,
+            va as u64,
+            map_len,
+            writable,
+            executable,
+        ) {
             return ENOMEM;
         }
         process.proc_mm.track_mmap(va, map_len, MmapKind::Owned);

@@ -22,6 +22,7 @@ pub const EISDIR: i32 = 21;
 pub const EINVAL: i32 = 22;
 pub const ENOTTY: i32 = 25;
 pub const ESPIPE: i32 = 29;
+pub const EROFS: i32 = 30;
 pub const ENOSYS: i32 = 38;
 pub const EOPNOTSUPP: i32 = 95;
 pub const EPIPE: i32 = 32;
@@ -185,6 +186,23 @@ pub struct Stat {
     pub st_mtim: Timespec,
     pub st_ctim: Timespec,
     pub __unused: [i64; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct StatFs {
+    pub f_type: u64,
+    pub f_bsize: u64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_fsid: [i32; 2],
+    pub f_namelen: u64,
+    pub f_frsize: u64,
+    pub f_flags: u64,
+    pub f_spare: [u64; 4],
 }
 
 #[repr(C)]

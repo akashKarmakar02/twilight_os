@@ -21,7 +21,7 @@ use crate::sys::fs::twilight_fs::{
     TfsProxy, TwilightFs, fs_block_offset_bytes, set_fs_block_offset_bytes,
 };
 use crate::sys::fs::vfs::VFS;
-use crate::sys::fs::vfs::{FileSystem, Metadata, VfsNode};
+use crate::sys::fs::vfs::{FileSystem, FsStats, Metadata, VfsNode};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -49,10 +49,10 @@ struct OffsetScopedTwilightFs {
 }
 
 impl OffsetScopedTwilightFs {
-    fn run_with_offset<T>(
+    fn run_with_offset<T, E>(
         &mut self,
-        f: impl FnOnce(&mut TwilightFs) -> Result<T, ()>,
-    ) -> Result<T, ()> {
+        f: impl FnOnce(&mut TwilightFs) -> Result<T, E>,
+    ) -> Result<T, E> {
         let old = fs_block_offset_bytes();
         set_fs_block_offset_bytes(self.offset_bytes);
         let out = f(&mut self.fs);
@@ -66,8 +66,8 @@ impl FileSystem for OffsetScopedTwilightFs {
         self.run_with_offset(|fs| fs.open(path))
     }
 
-    fn mkdir(&mut self, parent_dir: &str, path: &str) -> Result<(), ()> {
-        self.run_with_offset(|fs| fs.mkdir(parent_dir, path))
+    fn mkdir(&mut self, parent_dir: &str, path: &str, mode: u16) -> Result<(), ()> {
+        self.run_with_offset(|fs| fs.mkdir(parent_dir, path, mode))
     }
 
     fn rmdir(&mut self, path: &str) -> Result<(), ()> {
@@ -86,12 +86,28 @@ impl FileSystem for OffsetScopedTwilightFs {
         self.run_with_offset(|fs| fs.rm(path))
     }
 
-    fn touch(&mut self, parent_path: &str, filename: &str) -> Result<(), ()> {
-        self.run_with_offset(|fs| fs.touch(parent_path, filename))
+    fn touch(&mut self, parent_path: &str, filename: &str, mode: u16) -> Result<(), ()> {
+        self.run_with_offset(|fs| fs.touch(parent_path, filename, mode))
     }
 
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
         self.run_with_offset(|fs| fs.metadata(path))
+    }
+
+    fn chmod(&mut self, path: &str, mode: u16) -> Result<(), crate::sys::fs::vfs::VfsError> {
+        self.run_with_offset(|fs| fs.chmod(path, mode))
+    }
+
+    fn fs_type_name(&self) -> &'static str {
+        "twilightfs"
+    }
+
+    fn source_name(&self) -> &'static str {
+        "/dev/disk1"
+    }
+
+    fn stats(&mut self) -> Result<FsStats, ()> {
+        self.run_with_offset(|fs| fs.stats())
     }
 }
 
@@ -248,17 +264,17 @@ fn try_init_usb_storage(show_log: bool) -> bool {
             VFS.get_mut()
                 .mount_points
                 .iter()
-                .any(|(prefix, _)| *prefix == "/mnt/usb")
+                .any(|mount| mount.prefix == "/mnt/usb")
         };
 
         if !mounted {
             #[allow(static_mut_refs)]
             unsafe {
                 if VFS.get_mut().metadata("/mnt").is_err() {
-                    let _ = VFS.get_mut().mkdir("/", "mnt");
+                    let _ = VFS.get_mut().mkdir("/", "mnt", 0o755);
                 }
                 if VFS.get_mut().metadata("/mnt/usb").is_err() {
-                    let _ = VFS.get_mut().mkdir("/mnt", "usb");
+                    let _ = VFS.get_mut().mkdir("/mnt", "usb", 0o755);
                 }
                 VFS.get_mut().mount(
                     "/mnt/usb",
@@ -293,7 +309,7 @@ fn try_mount_boot(bus: u8, dsk: u8, show_log: bool) -> bool {
         VFS.get_mut()
             .mount_points
             .iter()
-            .any(|(prefix, _)| *prefix == "/boot")
+            .any(|mount| mount.prefix == "/boot")
     };
     if already {
         return true;

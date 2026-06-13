@@ -6,10 +6,13 @@ pub(crate) mod user;
 use crate::arch::x86_64::gdt::{SegmentSelector, USER_CS, USER_SS};
 use crate::arch::x86_64::io;
 use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
+use crate::driver::disk::dummy_blockdev;
 use crate::kernel_utils::exec::jump_to_user;
 use crate::println;
 use crate::sys::console::init_console;
-use crate::sys::fs::vfs::{VFS, VfsNode};
+use crate::sys::console::tty::TtyDev;
+use crate::sys::fs::pipe::PipeEnd;
+use crate::sys::fs::vfs::{Metadata, VFS, VfsNode, VfsNodeOps};
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::{alloc_pages, kernel_page_table, phys_mem_offset};
 use crate::sys::proc::mem::ProcMM;
@@ -31,6 +34,7 @@ use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Once;
 use spin::mutex::Mutex;
+use spin::rwlock::RwLock;
 use twilight_common::syscall::types::{O_RDONLY, O_WRONLY};
 use x86_64::VirtAddr;
 use x86_64::registers::control::Cr3;
@@ -164,6 +168,7 @@ pub enum ProcessState {
 pub const SIGNAL_COUNT: usize = 65;
 pub const SIGCHLD: usize = 17;
 pub const SIGKILL: usize = 9;
+pub const SIGPIPE: usize = 13;
 pub const SIGSTOP: usize = 19;
 
 #[repr(C)]
@@ -328,6 +333,7 @@ pub struct OpenFile {
 
 pub enum OpenFileKind {
     Vfs(Arc<Mutex<VfsNode>>),
+    Pipe(Arc<PipeEnd>),
     Socket(crate::sys::net::socket::SocketFile),
 }
 
@@ -335,6 +341,29 @@ pub enum OpenFileKind {
 pub struct FdEntry {
     pub file: Arc<Mutex<OpenFile>>,
     pub fd_flags: i32,
+}
+
+fn standard_fd_table() -> Vec<Option<FdEntry>> {
+    [O_RDONLY, O_WRONLY, O_WRONLY]
+        .into_iter()
+        .map(|status_flags| {
+            let tty_ops: Arc<RwLock<dyn VfsNodeOps>> = Arc::new(RwLock::new(TtyDev));
+            let tty_node = Arc::new(Mutex::new(VfsNode::new(
+                dummy_blockdev(),
+                Metadata::chr(4, "tty"),
+                tty_ops,
+            )));
+            Some(FdEntry {
+                file: Arc::new(Mutex::new(OpenFile {
+                    kind: OpenFileKind::Vfs(tty_node),
+                    seek: 0,
+                    path: "/dev/tty".to_string(),
+                    status_flags,
+                })),
+                fd_flags: 0,
+            })
+        })
+        .collect()
 }
 
 #[repr(C)]
@@ -360,10 +389,7 @@ pub struct Process {
     pub exe_path: String,
     pub pwd: String,
     pub fd_table: Vec<Option<FdEntry>>,
-    pub stdio_flags: [i32; 3],
-    pub stdio_fd_flags: [i32; 3],
-    /// For fd 0/1/2 redirection: -1 means tty, otherwise points to an fd >= 3.
-    pub stdio_target: [i32; 3],
+    pub umask: u16,
     pub proc_mm: Box<ProcMM>,
     pub exit_code: i32,
     pub wait_status: i32,
@@ -379,6 +405,60 @@ pub struct Process {
 }
 
 impl Process {
+    pub fn fd_entry(&self, fd: i32) -> Option<&FdEntry> {
+        usize::try_from(fd)
+            .ok()
+            .and_then(|index| self.fd_table.get(index))
+            .and_then(Option::as_ref)
+    }
+
+    pub fn fd_entry_mut(&mut self, fd: i32) -> Option<&mut FdEntry> {
+        usize::try_from(fd)
+            .ok()
+            .and_then(|index| self.fd_table.get_mut(index))
+            .and_then(Option::as_mut)
+    }
+
+    pub fn install_fd(&mut self, entry: FdEntry, min_fd: i32) -> Result<i32, i32> {
+        let start = usize::try_from(min_fd).map_err(|_| twilight_common::syscall::types::EINVAL)?;
+        if self.fd_table.len() < start {
+            self.fd_table.resize_with(start, || None);
+        }
+
+        if let Some(index) = self.fd_table[start..]
+            .iter()
+            .position(Option::is_none)
+            .map(|offset| start + offset)
+        {
+            self.fd_table[index] = Some(entry);
+            return i32::try_from(index).map_err(|_| twilight_common::syscall::types::EMFILE);
+        }
+
+        let index = self.fd_table.len();
+        self.fd_table.push(Some(entry));
+        i32::try_from(index).map_err(|_| twilight_common::syscall::types::EMFILE)
+    }
+
+    pub fn replace_fd(&mut self, fd: i32, entry: FdEntry) -> Result<Option<FdEntry>, i32> {
+        let index = usize::try_from(fd).map_err(|_| twilight_common::syscall::types::EBADF)?;
+        if self.fd_table.len() <= index {
+            self.fd_table.resize_with(index + 1, || None);
+        }
+        Ok(self.fd_table[index].replace(entry))
+    }
+
+    pub fn close_fd(&mut self, fd: i32) -> Result<FdEntry, i32> {
+        let index = usize::try_from(fd).map_err(|_| twilight_common::syscall::types::EBADF)?;
+        self.fd_table
+            .get_mut(index)
+            .and_then(Option::take)
+            .ok_or(twilight_common::syscall::types::EBADF)
+    }
+
+    pub fn close_all_fds(&mut self) {
+        self.fd_table.clear();
+    }
+
     pub fn queue_signal(&mut self, sig: usize) {
         if !(1..=64).contains(&sig) {
             return;
@@ -564,14 +644,12 @@ impl Process {
             kernel_gs: kgs,
             fs_base: VirtAddr::zero(),
             gs_base: VirtAddr::zero(),
-            fd_table: Vec::new(),
+            fd_table: standard_fd_table(),
             proc_mm,
             parent_pid,
             pgid: pid,
             sid,
-            stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
-            stdio_fd_flags: [0; 3],
-            stdio_target: [-1; 3],
+            umask: 0o022,
             exit_code: 0,
             wait_status: 0,
             wait_reported: false,
@@ -721,14 +799,10 @@ impl Process {
         // FPU state reset?
         self.fpu_storage = Some(FpuState::default());
 
-        // File descriptors are PRESERVED (except CLOEXEC, which we handle in syscall service normally, or here?)
-        // Standard execve closes CLOEXEC fds.
-        for fd in self.fd_table.iter_mut() {
-            if let Some(entry) = fd {
-                if (entry.fd_flags & 1) != 0 {
-                    // FD_CLOEXEC
-                    *fd = None;
-                }
+        // Preserve descriptors across exec except those marked close-on-exec.
+        for slot in &mut self.fd_table {
+            if slot.as_ref().is_some_and(|entry| entry.fd_flags & 1 != 0) {
+                *slot = None;
             }
         }
 
@@ -921,9 +995,7 @@ impl Process {
             parent_pid: self.pid,
             pgid: self.pgid,
             sid: self.sid,
-            stdio_flags: self.stdio_flags,
-            stdio_fd_flags: self.stdio_fd_flags,
-            stdio_target: self.stdio_target,
+            umask: self.umask,
             exit_code: 0,
             wait_status: 0,
             wait_reported: false,
@@ -997,6 +1069,17 @@ pub fn queue_signal(pid: u16, sig: usize) -> bool {
     true
 }
 
+pub fn current_has_unblocked_signal() -> bool {
+    let current = id();
+    #[allow(static_mut_refs)]
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return false;
+    };
+    table
+        .get_process(current)
+        .is_some_and(|process| process.has_unblocked_signal())
+}
+
 pub fn poll_wait_queue() -> &'static WaitQueue {
     &POLL_WAIT_QUEUE
 }
@@ -1021,6 +1104,7 @@ pub fn exit(code: i32) {
 
     let parent_pid = slice[cur_idx].parent_pid;
     crate::serial_println!("[exit] pid={} parent={}", current_pid, parent_pid);
+    slice[cur_idx].close_all_fds();
     slice[cur_idx].state = ProcessState::Dead;
     slice[cur_idx].exit_code = code;
     slice[cur_idx].wait_status = (code & 0xff) << 8;
@@ -1076,6 +1160,7 @@ pub fn terminate_current_by_signal(sig: i32) -> ! {
     };
 
     let parent_pid = slice[cur_idx].parent_pid;
+    slice[cur_idx].close_all_fds();
     slice[cur_idx].state = ProcessState::Dead;
     slice[cur_idx].exit_code = 128 + sig;
     slice[cur_idx].wait_status = sig & 0x7f;
@@ -1461,9 +1546,7 @@ pub fn init() {
                 parent_pid: 1,
                 pgid: pid,
                 sid: pid,
-                stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
-                stdio_fd_flags: [0; 3],
-                stdio_target: [-1; 3],
+                umask: 0o022,
                 exit_code: 0,
                 wait_status: 0,
                 wait_reported: false,
@@ -1507,9 +1590,7 @@ pub fn init() {
         fd_table: Vec::new(),
         state: ProcessState::Running,
         stack_size: 0,
-        stdio_flags: [O_RDONLY, O_WRONLY, O_WRONLY],
-        stdio_fd_flags: [0; 3],
-        stdio_target: [-1; 3],
+        umask: 0o022,
         exit_code: 0,
         wait_status: 0,
         wait_reported: false,
