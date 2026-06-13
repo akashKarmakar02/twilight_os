@@ -238,7 +238,7 @@ limine/limine:
 
 .PHONY: kernel
 kernel:
-	$(MAKE) -C twilight_kernel
+	$(MAKE) -C kernel/twilight_kernel
 
 .PHONY: userspace
 userspace:
@@ -251,7 +251,7 @@ cpio: userspace
 $(IMAGE_NAME).iso: limine/limine kernel cpio
 	rm -rf iso_root
 	mkdir -p iso_root/boot
-	cp -v twilight_kernel/kernel iso_root/boot/
+	cp -v kernel/twilight_kernel/kernel iso_root/boot/
 	cp -v rootfs.cpio iso_root/boot/
 	mkdir -p iso_root/boot/limine
 	cp -v limine.conf iso_root/boot/limine/
@@ -303,7 +303,7 @@ ifeq ($(KARCH),x86_64)
 endif
 	mformat -F -i $(IMAGE_NAME).hdd@@1M
 	mmd -i $(IMAGE_NAME).hdd@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
-	mcopy -i $(IMAGE_NAME).hdd@@1M twilight_kernel/kernel ::/boot
+	mcopy -i $(IMAGE_NAME).hdd@@1M kernel/twilight_kernel/kernel ::/boot
 	mcopy -i $(IMAGE_NAME).hdd@@1M rootfs.cpio ::/boot
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine.conf ::/boot/limine
 ifeq ($(KARCH),x86_64)

@@ -1,0 +1,9 @@
+[workspace]
+members = ["twilight_common", "twilight_kernel", "twilight_proc"]
+resolver = "1"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
