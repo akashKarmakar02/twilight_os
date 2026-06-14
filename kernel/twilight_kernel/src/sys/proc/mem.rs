@@ -113,16 +113,48 @@ impl ProcMM {
         self.mmap_regions.push(region);
     }
 
-    pub fn remove_mmap(&mut self, base: usize, len: usize) -> Option<MmapKind> {
-        if let Some(pos) = self
-            .mmap_regions
-            .iter()
-            .position(|r| r.base == base && r.len == len)
-        {
-            Some(self.mmap_regions.remove(pos).kind)
-        } else {
-            None
+    pub fn remove_mmap_range(&mut self, base: usize, len: usize) -> Vec<MmapRegion> {
+        let Some(end) = base.checked_add(len) else {
+            return Vec::new();
+        };
+
+        let mut kept = Vec::with_capacity(self.mmap_regions.len());
+        let mut removed = Vec::new();
+
+        for region in self.mmap_regions.drain(..) {
+            let region_end = region.base.saturating_add(region.len);
+            let overlap_start = core::cmp::max(base, region.base);
+            let overlap_end = core::cmp::min(end, region_end);
+
+            if overlap_start >= overlap_end {
+                kept.push(region);
+                continue;
+            }
+
+            removed.push(MmapRegion {
+                base: overlap_start,
+                len: overlap_end - overlap_start,
+                kind: region.kind,
+            });
+
+            if region.base < overlap_start {
+                kept.push(MmapRegion {
+                    base: region.base,
+                    len: overlap_start - region.base,
+                    kind: region.kind,
+                });
+            }
+            if overlap_end < region_end {
+                kept.push(MmapRegion {
+                    base: overlap_end,
+                    len: region_end - overlap_end,
+                    kind: region.kind,
+                });
+            }
         }
+
+        self.mmap_regions = kept;
+        removed
     }
 
     #[inline]

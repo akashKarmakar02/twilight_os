@@ -24,6 +24,24 @@ const ENOSYS: i64 = -38;
 const ESRCH: i64 = -3;
 const EBADF: i64 = -9;
 
+fn unmap_tracked_range(
+    process: &mut crate::sys::proc::Process,
+    base: usize,
+    len: usize,
+) -> Result<(), ()> {
+    for region in process.proc_mm.remove_mmap_range(base, len) {
+        match region.kind {
+            MmapKind::Owned => {
+                dealloc_pages(&mut process.mapper, region.base as u64, region.len)?;
+            }
+            MmapKind::Shared => {
+                unmap_user_pages(&mut process.mapper, region.base as u64, region.len)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: u64) -> i64 {
     #[allow(static_mut_refs)]
     let proc = unsafe {
@@ -59,12 +77,6 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     }
 
     let is_file_backed = (flags & MAP_ANONYMOUS) == 0 && (fd as i64) != -1;
-    let map_len = if !is_file_backed && (flags & MAP_FIXED) == 0 {
-        len.checked_add(PAGE).unwrap_or(len)
-    } else {
-        len
-    };
-
     let va = if (flags & MAP_FIXED) != 0 {
         if addr == 0 || (addr as usize & (PAGE - 1)) != 0 {
             return EINVAL;
@@ -72,7 +84,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         addr as usize
     } else {
         // ignore addr if 0; otherwise you can treat it as a hint later
-        match process.proc_mm.reserve_mmap_range(map_len) {
+        match process.proc_mm.reserve_mmap_range(len) {
             Some(v) => v,
             None => return ENOMEM,
         }
@@ -83,10 +95,12 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         return EINVAL;
     }
 
+    if (flags & MAP_FIXED) != 0 && unmap_tracked_range(process, va, len).is_err() {
+        return -(EIO as i64);
+    }
+
     if prot == 0 {
-        if (flags & MAP_FIXED) == 0 {
-            process.proc_mm.track_mmap(va, map_len, MmapKind::Owned);
-        }
+        process.proc_mm.track_mmap(va, len, MmapKind::Owned);
         return va as i64;
     }
 
@@ -154,16 +168,10 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         // Track as "shared" (close enough for now).
         process.proc_mm.track_mmap(va, len, MmapKind::Shared);
     } else {
-        if let Err(_) = alloc_pages(
-            &mut process.mapper,
-            va as u64,
-            map_len,
-            writable,
-            executable,
-        ) {
+        if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, writable, executable) {
             return ENOMEM;
         }
-        process.proc_mm.track_mmap(va, map_len, MmapKind::Owned);
+        process.proc_mm.track_mmap(va, len, MmapKind::Owned);
     }
     // logger!(
     //     "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
@@ -242,21 +250,8 @@ pub fn munmap(addr: u64, size: usize) -> i64 {
 
     let len = align_up(size, PAGE);
     let base = addr as usize;
-    let Some(kind) = p.proc_mm.remove_mmap(base, len) else {
-        return EINVAL;
-    };
-
-    match kind {
-        MmapKind::Owned => {
-            if let Err(()) = dealloc_pages(&mut p.mapper, addr, len) {
-                return -1;
-            }
-        }
-        MmapKind::Shared => {
-            if let Err(()) = unmap_user_pages(&mut p.mapper, addr, len) {
-                return -1;
-            }
-        }
+    if unmap_tracked_range(p, base, len).is_err() {
+        return -(EIO as i64);
     }
 
     0

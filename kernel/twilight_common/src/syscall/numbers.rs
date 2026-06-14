@@ -80,6 +80,7 @@ pub const SYS_LISTXATTR: usize = 194;
 pub const SYS_LLISTXATTR: usize = 195;
 pub const SYS_FLISTXATTR: usize = 196;
 pub const SYS_TIME: usize = 201;
+pub const SYS_SCHED_GETAFFINITY: usize = 204;
 pub const SYS_GETDENTS64: usize = 217;
 pub const SYS_SETTID_ADDR: usize = 218;
 pub const SYS_CLOCK_GETTIME: usize = 228;

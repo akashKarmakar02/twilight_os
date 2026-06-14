@@ -1187,6 +1187,48 @@ pub fn sched_yield() -> i64 {
     0
 }
 
+pub fn sched_getaffinity(pid: i32, cpusetsize: usize, mask_ptr: usize) -> i64 {
+    let cpu_count = crate::driver::cpu::cpu_count();
+    let word_size = size_of::<usize>();
+    let mask_size = cpu_count.div_ceil(usize::BITS as usize) * word_size;
+
+    if cpusetsize < cpu_count.div_ceil(8) || cpusetsize % word_size != 0 {
+        return -(EINVAL as i64);
+    }
+
+    let target_pid = if pid == 0 {
+        crate::sys::proc::id()
+    } else if pid > 0 && pid <= u16::MAX as i32 {
+        pid as u16
+    } else {
+        return -(ESRCH as i64);
+    };
+
+    #[allow(static_mut_refs)]
+    let target_exists = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .proc_list
+            .iter()
+            .any(|process| process.pid == target_pid)
+    };
+    if !target_exists {
+        return -(ESRCH as i64);
+    }
+    if mask_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let copy_len = core::cmp::min(cpusetsize, mask_size);
+    let mask = unsafe { core::slice::from_raw_parts_mut(mask_ptr as *mut u8, copy_len) };
+    mask.fill(0);
+
+    // Userspace tasks currently run only on the bootstrap processor.
+    mask[0] = 1;
+    copy_len as i64
+}
+
 pub fn pread64(fd: i32, buf_ptr: usize, count: usize, offset: u64) -> i64 {
     if buf_ptr == 0 {
         return -(EFAULT as i64);

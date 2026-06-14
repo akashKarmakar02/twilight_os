@@ -242,6 +242,9 @@ pub extern "sysv64" fn syscall_handler(
             arg5 as usize,
             arg6 as u32,
         ),
+        SYS_SCHED_GETAFFINITY => {
+            service::sched_getaffinity(arg1 as i32, arg2 as usize, arg3 as usize)
+        }
         SYS_OPENAT => {
             let upath = UserPtr(arg2 as *const u8);
 
