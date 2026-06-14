@@ -80,6 +80,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_MPROTECT => memory::mprotect(arg1, arg2 as usize, arg3 as usize),
         SYS_MUNMAP => memory::munmap(arg1, arg2 as usize),
         SYS_BRK => memory::brk(arg1 as usize),
+        SYS_DUP => service::dup(arg1 as i32),
         SYS_DUP2 => service::dup2(arg1 as i32, arg2 as i32),
         SYS_IOCTL => {
             service::ioctl(arg1 as usize, arg2 as usize, arg3 as usize)
@@ -168,6 +169,13 @@ pub extern "sysv64" fn syscall_handler(
         SYS_SET_GID => service::setgid(arg1),
         SYS_GET_EUID => service::geteuid(),
         SYS_GET_EGID => service::getegid(),
+        SYS_PRCTL => service::prctl(
+            arg1 as i32,
+            arg2 as usize,
+            arg3 as usize,
+            arg4 as usize,
+            arg5 as usize,
+        ),
         SYS_ARCH_PRCTL => service::arch_prctl(arg1, arg2),
         SYS_LISTXATTR => service::listxattr(arg1 as usize, arg2 as usize, arg3 as usize),
         SYS_LLISTXATTR => service::llistxattr(arg1 as usize, arg2 as usize, arg3 as usize),
@@ -208,6 +216,8 @@ pub extern "sysv64" fn syscall_handler(
                 }
             }
         }
+        SYS_SETITIMER => service::setitimer(arg1 as i32, arg2 as usize, arg3 as usize),
+        SYS_CAPGET => service::capget(arg1 as usize, arg2 as usize),
         SYS_GETDENTS64 => {
             let fd = arg1 as i32;
             let buf = arg2 as *mut u8;

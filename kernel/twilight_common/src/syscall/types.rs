@@ -3,6 +3,9 @@ pub const ARCH_SET_FS: u64 = 0x1002;
 pub const ARCH_GET_FS: u64 = 0x1003;
 pub const ARCH_GET_GS: u64 = 0x1004;
 
+pub const PR_SET_NAME: i32 = 15;
+pub const PR_GET_NAME: i32 = 16;
+
 // --- AT_* ---
 pub const AT_FDCWD: i32 = -100;
 
@@ -14,6 +17,7 @@ pub const EINTR: i32 = 4;
 pub const EIO: i32 = 5;
 pub const ENOEXEC: i32 = 8;
 pub const EBADF: i32 = 9;
+pub const ECHILD: i32 = 10;
 pub const EAGAIN: i32 = 11;
 pub const EACCES: i32 = 13;
 pub const EEXIST: i32 = 17;
@@ -115,6 +119,39 @@ pub struct SockAddrIn {
 pub struct Timespec {
     pub tv_sec: i64,  // time_t: seconds
     pub tv_nsec: i64, // long: nanoseconds
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Timeval {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Itimerval {
+    pub it_interval: Timeval,
+    pub it_value: Timeval,
+}
+
+pub const LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;
+pub const LINUX_CAPABILITY_VERSION_2: u32 = 0x2007_1026;
+pub const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CapUserHeader {
+    pub version: u32,
+    pub pid: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CapUserData {
+    pub effective: u32,
+    pub permitted: u32,
+    pub inheritable: u32,
 }
 
 #[repr(C)]

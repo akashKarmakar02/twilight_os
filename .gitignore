@@ -6,6 +6,7 @@
 /.zig-cache
 /rootfs/bin
 twilight_kernel/kernel
+kernel/twilight_kernel/kernel
 twilight-os.iso
 rootfs.cpio
 hdd.img

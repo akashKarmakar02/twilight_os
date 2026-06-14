@@ -242,6 +242,11 @@ fn install_fd_entry(process: &mut Process, entry: FdEntry, min_fd: i32) -> Resul
     process.install_fd(entry, min_fd)
 }
 
+fn duplicate_fd(process: &mut Process, oldfd: i32, min_fd: i32, fd_flags: i32) -> Result<i32, i32> {
+    let file = fd_slot(process, oldfd)?.file.clone();
+    install_fd_entry(process, FdEntry { file, fd_flags }, min_fd).map_err(|errno| -errno)
+}
+
 fn base_for_dirfd(process: &mut Process, dirfd: i32) -> Result<String, i32> {
     if dirfd == AT_FDCWD {
         return Ok(process.pwd.clone());
@@ -468,6 +473,28 @@ pub fn dup2(oldfd: i32, newfd: i32) -> i64 {
             newfd as i64
         }
         Err(errno) => -(errno as i64),
+    }
+}
+
+pub fn dup(oldfd: i32) -> i64 {
+    if oldfd < 0 {
+        return -(EBADF as i64);
+    }
+
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = process else {
+        return -(ESRCH as i64);
+    };
+
+    match duplicate_fd(process, oldfd, 0, 0) {
+        Ok(newfd) => newfd as i64,
+        Err(code) => code as i64,
     }
 }
 
@@ -945,6 +972,7 @@ pub fn execev(
         match p.exec(&image_buf, &argv_strs, &env_strs) {
             Ok((entry, sp)) => {
                 p.exe_path = image_path.clone();
+                p.set_comm_from_path(&image_path);
                 crate::serial_println!(
                     "[execve] pid={} loaded path={} entry={:#x} sp={:#x}",
                     crate::sys::proc::id(),
@@ -1123,7 +1151,7 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
                 }
             } else if !has_children {
                 crate::serial_println!("[wait4] pid={} no children", current_pid);
-                return -(crate::sys::syscall::SyscallError::ECHILD as i64);
+                return -(ECHILD as i64);
             }
         }
 
@@ -1289,6 +1317,115 @@ pub fn arch_prctl(code: u64, addr: u64) -> i64 {
     }
 }
 
+pub fn prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> i64 {
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = process else {
+        return -(ESRCH as i64);
+    };
+
+    match option {
+        PR_SET_NAME => {
+            if arg2 == 0 {
+                return -(EFAULT as i64);
+            }
+            let name = unsafe { core::slice::from_raw_parts(arg2 as *const u8, 16) };
+            process.set_comm(name);
+            0
+        }
+        PR_GET_NAME => {
+            if arg2 == 0 {
+                return -(EFAULT as i64);
+            }
+            let out = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, 16) };
+            out.copy_from_slice(&process.comm());
+            0
+        }
+        _ => -(EINVAL as i64),
+    }
+}
+
+pub fn capget(header_ptr: usize, data_ptr: usize) -> i64 {
+    if header_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let header = unsafe { &mut *(header_ptr as *mut CapUserHeader) };
+    let data_words = match header.version {
+        LINUX_CAPABILITY_VERSION_1 => 1,
+        LINUX_CAPABILITY_VERSION_2 | LINUX_CAPABILITY_VERSION_3 => 2,
+        _ => {
+            header.version = LINUX_CAPABILITY_VERSION_3;
+            return -(EINVAL as i64);
+        }
+    };
+
+    let current_pid = crate::sys::proc::id();
+    let target_pid = if header.pid == 0 {
+        current_pid
+    } else if header.pid > 0 && header.pid <= u16::MAX as i32 {
+        header.pid as u16
+    } else {
+        return -(EINVAL as i64);
+    };
+
+    #[allow(static_mut_refs)]
+    let target_exists = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .proc_list
+            .iter()
+            .any(|process| process.pid == target_pid)
+    };
+    if !target_exists {
+        return -(ESRCH as i64);
+    }
+    if data_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let data = unsafe { core::slice::from_raw_parts_mut(data_ptr as *mut CapUserData, data_words) };
+    data.fill(CapUserData::default());
+    0
+}
+
+fn valid_timeval(value: Timeval) -> bool {
+    value.tv_sec >= 0 && (0..1_000_000).contains(&value.tv_usec)
+}
+
+pub fn setitimer(which: i32, new_value_ptr: usize, old_value_ptr: usize) -> i64 {
+    const ITIMER_REAL: i32 = 0;
+
+    if which != ITIMER_REAL {
+        return -(ENOSYS as i64);
+    }
+
+    let new_value = if new_value_ptr == 0 {
+        Itimerval::default()
+    } else {
+        unsafe { *(new_value_ptr as *const Itimerval) }
+    };
+    if !valid_timeval(new_value.it_interval) || !valid_timeval(new_value.it_value) {
+        return -(EINVAL as i64);
+    }
+    if new_value.it_interval != Timeval::default() || new_value.it_value != Timeval::default() {
+        return -(ENOSYS as i64);
+    }
+
+    if old_value_ptr != 0 {
+        unsafe {
+            *(old_value_ptr as *mut Itimerval) = Itimerval::default();
+        }
+    }
+    0
+}
+
 pub fn writev(fd: i32, iov_ptr: u64, iovcnt: i32) -> i64 {
     if iovcnt < 0 {
         return -(EINVAL as i64);
@@ -1385,21 +1522,14 @@ pub fn fcntl(fd: i32, cmd: i32, arg: u64) -> i64 {
                 return -(EINVAL as i64);
             }
             let min_fd = arg as i32;
-            let src_entry = match fd_slot(process, fd) {
-                Ok(entry) => entry,
-                Err(code) => return code as i64,
+            let fd_flags = if cmd == F_DUPFD_CLOEXEC {
+                FD_CLOEXEC
+            } else {
+                0
             };
-            let new_entry = FdEntry {
-                file: src_entry.file.clone(),
-                fd_flags: if cmd == F_DUPFD_CLOEXEC {
-                    FD_CLOEXEC
-                } else {
-                    0
-                },
-            };
-            match install_fd_entry(process, new_entry, min_fd) {
+            match duplicate_fd(process, fd, min_fd, fd_flags) {
                 Ok(new_fd) => new_fd as i64,
-                Err(code) => -(code as i64),
+                Err(code) => code as i64,
             }
         }
         _ => -(EINVAL as i64),
@@ -3291,13 +3421,6 @@ pub fn getpeername(fd: i32, addr_ptr: usize, addrlen_ptr: usize) -> i64 {
 
 pub fn getpid() -> i64 {
     crate::sys::proc::id() as i64
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct Timeval {
-    tv_sec: i64,
-    tv_usec: i64,
 }
 
 #[repr(C)]

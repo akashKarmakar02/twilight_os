@@ -52,6 +52,7 @@ const MAIN_DYN_LOAD_BASE: u64 = 0x4000_0000;
 const INTERP_DYN_LOAD_BASE: u64 = 0x6000_0000;
 const PAGE_SIZE_U64: u64 = 4096;
 const STATIC_TLS_SPILL_PAGES: u64 = 2;
+const TASK_COMM_LEN: usize = 16;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
 static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
@@ -366,6 +367,17 @@ fn standard_fd_table() -> Vec<Option<FdEntry>> {
         .collect()
 }
 
+fn task_comm_from_path(path: &str) -> [u8; TASK_COMM_LEN] {
+    let mut comm = [0; TASK_COMM_LEN];
+    let name = path
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(path);
+    let len = name.len().min(TASK_COMM_LEN - 1);
+    comm[..len].copy_from_slice(&name.as_bytes()[..len]);
+    comm
+}
+
 #[repr(C)]
 pub struct Process {
     pub context: *mut Context,
@@ -387,6 +399,7 @@ pub struct Process {
     pub state: ProcessState,
     pub addr_size_vec: Vec<(u64, usize)>,
     pub exe_path: String,
+    comm: [u8; TASK_COMM_LEN],
     pub pwd: String,
     pub fd_table: Vec<Option<FdEntry>>,
     pub umask: u16,
@@ -405,6 +418,28 @@ pub struct Process {
 }
 
 impl Process {
+    pub fn set_comm(&mut self, name: &[u8]) {
+        self.comm.fill(0);
+        let len = name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(name.len())
+            .min(TASK_COMM_LEN - 1);
+        self.comm[..len].copy_from_slice(&name[..len]);
+    }
+
+    pub fn set_comm_from_path(&mut self, path: &str) {
+        let name = path
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+            .unwrap_or(path);
+        self.set_comm(name.as_bytes());
+    }
+
+    pub fn comm(&self) -> [u8; TASK_COMM_LEN] {
+        self.comm
+    }
+
     pub fn fd_entry(&self, fd: i32) -> Option<&FdEntry> {
         usize::try_from(fd)
             .ok()
@@ -640,6 +675,7 @@ impl Process {
             state: ProcessState::Running,
             addr_size_vec,
             exe_path: exe_path.to_string(),
+            comm: task_comm_from_path(exe_path),
             pwd: pwd.to_string(),
             kernel_gs: kgs,
             fs_base: VirtAddr::zero(),
@@ -986,6 +1022,7 @@ impl Process {
             state: ProcessState::Running,
             addr_size_vec: child_addr_size_vec,
             exe_path: self.exe_path.clone(),
+            comm: self.comm,
             pwd: self.pwd.clone(),
             fd_table: new_fd_table,
             kernel_gs: kgs,
@@ -1531,6 +1568,7 @@ pub fn init() {
                 pid,
                 addr_size_vec: Vec::new(),
                 exe_path: "[kernel]".to_string(),
+                comm: task_comm_from_path("[kernel]"),
                 stack: 0,
                 stack_size: 0,
                 entry_point: 0,
@@ -1586,6 +1624,7 @@ pub fn init() {
         entry_point: 0,
         addr_size_vec: Vec::new(),
         exe_path: "[idle]".to_string(),
+        comm: task_comm_from_path("[idle]"),
         page_table_frame: f,
         fd_table: Vec::new(),
         state: ProcessState::Running,

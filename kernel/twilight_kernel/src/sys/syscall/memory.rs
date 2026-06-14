@@ -87,13 +87,6 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         if (flags & MAP_FIXED) == 0 {
             process.proc_mm.track_mmap(va, map_len, MmapKind::Owned);
         }
-        // crate::serial_println!(
-        //     "[mmap] pid={} prot-none addr={:#x} len={:#x} flags={:#x}",
-        //     crate::sys::proc::id(),
-        //     va,
-        //     len,
-        //     flags,
-        // );
         return va as i64;
     }
 
@@ -171,15 +164,6 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
             return ENOMEM;
         }
         process.proc_mm.track_mmap(va, map_len, MmapKind::Owned);
-        // crate::serial_println!(
-        //     "[mmap] pid={} anon addr={:#x} len={:#x} map_len={:#x} prot={:#x} flags={:#x}",
-        //     crate::sys::proc::id(),
-        //     va,
-        //     len,
-        //     map_len,
-        //     prot,
-        //     flags,
-        // );
     }
     // logger!(
     //     "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",

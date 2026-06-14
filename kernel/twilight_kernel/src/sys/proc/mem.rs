@@ -11,7 +11,7 @@ pub fn align_dn(x: usize, a: usize) -> usize {
     x & !(a - 1)
 }
 
-const USER_LOWER: usize = 0x0000_0000_4000_0000; // pick what fits your layout
+const USER_MMAP_BASE: usize = 0x0000_4000_0000_0000;
 const USER_UPPER: usize = 0x0000_7FFF_F000_0000; // below USER_STACK_TOP
 
 #[derive(Clone)]
@@ -88,8 +88,8 @@ impl ProcMM {
     #[inline]
     pub fn ensure_mmap_base(&mut self) {
         if self.mmap_base_hint == 0 {
-            // Start somewhere sane in the user range (below stack, above heap).
-            let start = core::cmp::max(self.mapped_heap_end, USER_LOWER);
+            // Keep mmap allocations far from the upward-growing heap.
+            let start = core::cmp::max(self.mapped_heap_end, USER_MMAP_BASE);
             self.mmap_base_hint = align_up(start, PAGE);
         }
     }
