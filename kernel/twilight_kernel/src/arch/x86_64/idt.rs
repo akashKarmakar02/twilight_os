@@ -5,10 +5,10 @@ use core::arch::naked_asm;
 use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
-use x86_64::VirtAddr;
 pub use x86_64::structures::idt::{
     InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode,
 };
+use x86_64::VirtAddr;
 
 #[repr(C, align(8))]
 pub struct Registers {
@@ -199,6 +199,67 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    let fault_addr = Cr2::read_raw();
+    let can_resolve = !error_code.intersects(
+        PageFaultErrorCode::PROTECTION_VIOLATION
+            | PageFaultErrorCode::MALFORMED_TABLE
+            | PageFaultErrorCode::PROTECTION_KEY
+            | PageFaultErrorCode::SHADOW_STACK
+            | PageFaultErrorCode::SGX,
+    );
+
+    if can_resolve {
+        use crate::sys::proc::PageFaultResolution;
+        match crate::sys::proc::resolve_current_page_fault(
+            fault_addr,
+            error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE),
+            error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH),
+        ) {
+            PageFaultResolution::Resolved => return,
+            PageFaultResolution::BusError => {
+                crate::sys::proc::terminate_current_by_signal(crate::sys::proc::SIGBUS as i32)
+            }
+            PageFaultResolution::Invalid => {}
+        }
+    }
+
+    let user_address = fault_addr <= 0x0000_7fff_ffff_ffff;
+    if from_user(&stack_frame) || (user_address && crate::sys::proc::id() != 0) {
+        crate::serial_println!(
+            "[PROC {}] Page fault at RIP={:#x}, address={:#x}, error={:?}",
+            crate::sys::proc::id(),
+            stack_frame.instruction_pointer.as_u64(),
+            fault_addr,
+            error_code,
+        );
+
+        // Print user stack trace
+        let rsp = stack_frame.stack_pointer.as_u64();
+        crate::serial_println!("User Stack Pointer (RSP): {:#x}", rsp);
+
+        use x86_64::structures::paging::Translate;
+        use x86_64::structures::paging::OffsetPageTable;
+        let (level_4_page_table_frame, _) = x86_64::registers::control::Cr3::read();
+        let phys_mem_offset = x86_64::VirtAddr::new(crate::sys::memory::phys_mem_offset());
+        let mapper = unsafe { OffsetPageTable::new(
+            &mut *(crate::sys::memory::phys_to_virt(level_4_page_table_frame.start_address()).as_mut_ptr()),
+            phys_mem_offset,
+        ) };
+
+        for i in 0..16 {
+            let addr = rsp.saturating_add(i * 8);
+            if let Some(phys_addr) = mapper.translate_addr(x86_64::VirtAddr::new(addr)) {
+                let kernel_virt_addr = crate::sys::memory::phys_to_virt(phys_addr);
+                let val = unsafe { *(kernel_virt_addr.as_ptr::<u64>()) };
+                crate::serial_println!("  [{:#x}]: {:#x}", addr, val);
+            } else {
+                crate::serial_println!("  [{:#x}]: (not mapped)", addr);
+            }
+        }
+
+        crate::sys::proc::terminate_current_by_signal(crate::sys::proc::SIGSEGV as i32);
+    }
+
     let rip = stack_frame.instruction_pointer.as_u64();
     let rip_ptr = rip as *const u8;
 
@@ -216,9 +277,6 @@ extern "x86-interrupt" fn page_fault_handler(
     let mut formatter = IntelFormatter::new();
     let mut output = String::new();
     formatter.format(&instruction, &mut output);
-
-    // CR2 = faulting linear address
-    let fault_addr = Cr2::read();
 
     println!("\nPage fault @ RIP=0x{:x}", rip);
     print!("Instruction bytes: ");
@@ -247,15 +305,6 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    if from_user(&stack_frame) {
-        println!(
-            "[PROC {}] Page Fault at RIP={:#x}. Killing.",
-            crate::sys::proc::id(),
-            stack_frame.instruction_pointer.as_u64()
-        );
-        crate::sys::proc::exit(1);
-        unreachable!()
-    }
     panic!("page fault");
 }
 extern "x86-interrupt" fn stack_segment_fault_handler(

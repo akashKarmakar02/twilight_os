@@ -1,9 +1,9 @@
 use crate::sys::memory::bitmap::with_frame_allocator;
 use linked_list_allocator::LockedHeap;
-use x86_64::VirtAddr;
 use x86_64::structures::paging::{
-    FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB, mapper::MapToError,
+    mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
 };
+use x86_64::VirtAddr;
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();

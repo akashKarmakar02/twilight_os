@@ -3,8 +3,8 @@ use bit_field::BitField;
 use core::{cmp, slice};
 use limine::memory_map::EntryType;
 use spin::{Mutex, Once};
-use x86_64::PhysAddr;
 use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB};
+use x86_64::PhysAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct UsableRegion {
@@ -86,6 +86,7 @@ impl BitmapFrameAllocator {
             })
             .sum();
         let bitmap_size = ((frames_count + 63) / 64) * 8;
+        let bitmap_storage_size = (bitmap_size + 4095) & !4095;
 
         let mut allocator = Self {
             bitmap: &mut [],
@@ -105,10 +106,9 @@ impl BitmapFrameAllocator {
             let region_size = (region_end - region_start) as usize;
 
             // Try to place the bitmap in the region
-            if bitmap_addr.is_none() && region_size >= bitmap_size {
+            if bitmap_addr.is_none() && region_size >= bitmap_storage_size {
                 bitmap_addr = Some(region_start);
 
-                // TODO: Check alignment
                 let addr = super::phys_to_virt(PhysAddr::new(region_start));
                 let ptr = addr.as_mut_ptr();
                 let len = bitmap_size / 8;
@@ -121,7 +121,9 @@ impl BitmapFrameAllocator {
             // Calculate usable portion
             let (usable_start, usable_end) = match bitmap_addr {
                 Some(addr) if region_start == addr => {
-                    let bitmap_end = region_start + bitmap_size as u64;
+                    // Reserve every frame touched by the bitmap. Otherwise a
+                    // non-page-aligned bitmap tail can be allocated and zeroed.
+                    let bitmap_end = region_start + bitmap_storage_size as u64;
                     if bitmap_end >= region_end {
                         continue; // Entire region consumed by the bitmap
                     }

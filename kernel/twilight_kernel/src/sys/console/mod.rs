@@ -3,7 +3,6 @@ pub(crate) use crate::sys::console::tty::{Tty, get_tty};
 use crate::sys::fs::vfs::VFS;
 use crate::sys::proc::{PROCESS_TABLE, Process};
 use alloc::string::String;
-use alloc::vec;
 use spin::{Mutex, Once};
 
 pub mod font;
@@ -38,14 +37,10 @@ pub fn put_char_in_tty(c: u8) {
 pub fn init_console() {
     #[allow(static_mut_refs)]
     let fs = unsafe { VFS.get_mut() };
-    if let Ok(mut node) = fs.open("/bin/init") {
-        let buf_len = node.metadata.size;
-        let mut buf = vec![0u8; buf_len];
-        node.read(0, &mut buf).unwrap();
-
+    if let Ok(node) = fs.open("/bin/init") {
         #[allow(static_mut_refs)]
         let process_table = unsafe { PROCESS_TABLE.get_mut_unchecked() };
 
-        process_table.run(Process::new(buf, "/bin/init", "/", &[], 0).unwrap());
+        process_table.run(Process::new(node, "/bin/init", "/", &[], 0).unwrap());
     }
 }

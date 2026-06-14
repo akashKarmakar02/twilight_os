@@ -18,3 +18,4 @@ usb.img
 /userspace/twilight_c.a
 /userspace/apps/*/src/*.o
 /userspace/apps/*/build/*.o
+/userspace/doomgeneric

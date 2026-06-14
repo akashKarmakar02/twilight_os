@@ -14,6 +14,7 @@ pub const MODE_TYPE_MASK: u16 = 0xF000;
 pub const MODE_PERM_MASK: u16 = 0x01FF; // rwxrwxrwx
 pub const MODE_DIR: u16 = 0o040000;
 pub const MODE_FILE: u16 = 0o100000;
+pub const MODE_SOCKET: u16 = 0o140000;
 
 pub type InodeFlags = u32;
 pub const IFLAG_IMMUTABLE: InodeFlags = 1 << 0;
@@ -127,6 +128,10 @@ impl Inode {
         inode
     }
 
+    pub fn new_socket(now: u64, perms: u16) -> Self {
+        Self::base(MODE_SOCKET | (perms & MODE_PERM_MASK), now)
+    }
+
     #[inline]
     pub fn is_dir(&self) -> bool {
         (self.mode & MODE_TYPE_MASK) == MODE_DIR
@@ -135,6 +140,11 @@ impl Inode {
     #[inline]
     pub fn is_file(&self) -> bool {
         (self.mode & MODE_TYPE_MASK) == MODE_FILE
+    }
+
+    #[inline]
+    pub fn is_socket(&self) -> bool {
+        (self.mode & MODE_TYPE_MASK) == MODE_SOCKET
     }
 
     #[inline]

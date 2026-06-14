@@ -3,7 +3,7 @@ pub mod heap;
 pub mod phys;
 
 use crate::sys::memory::bitmap::with_frame_allocator;
-use crate::sys::proc::mem::{PAGE, align_dn, align_up};
+use crate::sys::proc::mem::{align_dn, align_up, PAGE};
 use crate::{log, serial_println};
 use conquer_once::spin::OnceCell;
 use core::ptr;
@@ -138,8 +138,19 @@ pub fn get_page_table_frame() -> PhysFrame {
     frame
 }
 
-fn make_flags(is_writable: bool, is_executable: bool) -> PageTableFlags {
-    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+pub fn user_page_flags(is_writable: bool, is_executable: bool) -> PageTableFlags {
+    user_page_flags_with_access(true, is_writable, is_executable)
+}
+
+pub fn user_page_flags_with_access(
+    user_accessible: bool,
+    is_writable: bool,
+    is_executable: bool,
+) -> PageTableFlags {
+    let mut flags = PageTableFlags::PRESENT;
+    if user_accessible {
+        flags |= PageTableFlags::USER_ACCESSIBLE;
+    }
     if is_writable {
         flags |= PageTableFlags::WRITABLE;
     }
@@ -149,12 +160,95 @@ fn make_flags(is_writable: bool, is_executable: bool) -> PageTableFlags {
     flags
 }
 
+pub fn allocate_zeroed_frame() -> Option<PhysFrame<Size4KiB>> {
+    with_frame_allocator(|frame_allocator| {
+        let frame = frame_allocator.allocate_frame()?;
+        let frame_ptr = phys_to_virt(frame.start_address()).as_mut_ptr::<u8>();
+        // SAFETY: the frame was just allocated exclusively to the caller and
+        // the physical-memory mapping covers the full 4 KiB frame.
+        unsafe {
+            ptr::write_bytes(frame_ptr, 0, Size4KiB::SIZE as usize);
+        }
+        Some(frame)
+    })
+}
+
+pub fn deallocate_frame(frame: PhysFrame<Size4KiB>) {
+    // SAFETY: callers only pass frames they own and have not mapped elsewhere.
+    unsafe {
+        with_frame_allocator(|frame_allocator| frame_allocator.deallocate_frame(frame));
+    }
+}
+
+pub fn map_user_frame(
+    mapper: &mut OffsetPageTable,
+    addr: u64,
+    frame: PhysFrame<Size4KiB>,
+    flags: PageTableFlags,
+) -> Result<(), ()> {
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
+    with_frame_allocator(|frame_allocator| {
+        // SAFETY: `frame` is exclusively owned by the caller, `page` is a
+        // userspace page, and the supplied flags describe that mapping.
+        unsafe {
+            mapper
+                .map_to(page, frame, flags, frame_allocator)
+                .map_err(|_| ())?
+                .flush();
+        }
+        Ok(())
+    })
+}
+
+pub fn update_user_page_flags(
+    mapper: &mut OffsetPageTable,
+    addr: u64,
+    flags: PageTableFlags,
+) -> Result<(), ()> {
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
+    if mapper.translate_page(page).is_err() {
+        return Ok(());
+    }
+
+    // SAFETY: the page is present in this process's page table and `flags`
+    // retain the required PRESENT bit.
+    unsafe {
+        mapper.update_flags(page, flags).map_err(|_| ())?.flush();
+    }
+    Ok(())
+}
+
 pub fn alloc_pages(
     mapper: &mut OffsetPageTable,
     addr: u64,
     size: usize,
     is_writable: bool,
     is_executable: bool,
+) -> Result<(), ()> {
+    alloc_pages_inner(mapper, addr, size, is_writable, is_executable, true)
+}
+
+/// Maps pages without invalidating the TLB.
+///
+/// Use only while constructing a fresh address space that has no cached
+/// translations and has not started executing userspace code.
+pub fn alloc_pages_unflushed(
+    mapper: &mut OffsetPageTable,
+    addr: u64,
+    size: usize,
+    is_writable: bool,
+    is_executable: bool,
+) -> Result<(), ()> {
+    alloc_pages_inner(mapper, addr, size, is_writable, is_executable, false)
+}
+
+fn alloc_pages_inner(
+    mapper: &mut OffsetPageTable,
+    addr: u64,
+    size: usize,
+    is_writable: bool,
+    is_executable: bool,
+    flush: bool,
 ) -> Result<(), ()> {
     let size = size.saturating_sub(1) as u64;
 
@@ -164,7 +258,7 @@ pub fn alloc_pages(
         Page::range_inclusive(start_page, end_page)
     };
 
-    let flags = make_flags(is_writable, is_executable);
+    let flags = user_page_flags(is_writable, is_executable);
 
     with_frame_allocator(|frame_allocator| -> Result<(), ()> {
         for page in pages {
@@ -180,13 +274,21 @@ pub fn alloc_pages(
 
             let res = unsafe { mapper.map_to(page, frame, flags, frame_allocator) };
             if let Ok(mapping) = res {
-                mapping.flush();
+                if flush {
+                    mapping.flush();
+                } else {
+                    mapping.ignore();
+                }
             } else if mapper.translate_page(page).is_ok() {
                 unsafe {
                     frame_allocator.deallocate_frame(frame);
                 }
                 if let Ok(mapping) = unsafe { mapper.update_flags(page, flags) } {
-                    mapping.flush();
+                    if flush {
+                        mapping.flush();
+                    } else {
+                        mapping.ignore();
+                    }
                 } else {
                     serial_println!("Failed to update page flag for {:?}", page);
                     return Err(());
@@ -255,7 +357,7 @@ pub fn map_kernel_buffer(
 
     let start = align_dn(kernel_ptr, PAGE);
     let end = align_up(kernel_ptr.saturating_add(len), PAGE);
-    let flags = make_flags(writable, executable);
+    let flags = user_page_flags(writable, executable);
 
     with_frame_allocator(|frame_allocator| -> Result<(), ()> {
         let mut src = start;

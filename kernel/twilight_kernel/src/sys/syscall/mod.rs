@@ -94,6 +94,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_PWRITEV => service::pwritev(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
         SYS_ACCESS => service::access(arg1 as usize, arg2 as i32),
         SYS_PIPE => service::pipe(arg1 as usize),
+        SYS_PAUSE => service::pause(),
         SYS_SCHED_YIELD => service::sched_yield(),
         SYS_MADVISE => memory::madvise(arg1, arg2 as usize, arg3 as i32),
         SYS_GETPID => service::getpid(),
@@ -341,6 +342,8 @@ pub extern "sysv64" fn syscall_handler(
         448 => crypto::sys_add_user_key(arg1 as u32, arg2 as *const u8, arg3 as usize) as i64,
         // SYS_SET_FILE_ATTR
         449 => fs_attr::sys_set_file_attr(arg1 as *const u8, arg2 as u32, arg3 as u32) as i64,
+        // clone3 – musl probes this; returning ENOSYS makes it fall back to clone.
+        SYS_CLONE3 => -(ENOSYS as i64),
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
             -(ENOSYS as i64)
@@ -348,7 +351,7 @@ pub extern "sysv64" fn syscall_handler(
         }
     };
 
-    if syscall_number == SYS_FORK || syscall_number == SYS_WAIT4 || syscall_number == SYS_EXECVE {
+    if syscall_number != 271 {
         serial_println!(
             "[syscall] pid={} nr={} res={} rip={:#x} rsp={:#x}",
             crate::sys::proc::id(),

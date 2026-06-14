@@ -14,7 +14,7 @@ use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
 use crate::sys::fs::twilight_fs::FsError::{
     FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode,
 };
-use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode};
+use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode, MODE_SOCKET, MODE_TYPE_MASK};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
 use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
@@ -1324,7 +1324,12 @@ impl TwilightFs {
 
         let time = CMOS::new().unix_time();
 
-        let mut inode = Inode::new_file(time, mode);
+        let is_socket = (mode & MODE_TYPE_MASK) == MODE_SOCKET;
+        let mut inode = if is_socket {
+            Inode::new_socket(time, mode)
+        } else {
+            Inode::new_file(time, mode)
+        };
         // Inherit encryption flag from parent directory
         if (parent_inode.flags & inode::IFLAG_ENCRYPTED) != 0 {
             inode.flags |= inode::IFLAG_ENCRYPTED;
@@ -1702,6 +1707,8 @@ impl TwilightFs {
 
                 let file_type = if inode.is_dir() {
                     FileType::Dir
+                } else if inode.is_socket() {
+                    FileType::Socket
                 } else {
                     FileType::File
                 };
@@ -2259,6 +2266,8 @@ impl FileSystem for TwilightFs {
         if let Ok(inode) = self.read_inode(inode_no) {
             let file_type = if inode.is_dir() {
                 FileType::Dir
+            } else if inode.is_socket() {
+                FileType::Socket
             } else {
                 FileType::File
             };

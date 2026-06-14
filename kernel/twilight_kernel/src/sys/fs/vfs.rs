@@ -11,22 +11,13 @@ use spin::rwlock::RwLock;
 
 pub static mut VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileType {
     File,
     Dir,
     CharDevice,
     BlockDevice,
-}
-
-impl PartialEq for FileType {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (FileType::File, FileType::File) => true,
-            (FileType::Dir, FileType::Dir) => true,
-            _ => false,
-        }
-    }
+    Socket,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -177,6 +168,18 @@ impl VfsNode {
 
     pub fn read(&mut self, lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
         self.node.read().read(&mut self.device, lba, buf)
+    }
+
+    pub fn read_exact(&mut self, mut offset: usize, mut buf: &mut [u8]) -> Result<(), ()> {
+        while !buf.is_empty() {
+            let read = self.read(offset, buf)?;
+            if read == 0 {
+                return Err(());
+            }
+            offset = offset.checked_add(read).ok_or(())?;
+            buf = &mut buf[read..];
+        }
+        Ok(())
     }
 
     pub fn write(&mut self, lba: usize, data: &[u8]) -> Result<(), ()> {

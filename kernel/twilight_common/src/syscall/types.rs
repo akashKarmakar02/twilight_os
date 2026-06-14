@@ -87,6 +87,7 @@ pub const POLLHUP: i16 = 0x0010;
 pub const POLLNVAL: i16 = 0x0020;
 
 // --- sockets (Linux ABI, x86_64) ---
+pub const AF_UNIX: u16 = 1;
 pub const AF_INET: u16 = 2;
 pub const SOCK_STREAM: i32 = 1;
 pub const SOCK_DGRAM: i32 = 2;
@@ -95,6 +96,10 @@ pub const SOL_SOCKET: i32 = 1;
 pub const SO_REUSEADDR: i32 = 2;
 
 pub const MSG_DONTWAIT: i32 = 0x40;
+
+pub const SHUT_RD: i32 = 0;
+pub const SHUT_WR: i32 = 1;
+pub const SHUT_RDWR: i32 = 2;
 
 pub type SocklenT = u32;
 
@@ -112,6 +117,13 @@ pub struct SockAddrIn {
     pub sin_port: u16, // network byte order
     pub sin_addr: u32, // network byte order
     pub sin_zero: [u8; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SockAddrUn {
+    pub sun_family: u16,
+    pub sun_path: [u8; 108],
 }
 
 #[repr(C, packed)]
