@@ -1,4 +1,5 @@
 /kernel/target
+**/target
 /limine
 /ovmf
 /.idea

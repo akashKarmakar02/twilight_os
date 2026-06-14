@@ -46,11 +46,7 @@ fn main() -> io::Result<()> {
         let before = list_executables(&path)?;
 
         // Detect project type and run build
-        if path.join("Cargo.toml").exists() {
-            build_rust(&path)?;
-        } else if has_zig_project(&path) {
-            build_zig(&path)?;
-        } else if path.join("Makefile").exists() || path.join("makefile").exists() {
+        if path.join("Makefile").exists() || path.join("makefile").exists() {
             build_make(&path)?;
 
             let app_name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -113,6 +109,10 @@ fn main() -> io::Result<()> {
                     app_name, candidates
                 );
             }
+        } else if path.join("Cargo.toml").exists() {
+            build_rust(&path)?;
+        } else if has_zig_project(&path) {
+            build_zig(&path)?;
         } else if has_c_sources(&path) {
             build_c_simple(&path)?;
         } else {

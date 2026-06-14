@@ -242,8 +242,7 @@ kernel:
 
 .PHONY: userspace
 userspace:
-	cd userspace && \
-	cargo build --release
+	cd userspace && RUSTUP_TOOLCHAIN=stable cargo build --release
 
 cpio: userspace
 	cd rootfs && find . | cpio -o -H newc > ../rootfs.cpio
