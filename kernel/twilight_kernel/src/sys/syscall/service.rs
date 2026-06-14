@@ -1020,6 +1020,10 @@ pub fn exit(_status: i32) -> i64 {
     unreachable!()
 }
 
+pub fn exit_group(status: i32) -> i64 {
+    sys::proc::exit_group(status)
+}
+
 pub fn fork(
     stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
     regs: &mut crate::arch::x86_64::idt::Registers,
@@ -1086,6 +1090,85 @@ pub fn fork(
     -(ENOSYS as i64)
 }
 
+pub fn clone(
+    flags: u64,
+    child_stack: u64,
+    _parent_tid: usize,
+    _child_tid: usize,
+    tls: u64,
+    stack_frame: &mut x86_64::structures::idt::InterruptStackFrame,
+    regs: &mut crate::arch::x86_64::idt::Registers,
+) -> i64 {
+    const CLONE_VM: u64 = 0x0000_0100;
+    const CLONE_FS: u64 = 0x0000_0200;
+    const CLONE_FILES: u64 = 0x0000_0400;
+    const CLONE_SIGHAND: u64 = 0x0000_0800;
+    const CLONE_THREAD: u64 = 0x0001_0000;
+    const CLONE_SYSVSEM: u64 = 0x0004_0000;
+    const CLONE_SETTLS: u64 = 0x0008_0000;
+
+    let required = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
+    let supported = required | CLONE_SETTLS;
+    if child_stack == 0 || flags & required != required || flags & !supported != 0 {
+        return -(EINVAL as i64);
+    }
+
+    use crate::sys::proc::{InterruptStack, IretRegisters, PreservedRegisters, ScratchRegisters};
+
+    let tf = InterruptStack {
+        preserved: PreservedRegisters {
+            r15: regs.r15,
+            r14: regs.r14,
+            r13: regs.r13,
+            r12: regs.r12,
+            rbp: regs.rbp,
+            rbx: regs.rbx,
+        },
+        scratch: ScratchRegisters {
+            r11: regs.r11,
+            r10: regs.r10,
+            r9: regs.r9,
+            r8: regs.r8,
+            rsi: regs.rsi,
+            rdi: regs.rdi,
+            rdx: regs.rdx,
+            rcx: regs.rcx,
+            rax: regs.rax,
+        },
+        iret: IretRegisters {
+            rip: stack_frame.instruction_pointer.as_u64(),
+            cs: stack_frame.code_segment.0 as u64,
+            rflags: stack_frame.cpu_flags.bits() | 0x202,
+            rsp: stack_frame.stack_pointer.as_u64(),
+            ss: stack_frame.stack_segment.0 as u64,
+        },
+    };
+
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let current_pid = crate::sys::proc::id();
+    let Some(process) = table
+        .proc_list
+        .iter_mut()
+        .find(|process| process.pid == current_pid)
+    else {
+        return -(ESRCH as i64);
+    };
+
+    let tls_base = if flags & CLONE_SETTLS != 0 {
+        tls
+    } else {
+        process.fs_base.as_u64()
+    };
+    let child = match process.clone_thread(&tf, child_stack, tls_base) {
+        Ok(child) => child,
+        Err(()) => return -(EAGAIN as i64),
+    };
+    let child_pid = child.pid;
+    table.proc_list.push_back(child);
+    child_pid as i64
+}
+
 pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i64 {
     let current_pid = crate::sys::proc::id();
     let wnohang = 1;
@@ -1112,7 +1195,7 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
             let mut remove_idx = None;
 
             for (i, p) in table.proc_list.iter().enumerate() {
-                if p.parent_pid == current_pid {
+                if !p.is_thread && p.parent_pid == current_pid {
                     if pid == -1 || p.pid as i32 == pid {
                         has_children = true;
                         if matches!(p.state, crate::sys::proc::ProcessState::Dead) {
@@ -1133,6 +1216,10 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
 
             if let Some(idx) = remove_idx {
                 if let Some(mut p) = table.proc_list.remove(idx) {
+                    let tgid = p.tgid;
+                    table
+                        .proc_list
+                        .retain(|process| !(process.is_thread && process.tgid == tgid));
                     reaped_pid = Some(p.pid);
                     let table_frame = p.page_table_frame;
                     crate::serial_println!(
@@ -4166,8 +4253,11 @@ pub fn futex(uaddr: usize, op: i32, val: u32, _timeout: usize, _uaddr2: usize, _
                 return -(EAGAIN as i64);
             }
 
-            // Minimal behavior: don't block indefinitely; yield once and report "woken".
-            halt();
+            // A spurious wake is valid for futex waiters. Yield once so another
+            // task can make progress instead of halting in kernel mode.
+            if !crate::sys::proc::schedule_now() {
+                halt();
+            }
             0
         }
         FUTEX_WAKE | FUTEX_WAKE_BITSET => 0,

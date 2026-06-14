@@ -95,6 +95,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_ACCESS => service::access(arg1 as usize, arg2 as i32),
         SYS_PIPE => service::pipe(arg1 as usize),
         SYS_SCHED_YIELD => service::sched_yield(),
+        SYS_MADVISE => memory::madvise(arg1, arg2 as usize, arg3 as i32),
         SYS_GETPID => service::getpid(),
         SYS_SETPGID => service::setpgid(arg1 as i32, arg2 as i32),
         SYS_GETPPID => service::getppid(),
@@ -142,6 +143,15 @@ pub extern "sysv64" fn syscall_handler(
         ),
         SYS_GETSOCKNAME => service::getsockname(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_GETPEERNAME => service::getpeername(arg1 as i32, arg2 as usize, arg3 as usize),
+        SYS_CLONE => service::clone(
+            arg1,
+            arg2,
+            arg3 as usize,
+            arg4 as usize,
+            arg5,
+            _stack_frame,
+            regs,
+        ),
         SYS_FORK => service::fork(_stack_frame, regs),
         SYS_EXECVE => service::execve(
             arg1 as usize,
@@ -232,7 +242,7 @@ pub extern "sysv64" fn syscall_handler(
             let timespec_ptr = arg2 as *mut Timespec;
             crate::driver::timer::pit::sys_clock_gettime(arg1 as i32, timespec_ptr)
         }
-        SYS_EXIT_GROUP => service::exit(arg1 as i32),
+        SYS_EXIT_GROUP => service::exit_group(arg1 as i32),
         SYS_WAIT4 => service::wait4(arg1 as i32, arg2 as usize, arg3 as i32, arg4 as usize),
         SYS_FUTEX => service::futex(
             arg1 as usize,

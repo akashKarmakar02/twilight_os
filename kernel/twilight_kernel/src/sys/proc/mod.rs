@@ -393,6 +393,8 @@ pub struct Process {
     pub entry_point: u64,
     pub page_table_frame: PhysFrame,
     pub pid: u16,
+    pub tgid: u16,
+    pub is_thread: bool,
     pub parent_pid: u16,
     pub pgid: u16,
     pub sid: u16,
@@ -403,7 +405,7 @@ pub struct Process {
     pub pwd: String,
     pub fd_table: Vec<Option<FdEntry>>,
     pub umask: u16,
-    pub proc_mm: Box<ProcMM>,
+    pub proc_mm: Arc<Mutex<ProcMM>>,
     pub exit_code: i32,
     pub wait_status: i32,
     pub wait_reported: bool,
@@ -647,7 +649,7 @@ impl Process {
         );
 
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
-        let proc_mm = Box::new(ProcMM::new(max_end as usize));
+        let proc_mm = Arc::new(Mutex::new(ProcMM::new(max_end as usize)));
         let sid = process_session_id(parent_pid).unwrap_or(pid);
 
         let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
@@ -670,6 +672,8 @@ impl Process {
             stack_size: USER_STACK_SIZE,
             entry_point: entry_point_addr,
             pid,
+            tgid: pid,
+            is_thread: false,
             mapper,
             page_table_frame,
             state: ProcessState::Running,
@@ -820,7 +824,7 @@ impl Process {
             None,
         );
 
-        let proc_mm = Box::new(ProcMM::new(max_end as usize));
+        let proc_mm = Arc::new(Mutex::new(ProcMM::new(max_end as usize)));
 
         // Commit changes to self
         // Drop old resources implicitly when overwriting
@@ -867,6 +871,7 @@ impl Process {
 
         // 0. Allocate PID
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+        let proc_mm = self.proc_mm.lock();
         crate::serial_println!(
             "[fork] parent={} child={} rip={:#x} rsp={:#x} regions={} heap={:#x}-{:#x} mmap={}",
             self.pid,
@@ -874,9 +879,9 @@ impl Process {
             tf.iret.rip,
             tf.iret.rsp,
             self.addr_size_vec.len(),
-            self.proc_mm.heap_start,
-            self.proc_mm.mapped_heap_end,
-            self.proc_mm.mmap_regions.len(),
+            proc_mm.heap_start,
+            proc_mm.mapped_heap_end,
+            proc_mm.mmap_regions.len(),
         );
 
         // 1. Allocate new page table
@@ -899,17 +904,19 @@ impl Process {
         let mut regions_to_copy = self.addr_size_vec.clone();
 
         // Add Heap
-        if self.proc_mm.mapped_heap_end > self.proc_mm.heap_start {
+        if proc_mm.mapped_heap_end > proc_mm.heap_start {
             regions_to_copy.push((
-                self.proc_mm.heap_start as u64,
-                self.proc_mm.mapped_heap_end - self.proc_mm.heap_start,
+                proc_mm.heap_start as u64,
+                proc_mm.mapped_heap_end - proc_mm.heap_start,
             ));
         }
 
         // Add Mmaps
-        for region in &self.proc_mm.mmap_regions {
+        for region in &proc_mm.mmap_regions {
             regions_to_copy.push((region.base as u64, region.len));
         }
+        let child_proc_mm = Arc::new(Mutex::new(proc_mm.clone()));
+        drop(proc_mm);
 
         // We use a separate vec for the child's tracking to avoiding duplicates if addr_size_vec used to track everything
         // But for cleanup we need them in child's addr_size_vec.
@@ -1017,6 +1024,8 @@ impl Process {
             stack_size: self.stack_size,
             entry_point: self.entry_point,
             pid,
+            tgid: pid,
+            is_thread: false,
             mapper,
             page_table_frame,
             state: ProcessState::Running,
@@ -1028,7 +1037,7 @@ impl Process {
             kernel_gs: kgs,
             gs_base: self.gs_base,
             fs_base: live_fs_base,
-            proc_mm: self.proc_mm.clone(), // Need to implement Clone for ProcMM or manually deep copy
+            proc_mm: child_proc_mm,
             parent_pid: self.pid,
             pgid: self.pgid,
             sid: self.sid,
@@ -1048,6 +1057,80 @@ impl Process {
 
         crate::serial_println!("[fork] child={} ready", pid);
         Ok(child)
+    }
+
+    pub fn clone_thread(
+        &mut self,
+        tf: &InterruptStack,
+        child_stack: u64,
+        tls: u64,
+    ) -> Result<Process, ()> {
+        let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+        let (_, flags) = Cr3::read();
+        let page_table = crate::sys::memory::create_page_table(self.page_table_frame);
+        let mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+
+        let switch_stack = allocate_switch_stack().map_err(|_| ())?.as_mut_ptr::<u8>();
+        let kernel_rsp = switch_stack as u64;
+        let mut stack_ptr = initial_context_stack_top(kernel_rsp);
+        let kgs = Box::new(KernelGsData {
+            kernel_rsp,
+            user_rsp: 0,
+        });
+        let mut stack = StackHelper::new(&mut stack_ptr);
+        let kframe = stack.offset::<InterruptErrorStack>();
+        *kframe = InterruptErrorStack {
+            code: 0,
+            stack: *tf,
+        };
+        kframe.stack.scratch.rax = 0;
+        if child_stack != 0 {
+            kframe.stack.iret.rsp = child_stack;
+        }
+
+        let context = stack.offset::<Context>();
+        *context = Context::default();
+        context.rip = iretq_init as u64;
+        context.cr3 = self.page_table_frame.start_address().as_u64() | flags.bits();
+
+        Ok(Process {
+            context,
+            context_switch_rsp: VirtAddr::new(stack_ptr),
+            fpu_storage: self.fpu_storage,
+            kernel_gs: kgs,
+            gs_base: self.gs_base,
+            fs_base: VirtAddr::new(tls),
+            stack: child_stack,
+            stack_size: 0,
+            mapper,
+            entry_point: self.entry_point,
+            page_table_frame: self.page_table_frame,
+            pid,
+            tgid: self.tgid,
+            is_thread: true,
+            parent_pid: self.parent_pid,
+            pgid: self.pgid,
+            sid: self.sid,
+            state: ProcessState::Running,
+            addr_size_vec: Vec::new(),
+            exe_path: self.exe_path.clone(),
+            comm: self.comm,
+            pwd: self.pwd.clone(),
+            fd_table: self.fd_table.clone(),
+            umask: self.umask,
+            proc_mm: self.proc_mm.clone(),
+            exit_code: 0,
+            wait_status: 0,
+            wait_reported: false,
+            preempt_frame: 0,
+            pending_io: false,
+            signal_actions: self.signal_actions,
+            signal_mask: self.signal_mask,
+            pending_signals: 0,
+            sigsuspend_saved_mask: [0; 2],
+            in_sigsuspend: false,
+            signal_alt_stack: SignalAltStack::default(),
+        })
     }
 
     pub fn cleanup(&mut self, table_frame: PhysFrame) {
@@ -1139,6 +1222,22 @@ pub fn exit(code: i32) {
         }
     };
 
+    if slice[cur_idx].is_thread {
+        slice[cur_idx].close_all_fds();
+        slice[cur_idx].state = ProcessState::Dead;
+        slice[cur_idx].exit_code = code;
+
+        let Some(next_idx) = find_next_runnable_index(slice, cur_idx) else {
+            loop {
+                crate::task::executor::halt();
+            }
+        };
+        switch_by_index(slice, cur_idx, next_idx);
+        loop {
+            crate::task::executor::halt();
+        }
+    }
+
     let parent_pid = slice[cur_idx].parent_pid;
     crate::serial_println!("[exit] pid={} parent={}", current_pid, parent_pid);
     slice[cur_idx].close_all_fds();
@@ -1177,6 +1276,52 @@ pub fn exit(code: i32) {
     );
     switch_by_index(slice, cur_idx, next_idx);
 
+    loop {
+        crate::task::executor::halt();
+    }
+}
+
+pub fn exit_group(code: i32) -> ! {
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let current_pid = id();
+    let slice = table.proc_list.make_contiguous();
+    let Some(cur_idx) = find_process_index(slice, current_pid) else {
+        loop {
+            crate::task::executor::halt();
+        }
+    };
+
+    let tgid = slice[cur_idx].tgid;
+    let Some(leader_idx) = slice.iter().position(|process| process.pid == tgid) else {
+        loop {
+            crate::task::executor::halt();
+        }
+    };
+    let parent_pid = slice[leader_idx].parent_pid;
+
+    for process in slice.iter_mut().filter(|process| process.tgid == tgid) {
+        process.close_all_fds();
+        process.state = ProcessState::Dead;
+        process.exit_code = code;
+    }
+    slice[leader_idx].wait_status = (code & 0xff) << 8;
+    slice[leader_idx].wait_reported = false;
+
+    if let Some(parent_idx) = find_process_index(slice, parent_pid) {
+        slice[parent_idx].queue_signal(SIGCHLD);
+    }
+
+    let next_idx = find_process_index(slice, parent_pid)
+        .filter(|&idx| matches!(slice[idx].state, ProcessState::Running))
+        .or_else(|| find_next_runnable_index(slice, cur_idx));
+    let Some(next_idx) = next_idx else {
+        loop {
+            crate::task::executor::halt();
+        }
+    };
+
+    switch_by_index(slice, cur_idx, next_idx);
     loop {
         crate::task::executor::halt();
     }
@@ -1248,26 +1393,29 @@ pub fn maybe_schedule() {
     }
 }
 
-pub fn schedule_now() {
+pub fn schedule_now() -> bool {
     #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return false;
+    };
     let cur_pid = id();
 
     // Make a contiguous slice so we can index and take raw pointers.
     let slice = table.proc_list.make_contiguous();
     if slice.len() < 2 {
-        return;
+        return false;
     }
 
     let Some(cur_idx) = slice.iter().position(|p| p.pid == cur_pid) else {
-        return;
+        return false;
     };
 
     let Some(next_idx) = find_next_runnable_index(slice, cur_idx) else {
-        return;
+        return false;
     };
 
     switch_by_index(slice, cur_idx, next_idx);
+    true
 }
 
 pub fn await_io() {
@@ -1517,7 +1665,7 @@ pub fn init() {
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     PID.store(pid, Ordering::SeqCst);
 
-    let proc_mm = Box::new(ProcMM::new(0));
+    let proc_mm = Arc::new(Mutex::new(ProcMM::new(0)));
 
     let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
 
@@ -1566,6 +1714,8 @@ pub fn init() {
                 fpu_storage: Some(FpuState::default()),
 
                 pid,
+                tgid: pid,
+                is_thread: false,
                 addr_size_vec: Vec::new(),
                 exe_path: "[kernel]".to_string(),
                 comm: task_comm_from_path("[kernel]"),
@@ -1612,11 +1762,13 @@ pub fn init() {
         }),
         fs_base: VirtAddr::zero(),
         gs_base: VirtAddr::zero(),
-        proc_mm: Box::new(ProcMM::new(0)),
+        proc_mm: Arc::new(Mutex::new(ProcMM::new(0))),
         parent_pid: 1,
         pgid: 1,
         sid: 1,
         pid: 1,
+        tgid: 1,
+        is_thread: false,
         pwd: String::from("/"),
         context_switch_rsp: VirtAddr::zero(),
         mapper,
