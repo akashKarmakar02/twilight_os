@@ -51,7 +51,7 @@ It currently supports x86_64 architecture, with future plans for ARM/RISC-V.
 | **Userspace**        | ✅ Done           | `tcc`, `make` (partial), `vi`, `tpy`                |
 | **Multitasking**     | 🚧 Beta          | Cooperative scheduler, SMP detection (init)         |
 | **Graphics**         | 🚧 Experimenting | Framebuffer access, basic compositing               |
-| **Doom**             | ⏳ Planned        | Porting doomgeneric                                 |
+| **Doom**             | ✅ Done           | Vendored doomgeneric framebuffer and input port     |
 
 ## Build Instructions
 

@@ -17,7 +17,27 @@ Executables are copied into `rootfs/bin` and marked executable.
 
 ## Bundled apps
 `userspace/apps` currently contains:
-`bc`, `imgview`, `cat`, `chip8`, `clear`, `cp`, `curl`, `date`, `diskbench`, `echo`, `grep`, `head`, `hello`, `httpd`, `init`, `iotest`, `logind`, `ls`, `mkdir`, `poweroff`, `reboot`, `rm`, `rmdir`, `sleep`, `tail`, `tcc`, `touch`, `tpy`, `tsh`, `twifetch`, `uname`, `vi`, `wc`.
+`bc`, `imgview`, `cat`, `chip8`, `clear`, `cp`, `curl`, `date`, `diskbench`, `echo`, `fbdoom`, `grep`, `head`, `hello`, `httpd`, `init`, `iotest`, `logind`, `ls`, `mkdir`, `poweroff`, `reboot`, `rm`, `rmdir`, `sleep`, `tail`, `tcc`, `touch`, `tpy`, `tsh`, `twifetch`, `uname`, `vi`, `wc`.
+
+## Doom
+
+The complete doomgeneric source is vendored in `userspace/doomgeneric`.
+The Twilight framebuffer and input port is built through
+`userspace/apps/fbdoom/Makefile`, so the normal userspace build installs
+`fbdoom` into `rootfs/bin`:
+
+```bash
+make userspace
+```
+
+After booting Twilight OS, run:
+
+```sh
+fbdoom -iwad /doom.wad
+```
+
+See `userspace/doomgeneric/TWILIGHT.md` for upstream provenance, port details,
+and standalone build instructions.
 
 ## Adding a new app
 1. Create a new directory under `userspace/apps/<name>`.

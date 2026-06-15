@@ -5,9 +5,7 @@ DOOM_DIR := ../../doomgeneric/doomgeneric
 
 .PHONY: all clean
 
-all: fbdoom
-
-fbdoom:
+all:
 	$(MAKE) -C $(DOOM_DIR) -f Makefile.twilight CC="$(CC)"
 	cp $(DOOM_DIR)/fbdoom .
 
