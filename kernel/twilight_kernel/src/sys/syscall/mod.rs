@@ -68,6 +68,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_FSTAT => service::fstat(arg1 as usize, arg2 as usize),
         SYS_LSTAT => service::lstat(arg1 as usize, arg2 as usize),
         SYS_POLL => service::poll(arg1 as usize, arg2 as usize, arg3 as isize),
+        SYS_SELECT => service::select(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize, arg5 as usize),
         SYS_LSEEK => service::lseek(arg1 as usize, arg2, arg3 as u8),
         SYS_MMAP => memory::mmap(
             arg1,
@@ -166,6 +167,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_UNAME => service::uname(arg1 as usize),
         SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
         SYS_CHDIR => service::chdir(arg1 as usize),
+        SYS_FCHDIR => service::fchdir(arg1 as i32),
         SYS_RENAME => service::rename(arg1 as usize, arg2 as usize),
         SYS_MKDIR => service::mkdir(arg1 as usize, arg2 as usize),
         SYS_RMDIR => service::rmdir(arg1 as usize),
@@ -174,6 +176,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_CHMOD => service::chmod(arg1 as usize, arg2 as u32),
         SYS_UMASK => service::umask(arg1 as u32),
         SYS_GETRUSAGE => service::getrusage(arg1 as i32, arg2 as usize),
+        SYS_SYSINFO => service::sysinfo(arg1 as usize),
         SYS_GETUID => service::geteuid(),
         SYS_GETGID => service::getegid(),
         SYS_SET_UID => service::setuid(arg1),

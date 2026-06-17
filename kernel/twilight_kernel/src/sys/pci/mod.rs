@@ -8,6 +8,33 @@ use spin::Mutex;
 use x86_64::PhysAddr;
 use x86_64::instructions::port::Port;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciOwnerKind {
+    NativeTwilightDriver,
+    FreeBsdKpiDriver,
+}
+
+impl PciOwnerKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeTwilightDriver => "NativeTwilightDriver",
+            Self::FreeBsdKpiDriver => "FreeBsdKpiDriver",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PciOwner {
+    pub kind: PciOwnerKind,
+    pub name: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PciClaimError {
+    NotFound,
+    AlreadyClaimed(PciOwner),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceConfig {
     pub bus: u8,
@@ -24,6 +51,7 @@ pub struct DeviceConfig {
     pub base_addresses: [u32; 6],
     pub interrupt_pin: u8,
     pub interrupt_line: u8,
+    pub owner: Option<PciOwner>,
 }
 
 impl DeviceConfig {
@@ -72,6 +100,7 @@ impl DeviceConfig {
             base_addresses,
             interrupt_pin,
             interrupt_line,
+            owner: None,
         }
     }
 
@@ -130,6 +159,37 @@ pub fn find_device(vendor_id: u16, device_id: u16) -> Option<DeviceConfig> {
         }
     }
     None
+}
+
+pub fn claim_device(
+    bus: u8,
+    device: u8,
+    function: u8,
+    owner: PciOwner,
+) -> Result<(), PciClaimError> {
+    let mut devices = PCI_DEVICES.lock();
+
+    let Some(config) = devices
+        .iter_mut()
+        .find(|config| config.bus == bus && config.device == device && config.function == function)
+    else {
+        return Err(PciClaimError::NotFound);
+    };
+
+    if let Some(existing_owner) = config.owner {
+        return Err(PciClaimError::AlreadyClaimed(existing_owner));
+    }
+
+    config.owner = Some(owner);
+    Ok(())
+}
+
+pub fn device_owner(bus: u8, device: u8, function: u8) -> Option<PciOwner> {
+    PCI_DEVICES
+        .lock()
+        .iter()
+        .find(|config| config.bus == bus && config.device == device && config.function == function)
+        .and_then(|config| config.owner)
 }
 
 fn check_bus(bus: u8) {

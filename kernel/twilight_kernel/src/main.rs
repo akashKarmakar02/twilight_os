@@ -15,6 +15,7 @@ extern crate alloc;
 extern crate twilight_proc;
 
 pub mod arch;
+pub mod compat;
 pub mod driver;
 pub mod kernel_utils;
 pub mod sys;
@@ -215,6 +216,7 @@ pub fn init(
     sys::pci::init();
 
     // depends on pci initialization
+    driver::freebsd_demo::init();
     driver::nic::init();
     driver::usb::init();
     driver::cpu::init(mp_response);

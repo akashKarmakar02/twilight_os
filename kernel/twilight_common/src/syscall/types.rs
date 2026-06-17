@@ -140,11 +140,62 @@ pub struct Timeval {
     pub tv_usec: i64,
 }
 
+pub const FD_SETSIZE: usize = 1024;
+pub const NFDBITS: usize = 64;
+const FD_SET_LONGS: usize = FD_SETSIZE / NFDBITS;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FdSet {
+    pub fds_bits: [u64; FD_SET_LONGS],
+}
+
+impl FdSet {
+    pub fn zero(&mut self) {
+        self.fds_bits = [0u64; FD_SET_LONGS];
+    }
+    pub fn isset(&self, fd: usize) -> bool {
+        if fd >= FD_SETSIZE {
+            return false;
+        }
+        (self.fds_bits[fd / NFDBITS] & (1u64 << (fd % NFDBITS))) != 0
+    }
+    pub fn set(&mut self, fd: usize) {
+        if fd < FD_SETSIZE {
+            self.fds_bits[fd / NFDBITS] |= 1u64 << (fd % NFDBITS);
+        }
+    }
+    pub fn clr(&mut self, fd: usize) {
+        if fd < FD_SETSIZE {
+            self.fds_bits[fd / NFDBITS] &= !(1u64 << (fd % NFDBITS));
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Itimerval {
     pub it_interval: Timeval,
     pub it_value: Timeval,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SysInfo {
+    pub uptime: i64,
+    pub loads: [u64; 3],
+    pub totalram: u64,
+    pub freeram: u64,
+    pub sharedram: u64,
+    pub bufferram: u64,
+    pub totalswap: u64,
+    pub freeswap: u64,
+    pub procs: u16,
+    pub pad: u16,
+    pub totalhigh: u64,
+    pub freehigh: u64,
+    pub mem_unit: u32,
+    pub _f: [u8; 0],
 }
 
 pub const LINUX_CAPABILITY_VERSION_1: u32 = 0x1998_0330;

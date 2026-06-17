@@ -2359,6 +2359,46 @@ pub fn chdir(path_ptr: usize) -> i64 {
     }
 }
 
+pub fn fchdir(fd: i32) -> i64 {
+    let dir_path = {
+        #[allow(static_mut_refs)]
+        let proc_option = unsafe {
+            PROCESS_TABLE
+                .get_mut()
+                .unwrap()
+                .get_process(crate::sys::proc::id())
+        };
+        let Some(process) = proc_option else {
+            return -(ESRCH as i64);
+        };
+        let entry = match fd_slot(process, fd) {
+            Ok(e) => e,
+            Err(e) => return e as i64,
+        };
+        let file = entry.file.lock();
+        match &file.kind {
+            OpenFileKind::Vfs(node) => {
+                if node.lock().metadata.file_type != FileType::Dir {
+                    return -(ENOTDIR as i64);
+                }
+                file.path.clone()
+            }
+            _ => return -(ENOTDIR as i64),
+        }
+    };
+
+    #[allow(static_mut_refs)]
+    let proc_mut = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+            .unwrap()
+    };
+    proc_mut.pwd = dir_path;
+    0
+}
+
 pub fn rename(old_path_ptr: usize, new_path_ptr: usize) -> i64 {
     let Ok(old_path) = copy_cstr_from_user(UserPtr(old_path_ptr as *const u8), 4096) else {
         return -(EFAULT as i64);
@@ -3142,6 +3182,180 @@ pub fn ppoll(
     }
 }
 
+pub fn select(nfds: i32, readfds_ptr: usize, writefds_ptr: usize, exceptfds_ptr: usize, timeout_ptr: usize) -> i64 {
+    if nfds < 0 || nfds > FD_SETSIZE as i32 {
+        return -(EINVAL as i64);
+    }
+
+    let n = nfds as usize;
+
+    let mut pfd_array: [PollFd; FD_SETSIZE] = unsafe { core::mem::zeroed() };
+    let mut pfd_count: usize = 0;
+    let mut readfds_local: FdSet = FdSet::default();
+    let mut writefds_local: FdSet = FdSet::default();
+    let mut exceptfds_local: FdSet = FdSet::default();
+
+    if readfds_ptr != 0 {
+        readfds_local = unsafe { *(readfds_ptr as *const FdSet) };
+    }
+    if writefds_ptr != 0 {
+        writefds_local = unsafe { *(writefds_ptr as *const FdSet) };
+    }
+    if exceptfds_ptr != 0 {
+        exceptfds_local = unsafe { *(exceptfds_ptr as *const FdSet) };
+    }
+
+    for fd in 0..n {
+        let fd_i32 = fd as i32;
+        let mut events: i16 = 0;
+
+        if readfds_local.isset(fd) {
+            events |= POLLIN;
+        }
+        if writefds_local.isset(fd) {
+            events |= POLLOUT;
+        }
+        if exceptfds_local.isset(fd) {
+            events |= POLLPRI;
+        }
+
+        if events != 0 {
+            pfd_array[pfd_count] = PollFd {
+                fd: fd_i32,
+                events,
+                revents: 0,
+            };
+            pfd_count += 1;
+        }
+    }
+
+    if pfd_count == 0 {
+        if timeout_ptr != 0 {
+            let tv = unsafe { &*(timeout_ptr as *const Timeval) };
+            if tv.tv_sec == 0 && tv.tv_usec == 0 {
+                return 0;
+            }
+            let total_ms = tv.tv_sec * 1000 + (tv.tv_usec as i64) / 1000 + 1;
+            let start = uptime();
+            loop {
+                if uptime() >= start + (total_ms as f64) / 1000.0 {
+                    return 0;
+                }
+                sys::proc::await_io();
+            }
+        }
+        loop {
+            sys::proc::await_io();
+        }
+    }
+
+    let current_pid = sys::proc::id();
+    let pfds = &mut pfd_array[..pfd_count];
+
+    let mut ready = match poll_fd_set_for_pid(pfds, current_pid) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+
+    if ready > 0 {
+        write_back_select_results(pfds, readfds_ptr, writefds_ptr, exceptfds_ptr, &mut readfds_local, &mut writefds_local, &mut exceptfds_local, n);
+        return ready as i64;
+    }
+
+    let timeout_is_null = timeout_ptr == 0;
+    let deadline = if timeout_is_null {
+        None
+    } else {
+        let tv = unsafe { &*(timeout_ptr as *const Timeval) };
+        if tv.tv_sec == 0 && tv.tv_usec == 0 {
+            return 0;
+        }
+        let now = uptime();
+        let dur = (tv.tv_sec as f64) + (tv.tv_usec as f64) / 1_000_000.0;
+        Some(now + dur)
+    };
+
+    let wait_queue = sys::proc::poll_wait_queue();
+
+    loop {
+        if let Some(limit) = deadline {
+            if uptime() >= limit {
+                return 0;
+            }
+        }
+
+        let wait_pid = wait_queue.prepare_current();
+
+        ready = match poll_fd_set_for_pid(pfds, current_pid) {
+            Ok(n) => n,
+            Err(e) => {
+                wait_queue.finish_wait(wait_pid);
+                return e;
+            }
+        };
+
+        if ready > 0 {
+            wait_queue.finish_wait(wait_pid);
+            write_back_select_results(pfds, readfds_ptr, writefds_ptr, exceptfds_ptr, &mut readfds_local, &mut writefds_local, &mut exceptfds_local, n);
+            return ready as i64;
+        }
+
+        if let Some(limit) = deadline {
+            if uptime() >= limit {
+                wait_queue.finish_wait(wait_pid);
+                return 0;
+            }
+        }
+
+        sys::proc::await_io();
+        wait_queue.finish_wait(wait_pid);
+
+        ready = match poll_fd_set_for_pid(pfds, current_pid) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+
+        if ready > 0 {
+            write_back_select_results(pfds, readfds_ptr, writefds_ptr, exceptfds_ptr, &mut readfds_local, &mut writefds_local, &mut exceptfds_local, n);
+            return ready as i64;
+        }
+    }
+}
+
+fn write_back_select_results(pfds: &[PollFd], readfds_ptr: usize, writefds_ptr: usize, exceptfds_ptr: usize, readfds: &mut FdSet, writefds: &mut FdSet, exceptfds: &mut FdSet, nfds: usize) {
+    for fd in 0..nfds {
+        readfds.clr(fd);
+        writefds.clr(fd);
+        exceptfds.clr(fd);
+    }
+
+    for pfd in pfds {
+        let fd = pfd.fd as usize;
+        if fd >= nfds {
+            continue;
+        }
+        if (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0 {
+            readfds.set(fd);
+        }
+        if (pfd.revents & POLLOUT) != 0 {
+            writefds.set(fd);
+        }
+        if (pfd.revents & (POLLERR | POLLNVAL)) != 0 {
+            exceptfds.set(fd);
+        }
+    }
+
+    if readfds_ptr != 0 {
+        unsafe { *(readfds_ptr as *mut FdSet) = *readfds; }
+    }
+    if writefds_ptr != 0 {
+        unsafe { *(writefds_ptr as *mut FdSet) = *writefds; }
+    }
+    if exceptfds_ptr != 0 {
+        unsafe { *(exceptfds_ptr as *mut FdSet) = *exceptfds; }
+    }
+}
+
 pub fn socket(domain: i32, sock_type: i32, _protocol: i32) -> i64 {
     const SOCK_NONBLOCK: i32 = 0x800;
     const SOCK_CLOEXEC: i32 = 0x80000;
@@ -3881,6 +4095,50 @@ pub fn getrusage(who: i32, usage: usize) -> i64 {
 
     unsafe {
         *(usage as *mut Rusage) = Rusage::default();
+    }
+    0
+}
+
+pub fn sysinfo(info_ptr: usize) -> i64 {
+    if info_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+
+    let uptime_secs = crate::driver::timer::pit::uptime() as i64;
+
+    let total_pages: usize;
+    let free_pages: usize;
+    {
+        let allocator = crate::sys::memory::bitmap::frame_allocator().lock();
+        total_pages = allocator.total_frames();
+        free_pages = allocator.free_frames();
+    }
+
+    let procs: u16 = {
+        #[allow(static_mut_refs)]
+        let table = unsafe { crate::sys::proc::PROCESS_TABLE.get_mut().unwrap() };
+        table.proc_list.len() as u16
+    };
+
+    let info = SysInfo {
+        uptime: uptime_secs,
+        loads: [0, 0, 0],
+        totalram: total_pages as u64 * 4096,
+        freeram: free_pages as u64 * 4096,
+        sharedram: 0,
+        bufferram: 0,
+        totalswap: 0,
+        freeswap: 0,
+        procs,
+        pad: 0,
+        totalhigh: 0,
+        freehigh: 0,
+        mem_unit: 4096,
+        _f: [0u8; 0],
+    };
+
+    unsafe {
+        *(info_ptr as *mut SysInfo) = info;
     }
     0
 }
