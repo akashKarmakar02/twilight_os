@@ -7,6 +7,9 @@ use crate::compat::freebsd_kpi::intr::{
     INTR_MPSAFE, INTR_TYPE_NET, IntrCookie, bus_setup_intr, bus_teardown_intr,
     debug_registered_intr_count,
 };
+use crate::compat::freebsd_kpi::mutex::{
+    MTX_DEF, MTX_NOWITNESS, Mtx, mtx_destroy, mtx_init, mtx_initialized, mtx_lock, mtx_unlock,
+};
 use crate::compat::freebsd_kpi::pci::{pci_get_device, pci_get_vendor};
 use crate::compat::freebsd_kpi::resource::{
     RF_ACTIVE, Resource, SYS_RES_IOPORT, SYS_RES_IRQ, bus_alloc_resource_any, rman_get_bushandle,
@@ -21,6 +24,24 @@ const RTL8139_DESC: &str = "FreeBSD KPI demo RTL8139";
 const FREEBSD_DEMO_CLAIM_RTL8139: bool = false;
 
 struct Rtl8139DemoDriver;
+
+struct Rtl8139DemoSoftc {
+    io_base: u64,
+    irq: u8,
+    intr_cookie: Option<IntrCookie>,
+    lock: Mtx,
+}
+
+impl Rtl8139DemoSoftc {
+    fn new() -> Self {
+        Self {
+            io_base: 0,
+            irq: 0,
+            intr_cookie: None,
+            lock: Mtx::new(),
+        }
+    }
+}
 
 impl FreeBsdPciDriver for Rtl8139DemoDriver {
     fn probe(&mut self, device: &mut Device) -> i32 {
@@ -137,11 +158,33 @@ fn log_rtl8139_resources(device: &Device) {
         return;
     };
 
-    log!(
-        "freebsd_kpi_demo: i/o bar0 base={:#x}",
-        rman_get_start(io_resource)
+    let mut softc = Rtl8139DemoSoftc::new();
+    log!("freebsd_kpi_demo: softc initialized");
+
+    mtx_init(
+        &mut softc.lock,
+        "freebsd_kpi_demo",
+        Some("rtl8139_demo"),
+        MTX_DEF | MTX_NOWITNESS,
     );
-    log!("freebsd_kpi_demo: irq={}", rman_get_start(irq_resource));
+    if mtx_initialized(&softc.lock) {
+        log!("freebsd_kpi_demo: mtx initialized");
+    }
+
+    let io_base = rman_get_start(io_resource);
+    let irq = rman_get_start(irq_resource) as u8;
+    mtx_lock(&softc.lock);
+    softc.io_base = io_base;
+    softc.irq = irq;
+    mtx_unlock(&softc.lock);
+
+    log!(
+        "freebsd_kpi_demo: stored io_base={:#x} irq={}",
+        softc.io_base,
+        softc.irq
+    );
+    log!("freebsd_kpi_demo: i/o bar0 base={:#x}", softc.io_base);
+    log!("freebsd_kpi_demo: irq={}", softc.irq);
 
     let tag = rman_get_bustag(io_resource);
     let handle = rman_get_bushandle(io_resource);
@@ -164,10 +207,12 @@ fn log_rtl8139_resources(device: &Device) {
         mac[5]
     );
 
-    register_dummy_intr(device, irq_resource);
+    register_dummy_intr(device, irq_resource, &mut softc);
+    mtx_destroy(&mut softc.lock);
+    log!("freebsd_kpi_demo: mtx destroyed");
 }
 
-fn register_dummy_intr(device: &Device, irq_resource: Resource) {
+fn register_dummy_intr(device: &Device, irq_resource: Resource, softc: &mut Rtl8139DemoSoftc) {
     let mut cookie: Option<IntrCookie> = None;
     let result = bus_setup_intr(
         device,
@@ -192,14 +237,30 @@ fn register_dummy_intr(device: &Device, irq_resource: Resource) {
         return;
     };
 
+    mtx_lock(&softc.lock);
+    softc.intr_cookie = Some(cookie);
+    mtx_unlock(&softc.lock);
+
     log!(
         "freebsd_kpi_demo: dummy irq cookie={} registered_count={}",
         cookie.id(),
         debug_registered_intr_count()
     );
 
+    mtx_lock(&softc.lock);
+    let cookie = softc.intr_cookie;
+    mtx_unlock(&softc.lock);
+
+    let Some(cookie) = cookie else {
+        log!("freebsd_kpi_demo: dummy irq teardown skipped: no softc cookie");
+        return;
+    };
+
     let result = bus_teardown_intr(device, irq_resource, cookie);
     if result == 0 {
+        mtx_lock(&softc.lock);
+        softc.intr_cookie = None;
+        mtx_unlock(&softc.lock);
         log!(
             "freebsd_kpi_demo: dummy irq handler removed registered_count={}",
             debug_registered_intr_count()
