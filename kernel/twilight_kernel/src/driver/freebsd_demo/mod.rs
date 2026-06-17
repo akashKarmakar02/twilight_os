@@ -3,9 +3,13 @@ use crate::compat::freebsd_kpi::device::{
     Device, device_get_device, device_get_nameunit, device_get_vendor, device_set_desc,
 };
 use crate::compat::freebsd_kpi::driver::{BUS_PROBE_DEFAULT, ENXIO, FreeBsdPciDriver};
+use crate::compat::freebsd_kpi::intr::{
+    INTR_MPSAFE, INTR_TYPE_NET, IntrCookie, bus_setup_intr, bus_teardown_intr,
+    debug_registered_intr_count,
+};
 use crate::compat::freebsd_kpi::pci::{pci_get_device, pci_get_vendor};
 use crate::compat::freebsd_kpi::resource::{
-    RF_ACTIVE, SYS_RES_IOPORT, SYS_RES_IRQ, bus_alloc_resource_any, rman_get_bushandle,
+    RF_ACTIVE, Resource, SYS_RES_IOPORT, SYS_RES_IRQ, bus_alloc_resource_any, rman_get_bushandle,
     rman_get_bustag, rman_get_start,
 };
 use crate::sys::pci::{PciClaimError, PciOwner, PciOwnerKind};
@@ -134,13 +138,10 @@ fn log_rtl8139_resources(device: &Device) {
     };
 
     log!(
-        "freebsd_kpi_demo: RTL8139 I/O base={:#x}",
+        "freebsd_kpi_demo: i/o bar0 base={:#x}",
         rman_get_start(io_resource)
     );
-    log!(
-        "freebsd_kpi_demo: RTL8139 IRQ line={}",
-        rman_get_start(irq_resource)
-    );
+    log!("freebsd_kpi_demo: irq={}", rman_get_start(irq_resource));
 
     let tag = rman_get_bustag(io_resource);
     let handle = rman_get_bushandle(io_resource);
@@ -154,7 +155,7 @@ fn log_rtl8139_resources(device: &Device) {
     ];
 
     log!(
-        "freebsd_kpi_demo: RTL8139 MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        "freebsd_kpi_demo: mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0],
         mac[1],
         mac[2],
@@ -162,4 +163,52 @@ fn log_rtl8139_resources(device: &Device) {
         mac[4],
         mac[5]
     );
+
+    register_dummy_intr(device, irq_resource);
+}
+
+fn register_dummy_intr(device: &Device, irq_resource: Resource) {
+    let mut cookie: Option<IntrCookie> = None;
+    let result = bus_setup_intr(
+        device,
+        irq_resource,
+        INTR_TYPE_NET | INTR_MPSAFE,
+        None,
+        Some(rtl8139_demo_intr),
+        0,
+        &mut cookie,
+    );
+
+    if result != 0 {
+        log!(
+            "freebsd_kpi_demo: dummy irq registration failed: {}",
+            result
+        );
+        return;
+    }
+
+    let Some(cookie) = cookie else {
+        log!("freebsd_kpi_demo: dummy irq registration returned no cookie");
+        return;
+    };
+
+    log!(
+        "freebsd_kpi_demo: dummy irq cookie={} registered_count={}",
+        cookie.id(),
+        debug_registered_intr_count()
+    );
+
+    let result = bus_teardown_intr(device, irq_resource, cookie);
+    if result == 0 {
+        log!(
+            "freebsd_kpi_demo: dummy irq handler removed registered_count={}",
+            debug_registered_intr_count()
+        );
+    } else {
+        log!("freebsd_kpi_demo: dummy irq teardown failed: {}", result);
+    }
+}
+
+fn rtl8139_demo_intr(_arg: usize) {
+    log!("freebsd_kpi_demo: dummy interrupt handler called");
 }
