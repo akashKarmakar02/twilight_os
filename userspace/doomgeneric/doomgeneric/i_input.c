@@ -328,8 +328,8 @@ void I_GetEvent(void)
     {
         event.type = ev_mouse;
         event.data1 = buttons;
-        event.data2 = dy;
-        event.data3 = -dx;
+        event.data2 = dx;
+        event.data3 = dy;
         D_PostEvent(&event);
     }
 }
