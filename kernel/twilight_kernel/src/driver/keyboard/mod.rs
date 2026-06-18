@@ -322,12 +322,13 @@ impl VfsNodeOps for KeyboardDev {
                 continue;
             }
 
-            let mut out = Vec::with_capacity(events.len() * EVENT_SIZE);
-            for evt in events {
-                out.extend_from_slice(&evt.to_bytes());
+            let count = events.len();
+            for (index, event) in events.into_iter().enumerate() {
+                let start = index * EVENT_SIZE;
+                buf[start..start + EVENT_SIZE].copy_from_slice(&event.to_bytes());
             }
 
-            return Ok(out.len());
+            return Ok(count * EVENT_SIZE);
         }
     }
 

@@ -1,6 +1,7 @@
 pub mod apic;
 pub mod cpu;
 pub mod disk;
+pub mod freebsd_demo;
 pub mod keyboard;
 pub mod mouse;
 pub mod nic;

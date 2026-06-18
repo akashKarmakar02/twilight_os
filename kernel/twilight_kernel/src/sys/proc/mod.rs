@@ -5,21 +5,24 @@ pub(crate) mod user;
 
 use crate::arch::x86_64::gdt::{SegmentSelector, USER_CS, USER_SS};
 use crate::arch::x86_64::io;
-use crate::arch::x86_64::io::{IA32_FS_BASE, IA32_GS_BASE, wrmsr};
+use crate::arch::x86_64::io::{wrmsr, IA32_FS_BASE, IA32_GS_BASE};
 use crate::driver::disk::dummy_blockdev;
 use crate::kernel_utils::exec::jump_to_user;
 use crate::println;
 use crate::sys::console::init_console;
 use crate::sys::console::tty::TtyDev;
 use crate::sys::fs::pipe::PipeEnd;
-use crate::sys::fs::vfs::{Metadata, VFS, VfsNode, VfsNodeOps};
+use crate::sys::fs::vfs::{Metadata, VfsNode, VfsNodeOps, VFS};
 use crate::sys::memory::bitmap::with_frame_allocator;
-use crate::sys::memory::{alloc_pages, kernel_page_table, phys_mem_offset};
-use crate::sys::proc::mem::ProcMM;
+use crate::sys::memory::{
+    alloc_pages_unflushed, allocate_zeroed_frame, deallocate_frame, kernel_page_table,
+    map_user_frame, phys_mem_offset, phys_to_virt, user_page_flags, user_page_flags_with_access,
+};
+use crate::sys::proc::mem::{ElfRegion, ProcMM, VmPermissions};
 use crate::sys::proc::switch::read_cr3;
-use crate::sys::proc::task::{Context, FpuState, allocate_switch_stack, switch_tasks};
+use crate::sys::proc::task::{allocate_switch_stack, switch_tasks, Context, FpuState};
 use crate::sys::proc::user::USER_ENV;
-use crate::utils::{StackHelper, sync::WaitQueue};
+use crate::utils::{sync::WaitQueue, StackHelper};
 use alloc::alloc::alloc_zeroed;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -32,15 +35,16 @@ use core::arch::naked_asm;
 use core::mem::size_of;
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU16, Ordering};
-use spin::Once;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
+use spin::Once;
 use twilight_common::syscall::types::{O_RDONLY, O_WRONLY};
-use x86_64::VirtAddr;
 use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::mapper::{MappedFrame, TranslateResult};
 use x86_64::structures::paging::{
-    FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, PhysFrame, Size4KiB,
+    FrameAllocator, FrameDeallocator, Mapper, OffsetPageTable, Page, PhysFrame, Size4KiB, Translate,
 };
+use x86_64::VirtAddr;
 
 pub static mut PROCESS_TABLE: Once<ProcessTable> = Once::new();
 static POLL_WAIT_QUEUE: WaitQueue = WaitQueue::new();
@@ -116,7 +120,7 @@ pub struct InterruptErrorStack {
 }
 
 #[repr(C, packed)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Elf64Ehdr {
     e_ident: [u8; 16],
     e_type: u16,
@@ -135,7 +139,7 @@ struct Elf64Ehdr {
 }
 
 #[repr(C, packed)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct Elf64Phdr {
     p_type: u32,
     p_flags: u32,
@@ -151,6 +155,9 @@ const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
 const PT_PHDR: u32 = 6;
 const PT_TLS: u32 = 7;
+const PF_X: u32 = 1;
+const PF_W: u32 = 2;
+const PF_R: u32 = 4;
 
 // ================== Process ==================
 
@@ -171,6 +178,8 @@ pub const SIGCHLD: usize = 17;
 pub const SIGKILL: usize = 9;
 pub const SIGPIPE: usize = 13;
 pub const SIGSTOP: usize = 19;
+pub const SIGBUS: usize = 7;
+pub const SIGSEGV: usize = 11;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -393,6 +402,8 @@ pub struct Process {
     pub entry_point: u64,
     pub page_table_frame: PhysFrame,
     pub pid: u16,
+    pub tgid: u16,
+    pub is_thread: bool,
     pub parent_pid: u16,
     pub pgid: u16,
     pub sid: u16,
@@ -403,7 +414,7 @@ pub struct Process {
     pub pwd: String,
     pub fd_table: Vec<Option<FdEntry>>,
     pub umask: u16,
-    pub proc_mm: Box<ProcMM>,
+    pub proc_mm: Arc<Mutex<ProcMM>>,
     pub exit_code: i32,
     pub wait_status: i32,
     pub wait_reported: bool,
@@ -415,6 +426,13 @@ pub struct Process {
     pub sigsuspend_saved_mask: [u64; 2],
     pub in_sigsuspend: bool,
     pub signal_alt_stack: SignalAltStack,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageFaultResolution {
+    Resolved,
+    Invalid,
+    BusError,
 }
 
 impl Process {
@@ -527,8 +545,61 @@ impl Process {
         }
     }
 
+    pub fn resolve_page_fault(
+        &mut self,
+        fault_addr: u64,
+        write: bool,
+        execute: bool,
+    ) -> PageFaultResolution {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(fault_addr));
+        if self.mapper.translate_page(page).is_ok() {
+            return PageFaultResolution::Resolved;
+        }
+
+        let page_base = page.start_address().as_u64() as usize;
+        let Some(mut plan) = self.proc_mm.lock().page_fault_plan(page_base) else {
+            return PageFaultResolution::Invalid;
+        };
+        if !plan.permissions.allows(write, execute) {
+            return PageFaultResolution::Invalid;
+        }
+
+        let Some(frame) = allocate_zeroed_frame() else {
+            return PageFaultResolution::BusError;
+        };
+        let frame_ptr = phys_to_virt(frame.start_address()).as_mut_ptr::<u8>();
+
+        for fragment in &mut plan.fragments {
+            // SAFETY: `frame` is exclusively owned here, and every fragment
+            // was bounded to this single 4 KiB page by `page_fault_plan`.
+            let destination = unsafe {
+                core::slice::from_raw_parts_mut(frame_ptr.add(fragment.page_offset), fragment.len)
+            };
+            if fragment
+                .file
+                .read_exact(fragment.file_offset, destination)
+                .is_err()
+            {
+                deallocate_frame(frame);
+                return PageFaultResolution::BusError;
+            }
+        }
+
+        if self.mapper.translate_page(page).is_ok() {
+            deallocate_frame(frame);
+            return PageFaultResolution::Resolved;
+        }
+
+        let flags = user_page_flags(plan.permissions.write, plan.permissions.execute);
+        if map_user_frame(&mut self.mapper, page_base as u64, frame, flags).is_err() {
+            deallocate_frame(frame);
+            return PageFaultResolution::BusError;
+        }
+        PageFaultResolution::Resolved
+    }
+
     pub fn new(
-        content_buf: Vec<u8>,
+        mut executable: VfsNode,
         exe_path: &str,
         pwd: &str,
         args: &[&str],
@@ -550,6 +621,7 @@ impl Process {
         }
 
         let mut addr_size_vec: Vec<(u64, usize)> = Vec::new();
+        let mut elf_regions = Vec::new();
 
         unsafe {
             Cr3::write(page_table_frame, flags);
@@ -569,11 +641,10 @@ impl Process {
         let mut max_end: u64;
         let needs_static_tls_spill: bool;
 
-        if content_buf.get(0..4) == Some(&ELF_MAGIC) {
+        if executable.metadata.size >= ELF_MAGIC.len() {
             match load_elf_image(
-                content_buf.as_slice(),
-                &mut mapper,
-                &mut addr_size_vec,
+                &mut executable,
+                &mut elf_regions,
                 Some(MAIN_DYN_LOAD_BASE),
                 true,
             ) {
@@ -587,11 +658,7 @@ impl Process {
                     needs_static_tls_spill = main_img.has_tls && main_img.interp_path.is_none();
 
                     if let Some(interp_path) = main_img.interp_path {
-                        match load_interpreter_image(
-                            interp_path.as_str(),
-                            &mut mapper,
-                            &mut addr_size_vec,
-                        ) {
+                        match load_interpreter_image(interp_path.as_str(), &mut elf_regions) {
                             Ok(interp_img) => {
                                 entry_point_addr = interp_img.entry_point;
                                 at_base = interp_img.load_base;
@@ -607,9 +674,13 @@ impl Process {
                     }
 
                     let user_stack_base = user_stack_top.as_u64() - USER_STACK_SIZE as u64;
-                    if let Ok(_) =
-                        alloc_pages(&mut mapper, user_stack_base, USER_STACK_SIZE, true, false)
-                    {
+                    if let Ok(_) = alloc_pages_unflushed(
+                        &mut mapper,
+                        user_stack_base,
+                        USER_STACK_SIZE,
+                        true,
+                        false,
+                    ) {
                         addr_size_vec.push((user_stack_base, USER_STACK_SIZE));
                     }
                 }
@@ -647,7 +718,9 @@ impl Process {
         );
 
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
-        let proc_mm = Box::new(ProcMM::new(max_end as usize));
+        let mut memory = ProcMM::new(max_end as usize);
+        memory.elf_regions = elf_regions;
+        let proc_mm = Arc::new(Mutex::new(memory));
         let sid = process_session_id(parent_pid).unwrap_or(pid);
 
         let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
@@ -670,6 +743,8 @@ impl Process {
             stack_size: USER_STACK_SIZE,
             entry_point: entry_point_addr,
             pid,
+            tgid: pid,
+            is_thread: false,
             mapper,
             page_table_frame,
             state: ProcessState::Running,
@@ -703,7 +778,7 @@ impl Process {
 
     pub fn exec(
         &mut self,
-        content_buf: &[u8],
+        executable: &mut VfsNode,
         args: &[&str],
         env: &[&str],
     ) -> Result<(u64, u64), ()> {
@@ -730,6 +805,7 @@ impl Process {
             unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
         let mut addr_size_vec: Vec<(u64, usize)> = Vec::new();
+        let mut elf_regions = Vec::new();
         let user_stack_top = VirtAddr::new(USER_STACK_TOP);
 
         let mut entry_point_addr: u64;
@@ -741,14 +817,8 @@ impl Process {
         let mut max_end: u64;
         let needs_static_tls_spill: bool;
 
-        if content_buf.get(0..4) == Some(&ELF_MAGIC) {
-            match load_elf_image(
-                content_buf,
-                &mut mapper,
-                &mut addr_size_vec,
-                Some(MAIN_DYN_LOAD_BASE),
-                true,
-            ) {
+        if executable.metadata.size >= ELF_MAGIC.len() {
+            match load_elf_image(executable, &mut elf_regions, Some(MAIN_DYN_LOAD_BASE), true) {
                 Ok(main_img) => {
                     entry_point_addr = main_img.entry_point;
                     aux_entry_point = entry_point_addr;
@@ -765,11 +835,7 @@ impl Process {
                         // But accessing "user pointers" in `exec` is tricky if we just switched CR3.
                         // However, `load_interpreter_image` takes a path string (kernel memory), not user pointer.
                         // We should be fine.
-                        match load_interpreter_image(
-                            interp_path.as_str(),
-                            &mut mapper,
-                            &mut addr_size_vec,
-                        ) {
+                        match load_interpreter_image(interp_path.as_str(), &mut elf_regions) {
                             Ok(interp_img) => {
                                 entry_point_addr = interp_img.entry_point;
                                 at_base = interp_img.load_base;
@@ -786,8 +852,14 @@ impl Process {
                     }
 
                     let user_stack_base = user_stack_top.as_u64() - USER_STACK_SIZE as u64;
-                    if alloc_pages(&mut mapper, user_stack_base, USER_STACK_SIZE, true, false)
-                        .is_err()
+                    if alloc_pages_unflushed(
+                        &mut mapper,
+                        user_stack_base,
+                        USER_STACK_SIZE,
+                        true,
+                        false,
+                    )
+                    .is_err()
                     {
                         return Err(());
                     }
@@ -820,7 +892,9 @@ impl Process {
             None,
         );
 
-        let proc_mm = Box::new(ProcMM::new(max_end as usize));
+        let mut memory = ProcMM::new(max_end as usize);
+        memory.elf_regions = elf_regions;
+        let proc_mm = Arc::new(Mutex::new(memory));
 
         // Commit changes to self
         // Drop old resources implicitly when overwriting
@@ -834,6 +908,16 @@ impl Process {
 
         // FPU state reset?
         self.fpu_storage = Some(FpuState::default());
+
+        // Reset FS/GS base – the old TLS pointer from the parent image is
+        // invalid after exec.  musl will set up a new one via arch_prctl.
+        self.fs_base = VirtAddr::zero();
+        self.gs_base = VirtAddr::zero();
+
+        // Reset signal dispositions (SIG_DFL) after exec, per POSIX.
+        self.signal_actions = [SignalAction::default(); SIGNAL_COUNT];
+        self.signal_mask = [0; 2];
+        self.pending_signals = 0;
 
         // Preserve descriptors across exec except those marked close-on-exec.
         for slot in &mut self.fd_table {
@@ -867,6 +951,7 @@ impl Process {
 
         // 0. Allocate PID
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+        let proc_mm = self.proc_mm.lock();
         crate::serial_println!(
             "[fork] parent={} child={} rip={:#x} rsp={:#x} regions={} heap={:#x}-{:#x} mmap={}",
             self.pid,
@@ -874,9 +959,9 @@ impl Process {
             tf.iret.rip,
             tf.iret.rsp,
             self.addr_size_vec.len(),
-            self.proc_mm.heap_start,
-            self.proc_mm.mapped_heap_end,
-            self.proc_mm.mmap_regions.len(),
+            proc_mm.heap_start,
+            proc_mm.mapped_heap_end,
+            proc_mm.mmap_regions.len(),
         );
 
         // 1. Allocate new page table
@@ -895,75 +980,80 @@ impl Process {
         let mut mapper =
             unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
-        // 2. Deep copy user memory
+        // 2. Copy only pages that are resident in the parent. Lazy anonymous
+        // and ELF pages remain non-present in the child.
         let mut regions_to_copy = self.addr_size_vec.clone();
-
-        // Add Heap
-        if self.proc_mm.mapped_heap_end > self.proc_mm.heap_start {
+        if proc_mm.mapped_heap_end > proc_mm.heap_start {
             regions_to_copy.push((
-                self.proc_mm.heap_start as u64,
-                self.proc_mm.mapped_heap_end - self.proc_mm.heap_start,
+                proc_mm.heap_start as u64,
+                proc_mm.mapped_heap_end - proc_mm.heap_start,
             ));
         }
-
-        // Add Mmaps
-        for region in &self.proc_mm.mmap_regions {
+        for region in &proc_mm.mmap_regions {
+            regions_to_copy.push((region.base as u64, region.len));
+        }
+        for region in &proc_mm.elf_regions {
             regions_to_copy.push((region.base as u64, region.len));
         }
 
-        // We use a separate vec for the child's tracking to avoiding duplicates if addr_size_vec used to track everything
-        // But for cleanup we need them in child's addr_size_vec.
-        let mut child_addr_size_vec = self.addr_size_vec.clone();
-
-        for (addr, size) in regions_to_copy.iter() {
-            let addr = *addr;
-            let size = *size;
-            crate::serial_println!(
-                "[fork] copy child={} addr={:#x} size={:#x}",
-                pid,
-                addr,
-                size
-            );
-
-            // Allocate in child
-            // Note: We use true, true (RWX) for simplicity, though strict permissions would be better.
-            if alloc_pages(&mut mapper, addr, size, true, true).is_err() {
-                println!("fork: failed to alloc pages");
-                return Err(());
+        let mut pages_to_copy = Vec::new();
+        for (addr, size) in &regions_to_copy {
+            if *size == 0 {
+                continue;
             }
-
-            // Track dynamic allocations in child so they are freed on exit
-            // (If already in addr_size_vec, we might duplicate, but cleanup handles that or we should check existence?)
-            // addr_size_vec usually has code/data. Heap/Mmap are new.
-            // A simple deduplication check:
-            if !child_addr_size_vec.contains(&(addr, size)) {
-                child_addr_size_vec.push((addr, size));
+            let start = Page::<Size4KiB>::containing_address(VirtAddr::new(*addr));
+            let end = Page::<Size4KiB>::containing_address(VirtAddr::new(
+                addr.saturating_add(*size as u64).saturating_sub(1),
+            ));
+            for page in Page::range_inclusive(start, end) {
+                pages_to_copy.push(page.start_address().as_u64());
             }
+        }
+        pages_to_copy.sort_unstable();
+        pages_to_copy.dedup();
 
-            let start_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
-                VirtAddr::new(addr),
+        let child_proc_mm = Arc::new(Mutex::new(proc_mm.clone()));
+        let shared_pages = pages_to_copy
+            .iter()
+            .map(|addr| (*addr, proc_mm.is_shared_page(*addr as usize)))
+            .collect::<Vec<_>>();
+        drop(proc_mm);
+
+        for (addr, shared) in shared_pages {
+            let TranslateResult::Mapped {
+                frame: MappedFrame::Size4KiB(parent_frame),
+                flags,
+                ..
+            } = self.mapper.translate(VirtAddr::new(addr))
+            else {
+                continue;
+            };
+            let child_flags = user_page_flags_with_access(
+                flags.contains(x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE),
+                flags.contains(x86_64::structures::paging::PageTableFlags::WRITABLE),
+                !flags.contains(x86_64::structures::paging::PageTableFlags::NO_EXECUTE),
             );
-            let end_page = x86_64::structures::paging::Page::<Size4KiB>::containing_address(
-                VirtAddr::new(addr + (size as u64) - 1),
-            );
 
-            for page in x86_64::structures::paging::Page::range_inclusive(start_page, end_page) {
-                // Get physical address in child's page table
-                let phys_opt = mapper.translate_page(page);
-
-                if let Ok(child_frame) = phys_opt {
-                    let child_phys = child_frame.start_address();
-                    let child_virt = VirtAddr::new(child_phys.as_u64() + phys_mem_offset());
-                    let parent_virt = page.start_address();
-
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            parent_virt.as_u64() as *const u8,
-                            child_virt.as_mut_ptr(),
-                            4096,
-                        );
-                    }
+            if shared {
+                if map_user_frame(&mut mapper, addr, parent_frame, child_flags).is_err() {
+                    return Err(());
                 }
+                continue;
+            }
+
+            let Some(child_frame) = allocate_zeroed_frame() else {
+                return Err(());
+            };
+            let source = phys_to_virt(parent_frame.start_address()).as_ptr::<u8>();
+            let destination = phys_to_virt(child_frame.start_address()).as_mut_ptr::<u8>();
+            // SAFETY: both frames are valid 4 KiB physical-memory mappings;
+            // the child frame is exclusively owned and does not overlap the parent.
+            unsafe {
+                core::ptr::copy_nonoverlapping(source, destination, PAGE_SIZE_U64 as usize);
+            }
+            if map_user_frame(&mut mapper, addr, child_frame, child_flags).is_err() {
+                deallocate_frame(child_frame);
+                return Err(());
             }
         }
 
@@ -1017,10 +1107,12 @@ impl Process {
             stack_size: self.stack_size,
             entry_point: self.entry_point,
             pid,
+            tgid: pid,
+            is_thread: false,
             mapper,
             page_table_frame,
             state: ProcessState::Running,
-            addr_size_vec: child_addr_size_vec,
+            addr_size_vec: self.addr_size_vec.clone(),
             exe_path: self.exe_path.clone(),
             comm: self.comm,
             pwd: self.pwd.clone(),
@@ -1028,7 +1120,7 @@ impl Process {
             kernel_gs: kgs,
             gs_base: self.gs_base,
             fs_base: live_fs_base,
-            proc_mm: self.proc_mm.clone(), // Need to implement Clone for ProcMM or manually deep copy
+            proc_mm: child_proc_mm,
             parent_pid: self.pid,
             pgid: self.pgid,
             sid: self.sid,
@@ -1050,12 +1142,110 @@ impl Process {
         Ok(child)
     }
 
+    pub fn clone_thread(
+        &mut self,
+        tf: &InterruptStack,
+        child_stack: u64,
+        tls: u64,
+    ) -> Result<Process, ()> {
+        let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+        let (_, flags) = Cr3::read();
+        let page_table = crate::sys::memory::create_page_table(self.page_table_frame);
+        let mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
+
+        let switch_stack = allocate_switch_stack().map_err(|_| ())?.as_mut_ptr::<u8>();
+        let kernel_rsp = switch_stack as u64;
+        let mut stack_ptr = initial_context_stack_top(kernel_rsp);
+        let kgs = Box::new(KernelGsData {
+            kernel_rsp,
+            user_rsp: 0,
+        });
+        let mut stack = StackHelper::new(&mut stack_ptr);
+        let kframe = stack.offset::<InterruptErrorStack>();
+        *kframe = InterruptErrorStack {
+            code: 0,
+            stack: *tf,
+        };
+        kframe.stack.scratch.rax = 0;
+        if child_stack != 0 {
+            kframe.stack.iret.rsp = child_stack;
+        }
+
+        let context = stack.offset::<Context>();
+        *context = Context::default();
+        context.rip = iretq_init as u64;
+        context.cr3 = self.page_table_frame.start_address().as_u64() | flags.bits();
+
+        Ok(Process {
+            context,
+            context_switch_rsp: VirtAddr::new(stack_ptr),
+            fpu_storage: self.fpu_storage,
+            kernel_gs: kgs,
+            gs_base: self.gs_base,
+            fs_base: VirtAddr::new(tls),
+            stack: child_stack,
+            stack_size: 0,
+            mapper,
+            entry_point: self.entry_point,
+            page_table_frame: self.page_table_frame,
+            pid,
+            tgid: self.tgid,
+            is_thread: true,
+            parent_pid: self.parent_pid,
+            pgid: self.pgid,
+            sid: self.sid,
+            state: ProcessState::Running,
+            addr_size_vec: Vec::new(),
+            exe_path: self.exe_path.clone(),
+            comm: self.comm,
+            pwd: self.pwd.clone(),
+            fd_table: self.fd_table.clone(),
+            umask: self.umask,
+            proc_mm: self.proc_mm.clone(),
+            exit_code: 0,
+            wait_status: 0,
+            wait_reported: false,
+            preempt_frame: 0,
+            pending_io: false,
+            signal_actions: self.signal_actions,
+            signal_mask: self.signal_mask,
+            pending_signals: 0,
+            sigsuspend_saved_mask: [0; 2],
+            in_sigsuspend: false,
+            signal_alt_stack: SignalAltStack::default(),
+        })
+    }
+
     pub fn cleanup(&mut self, table_frame: PhysFrame) {
-        // The process memory map is not normalized enough yet to safely walk
-        // addr_size_vec here. Some regions can overlap with heap/mmap tracking
-        // or page-table cleanup, which can corrupt allocator state while reaping
-        // a zombie. Keep the old behavior for this multitasking slice: reap the
-        // process table entry and release the root page-table frame only.
+        let mut owned_ranges = self.addr_size_vec.clone();
+        let mut shared_ranges = Vec::new();
+        {
+            let proc_mm = self.proc_mm.lock();
+            if proc_mm.mapped_heap_end > proc_mm.heap_start {
+                owned_ranges.push((
+                    proc_mm.heap_start as u64,
+                    proc_mm.mapped_heap_end - proc_mm.heap_start,
+                ));
+            }
+            for region in &proc_mm.mmap_regions {
+                let range = (region.base as u64, region.len);
+                if region.kind == crate::sys::proc::mem::MmapKind::Shared {
+                    shared_ranges.push(range);
+                } else {
+                    owned_ranges.push(range);
+                }
+            }
+            for region in &proc_mm.elf_regions {
+                owned_ranges.push((region.base as u64, region.len));
+            }
+        }
+
+        for (addr, size) in owned_ranges {
+            let _ = crate::sys::memory::dealloc_pages(&mut self.mapper, addr, size);
+        }
+        for (addr, size) in shared_ranges {
+            let _ = crate::sys::memory::unmap_user_pages(&mut self.mapper, addr, size);
+        }
         self.addr_size_vec.clear();
 
         with_frame_allocator(|allocator| unsafe {
@@ -1066,6 +1256,22 @@ impl Process {
 
 pub fn id() -> u16 {
     PID.load(Ordering::SeqCst)
+}
+
+pub fn resolve_current_page_fault(
+    fault_addr: u64,
+    write: bool,
+    execute: bool,
+) -> PageFaultResolution {
+    let current = id();
+    #[allow(static_mut_refs)]
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return PageFaultResolution::Invalid;
+    };
+    let Some(process) = table.get_process(current) else {
+        return PageFaultResolution::Invalid;
+    };
+    process.resolve_page_fault(fault_addr, write, execute)
 }
 
 pub fn process_group_id(pid: u16) -> Option<u16> {
@@ -1103,6 +1309,7 @@ pub fn queue_signal(pid: u16, sig: usize) -> bool {
         return false;
     };
     process.queue_signal(sig);
+    wake_process(pid);
     true
 }
 
@@ -1138,6 +1345,22 @@ pub fn exit(code: i32) {
             crate::task::executor::halt();
         }
     };
+
+    if slice[cur_idx].is_thread {
+        slice[cur_idx].close_all_fds();
+        slice[cur_idx].state = ProcessState::Dead;
+        slice[cur_idx].exit_code = code;
+
+        let Some(next_idx) = find_next_runnable_index(slice, cur_idx) else {
+            loop {
+                crate::task::executor::halt();
+            }
+        };
+        switch_by_index(slice, cur_idx, next_idx);
+        loop {
+            crate::task::executor::halt();
+        }
+    }
 
     let parent_pid = slice[cur_idx].parent_pid;
     crate::serial_println!("[exit] pid={} parent={}", current_pid, parent_pid);
@@ -1177,6 +1400,52 @@ pub fn exit(code: i32) {
     );
     switch_by_index(slice, cur_idx, next_idx);
 
+    loop {
+        crate::task::executor::halt();
+    }
+}
+
+pub fn exit_group(code: i32) -> ! {
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let current_pid = id();
+    let slice = table.proc_list.make_contiguous();
+    let Some(cur_idx) = find_process_index(slice, current_pid) else {
+        loop {
+            crate::task::executor::halt();
+        }
+    };
+
+    let tgid = slice[cur_idx].tgid;
+    let Some(leader_idx) = slice.iter().position(|process| process.pid == tgid) else {
+        loop {
+            crate::task::executor::halt();
+        }
+    };
+    let parent_pid = slice[leader_idx].parent_pid;
+
+    for process in slice.iter_mut().filter(|process| process.tgid == tgid) {
+        process.close_all_fds();
+        process.state = ProcessState::Dead;
+        process.exit_code = code;
+    }
+    slice[leader_idx].wait_status = (code & 0xff) << 8;
+    slice[leader_idx].wait_reported = false;
+
+    if let Some(parent_idx) = find_process_index(slice, parent_pid) {
+        slice[parent_idx].queue_signal(SIGCHLD);
+    }
+
+    let next_idx = find_process_index(slice, parent_pid)
+        .filter(|&idx| matches!(slice[idx].state, ProcessState::Running))
+        .or_else(|| find_next_runnable_index(slice, cur_idx));
+    let Some(next_idx) = next_idx else {
+        loop {
+            crate::task::executor::halt();
+        }
+    };
+
+    switch_by_index(slice, cur_idx, next_idx);
     loop {
         crate::task::executor::halt();
     }
@@ -1248,26 +1517,29 @@ pub fn maybe_schedule() {
     }
 }
 
-pub fn schedule_now() {
+pub fn schedule_now() -> bool {
     #[allow(static_mut_refs)]
-    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return false;
+    };
     let cur_pid = id();
 
     // Make a contiguous slice so we can index and take raw pointers.
     let slice = table.proc_list.make_contiguous();
     if slice.len() < 2 {
-        return;
+        return false;
     }
 
     let Some(cur_idx) = slice.iter().position(|p| p.pid == cur_pid) else {
-        return;
+        return false;
     };
 
     let Some(next_idx) = find_next_runnable_index(slice, cur_idx) else {
-        return;
+        return false;
     };
 
     switch_by_index(slice, cur_idx, next_idx);
+    true
 }
 
 pub fn await_io() {
@@ -1510,6 +1782,7 @@ pub fn init() {
             .try_call_once(|| Ok::<_, ()>(ProcessTable::new()))
             .unwrap();
     }
+    USER_ENV.lock().push(String::from("TERM=xterm-256color"));
     let (page_table_frame, _) = Cr3::read();
     let page_table = crate::memory::create_page_table(page_table_frame);
     let mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
@@ -1517,7 +1790,7 @@ pub fn init() {
     let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
     PID.store(pid, Ordering::SeqCst);
 
-    let proc_mm = Box::new(ProcMM::new(0));
+    let proc_mm = Arc::new(Mutex::new(ProcMM::new(0)));
 
     let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
 
@@ -1566,6 +1839,8 @@ pub fn init() {
                 fpu_storage: Some(FpuState::default()),
 
                 pid,
+                tgid: pid,
+                is_thread: false,
                 addr_size_vec: Vec::new(),
                 exe_path: "[kernel]".to_string(),
                 comm: task_comm_from_path("[kernel]"),
@@ -1612,11 +1887,13 @@ pub fn init() {
         }),
         fs_base: VirtAddr::zero(),
         gs_base: VirtAddr::zero(),
-        proc_mm: Box::new(ProcMM::new(0)),
+        proc_mm: Arc::new(Mutex::new(ProcMM::new(0))),
         parent_pid: 1,
         pgid: 1,
         sid: 1,
         pid: 1,
+        tgid: 1,
+        is_thread: false,
         pwd: String::from("/"),
         context_switch_rsp: VirtAddr::zero(),
         mapper,
@@ -1826,17 +2103,20 @@ struct LoadedImage {
 }
 
 fn load_elf_image(
-    content_buf: &[u8],
-    mapper: &mut OffsetPageTable<'_>,
-    addr_size_vec: &mut Vec<(u64, usize)>,
+    executable: &mut VfsNode,
+    elf_regions: &mut Vec<ElfRegion>,
     dyn_base_hint: Option<u64>,
     capture_interp: bool,
 ) -> Result<LoadedImage, ()> {
-    if content_buf.get(0..4) != Some(&ELF_MAGIC) {
+    let mut header_bytes = [0u8; size_of::<Elf64Ehdr>()];
+    executable.read_exact(0, &mut header_bytes)?;
+    // SAFETY: `header_bytes` contains exactly one ELF header and unaligned
+    // reads are permitted by `read_unaligned`.
+    let eh = unsafe { core::ptr::read_unaligned(header_bytes.as_ptr().cast::<Elf64Ehdr>()) };
+    if eh.e_ident.get(0..4) != Some(&ELF_MAGIC) {
         return Err(());
     }
 
-    let eh = unsafe { &*(content_buf.as_ptr() as *const Elf64Ehdr) };
     let e_phoff = eh.e_phoff;
     let e_phentsize = eh.e_phentsize as u64;
     let e_phnum = eh.e_phnum as u64;
@@ -1845,9 +2125,22 @@ fn load_elf_image(
     }
     if e_phoff
         .checked_add(e_phentsize.saturating_mul(e_phnum))
-        .map_or(true, |end| end as usize > content_buf.len())
+        .map_or(true, |end| end as usize > executable.metadata.size)
     {
         return Err(());
+    }
+
+    let mut program_headers = Vec::with_capacity(e_phnum as usize);
+    for i in 0..e_phnum {
+        let offset = e_phoff
+            .checked_add(i.checked_mul(e_phentsize).ok_or(())?)
+            .ok_or(())?;
+        let mut bytes = [0u8; size_of::<Elf64Phdr>()];
+        executable.read_exact(offset as usize, &mut bytes)?;
+        // SAFETY: `bytes` contains one complete program header and the ELF
+        // format does not require the source buffer to be naturally aligned.
+        let header = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<Elf64Phdr>()) };
+        program_headers.push(header);
     }
 
     let mut load_bias = 0;
@@ -1859,21 +2152,22 @@ fn load_elf_image(
     let mut interp_path = None;
     let mut has_tls = false;
 
-    for i in 0..e_phnum {
-        let ph = unsafe {
-            &*(content_buf
-                .as_ptr()
-                .add((e_phoff + i * e_phentsize) as usize) as *const Elf64Phdr)
-        };
+    for ph in &program_headers {
         if ph.p_type == PT_PHDR {
             phdr_va = load_bias + ph.p_vaddr;
         } else if capture_interp && ph.p_type == PT_INTERP {
             let start = ph.p_offset as usize;
             let len = ph.p_filesz as usize;
-            if start + len <= content_buf.len() {
-                if let Ok(s) = core::str::from_utf8(&content_buf[start..start + len]) {
-                    interp_path = Some(s.trim_end_matches('\0').to_string());
-                }
+            if start
+                .checked_add(len)
+                .is_none_or(|end| end > executable.metadata.size)
+            {
+                return Err(());
+            }
+            let mut bytes = vec![0u8; len];
+            executable.read_exact(start, &mut bytes)?;
+            if let Ok(s) = core::str::from_utf8(&bytes) {
+                interp_path = Some(s.trim_end_matches('\0').to_string());
             }
         } else if ph.p_type == PT_TLS && ph.p_memsz != 0 {
             has_tls = true;
@@ -1883,13 +2177,7 @@ fn load_elf_image(
     if phdr_va == 0 {
         let ph_tbl_start = e_phoff;
         let ph_tbl_end = e_phoff + e_phentsize * e_phnum;
-        for i in 0..e_phnum {
-            let ph = unsafe {
-                &*(content_buf
-                    .as_ptr()
-                    .add((e_phoff + i * e_phentsize) as usize)
-                    as *const Elf64Phdr)
-            };
+        for ph in &program_headers {
             if ph.p_type == PT_LOAD {
                 let seg_start = ph.p_offset;
                 let seg_end = ph.p_offset + ph.p_filesz;
@@ -1902,12 +2190,7 @@ fn load_elf_image(
     }
 
     let mut max_end = 0;
-    for i in 0..e_phnum {
-        let ph = unsafe {
-            &*(content_buf
-                .as_ptr()
-                .add((e_phoff + i * e_phentsize) as usize) as *const Elf64Phdr)
-        };
+    for ph in &program_headers {
         if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
             continue;
         }
@@ -1917,41 +2200,39 @@ fn load_elf_image(
         if ph
             .p_offset
             .checked_add(ph.p_filesz)
-            .map_or(true, |end| end as usize > content_buf.len())
+            .map_or(true, |end| end as usize > executable.metadata.size)
         {
             return Err(());
         }
 
         let seg_start = load_bias.checked_add(ph.p_vaddr).ok_or(())?;
-        let seg_file_end = seg_start.checked_add(ph.p_filesz).ok_or(())?;
         let seg_mem_end = seg_start.checked_add(ph.p_memsz).ok_or(())?;
         let map_start = align_down_u64(seg_start, 4096);
         let map_end = align_up_u64(seg_mem_end, 4096).ok_or(())?;
         let map_len = map_end.checked_sub(map_start).ok_or(())? as usize;
+        let file_base = align_down_u64(ph.p_offset, 4096);
+
+        if (ph.p_offset & (PAGE_SIZE_U64 - 1)) != (seg_start & (PAGE_SIZE_U64 - 1)) {
+            return Err(());
+        }
 
         if seg_mem_end > max_end {
             max_end = seg_mem_end;
         }
 
-        if alloc_pages(mapper, map_start, map_len, true, true).is_err() {
-            return Err(());
-        }
-        addr_size_vec.push((map_start, map_len));
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                content_buf.as_ptr().add(ph.p_offset as usize),
-                seg_start as *mut u8,
-                ph.p_filesz as usize,
-            );
-            if seg_mem_end > seg_file_end {
-                core::ptr::write_bytes(
-                    seg_file_end as *mut u8,
-                    0,
-                    (seg_mem_end - seg_file_end) as usize,
-                );
-            }
-        }
+        elf_regions.push(ElfRegion {
+            base: map_start as usize,
+            len: map_len,
+            file_base: map_start as usize,
+            file_offset: file_base as usize,
+            file_end: seg_start.checked_add(ph.p_filesz).ok_or(())? as usize,
+            permissions: VmPermissions {
+                read: ph.p_flags & PF_R != 0,
+                write: ph.p_flags & PF_W != 0,
+                execute: ph.p_flags & PF_X != 0,
+            },
+            file: executable.clone(),
+        });
     }
 
     Ok(LoadedImage {
@@ -1975,30 +2256,21 @@ fn reserve_static_tls_spill(
     let spill_len = PAGE_SIZE_U64
         .checked_mul(STATIC_TLS_SPILL_PAGES)
         .ok_or(())?;
-    alloc_pages(mapper, spill_start, spill_len as usize, true, false)?;
+    alloc_pages_unflushed(mapper, spill_start, spill_len as usize, true, false)?;
     addr_size_vec.push((spill_start, spill_len as usize));
     spill_start.checked_add(spill_len).ok_or(())
 }
 
-fn load_interpreter_image(
-    path: &str,
-    mapper: &mut OffsetPageTable<'_>,
-    addr_size_vec: &mut Vec<(u64, usize)>,
-) -> Result<LoadedImage, ()> {
+fn load_interpreter_image(path: &str, elf_regions: &mut Vec<ElfRegion>) -> Result<LoadedImage, ()> {
     #[allow(static_mut_refs)]
-    let interp_buf = {
+    let mut executable = {
         let vfs = unsafe { VFS.read() };
-        let mut node = vfs.open(path).map_err(|_| ())?;
-        let mut buf = vec![0u8; node.metadata.size];
-        node.read(0, &mut buf).map_err(|_| ())?;
-
-        buf
+        vfs.open(path).map_err(|_| ())?
     };
 
     load_elf_image(
-        interp_buf.as_slice(),
-        mapper,
-        addr_size_vec,
+        &mut executable,
+        elf_regions,
         Some(INTERP_DYN_LOAD_BASE),
         false,
     )

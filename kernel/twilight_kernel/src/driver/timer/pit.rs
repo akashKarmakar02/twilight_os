@@ -55,7 +55,9 @@ pub fn sleep_ns(nanoseconds: u64) {
     let deadline = start.saturating_add(nanoseconds);
 
     while monotonic_ns_u64() < deadline {
-        halt();
+        if !crate::sys::proc::schedule_now() {
+            halt();
+        }
     }
 }
 

@@ -1,17 +1,17 @@
 #![allow(dead_code)]
 
-use crate::sys::memory::{alloc_pages, dealloc_pages, unmap_user_pages};
+use crate::logger;
+use crate::sys::memory::{
+    alloc_pages, dealloc_pages, unmap_user_pages, update_user_page_flags,
+    user_page_flags_with_access,
+};
+use crate::sys::proc::mem::{align_up, MmapKind, VmPermissions, PAGE};
 use crate::sys::proc::PROCESS_TABLE;
-use crate::sys::proc::mem::{MmapKind, PAGE, align_up};
 use twilight_common::syscall::types::EIO;
 
-// minimal flag bits
-#[allow(dead_code)]
-pub const PROT_READ: usize = 1;
-pub const PROT_WRITE: usize = 2;
-#[allow(dead_code)]
-pub const PROT_EXEC: usize = 4;
+pub use crate::sys::proc::mem::{PROT_EXEC, PROT_READ, PROT_WRITE};
 
+// minimal flag bits
 #[allow(dead_code)]
 pub const MAP_SHARED: usize = 0x01;
 pub const MAP_PRIVATE: usize = 0x02;
@@ -23,6 +23,34 @@ const ENOMEM: i64 = -12;
 const ENOSYS: i64 = -38;
 const ESRCH: i64 = -3;
 const EBADF: i64 = -9;
+
+fn unmap_tracked_range(
+    process: &mut crate::sys::proc::Process,
+    base: usize,
+    len: usize,
+) -> Result<(), ()> {
+    let (regions, elf_regions) = {
+        let mut proc_mm = process.proc_mm.lock();
+        (
+            proc_mm.remove_mmap_range(base, len),
+            proc_mm.remove_elf_range(base, len),
+        )
+    };
+    for region in regions {
+        match region.kind {
+            MmapKind::Anonymous | MmapKind::Owned => {
+                dealloc_pages(&mut process.mapper, region.base as u64, region.len)?;
+            }
+            MmapKind::Shared => {
+                unmap_user_pages(&mut process.mapper, region.base as u64, region.len)?;
+            }
+        }
+    }
+    for region in elf_regions {
+        dealloc_pages(&mut process.mapper, region.base as u64, region.len)?;
+    }
+    Ok(())
+}
 
 pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: u64) -> i64 {
     #[allow(static_mut_refs)]
@@ -40,6 +68,9 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     if size == 0 {
         return EINVAL;
     }
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        return EINVAL;
+    }
     // if (flags & MAP_ANONYMOUS) == 0 {
     //     return ENOSYS;
     // } // file-backed not implemented yet
@@ -53,18 +84,13 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     let len = align_up(size, PAGE);
     let writable = (prot & PROT_WRITE) != 0;
     let executable = (prot & PROT_EXEC) != 0;
+    let permissions = VmPermissions::from_prot(prot);
 
     if (offset as usize) & (PAGE - 1) != 0 {
         return EINVAL;
     }
 
     let is_file_backed = (flags & MAP_ANONYMOUS) == 0 && (fd as i64) != -1;
-    let map_len = if !is_file_backed && (flags & MAP_FIXED) == 0 {
-        len.checked_add(PAGE).unwrap_or(len)
-    } else {
-        len
-    };
-
     let va = if (flags & MAP_FIXED) != 0 {
         if addr == 0 || (addr as usize & (PAGE - 1)) != 0 {
             return EINVAL;
@@ -72,7 +98,7 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         addr as usize
     } else {
         // ignore addr if 0; otherwise you can treat it as a hint later
-        match process.proc_mm.reserve_mmap_range(map_len) {
+        match process.proc_mm.lock().reserve_mmap_range(len) {
             Some(v) => v,
             None => return ENOMEM,
         }
@@ -83,10 +109,15 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         return EINVAL;
     }
 
-    if prot == 0 {
-        if (flags & MAP_FIXED) == 0 {
-            process.proc_mm.track_mmap(va, map_len, MmapKind::Owned);
-        }
+    if (flags & MAP_FIXED) != 0 && unmap_tracked_range(process, va, len).is_err() {
+        return -(EIO as i64);
+    }
+
+    if flags & MAP_ANONYMOUS != 0 {
+        process
+            .proc_mm
+            .lock()
+            .track_mmap(va, len, MmapKind::Anonymous, permissions);
         return va as i64;
     }
 
@@ -117,7 +148,10 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
 
         match node_guard.mmap(process, va, len, prot, flags, offset as usize) {
             Ok(mapped) => {
-                process.proc_mm.track_mmap(mapped, len, MmapKind::Shared);
+                process
+                    .proc_mm
+                    .lock()
+                    .track_mmap(mapped, len, MmapKind::Shared, permissions);
                 return mapped as i64;
             }
             Err(-38) => {
@@ -151,44 +185,100 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
             }
         }
 
-        // Track as "shared" (close enough for now).
-        process.proc_mm.track_mmap(va, len, MmapKind::Shared);
+        process
+            .proc_mm
+            .lock()
+            .track_mmap(va, len, MmapKind::Owned, permissions);
     } else {
-        if let Err(_) = alloc_pages(
-            &mut process.mapper,
-            va as u64,
-            map_len,
-            writable,
-            executable,
-        ) {
+        if let Err(_) = alloc_pages(&mut process.mapper, va as u64, len, writable, executable) {
             return ENOMEM;
         }
-        process.proc_mm.track_mmap(va, map_len, MmapKind::Owned);
+        process
+            .proc_mm
+            .lock()
+            .track_mmap(va, len, MmapKind::Owned, permissions);
     }
-    // logger!(
-    //     "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
-    //     addr,
-    //     size,
-    //     prot,
-    //     flags,
-    //     fd,
-    //     offset,
-    //     va
-    // );
+    logger!(
+        "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
+        addr,
+        size,
+        prot,
+        flags,
+        fd,
+        offset,
+        va
+    );
     va as i64
 }
 
-pub fn mprotect(_addr: u64, size: usize, _prot: usize) -> i64 {
-    if size == 0 {
+pub fn mprotect(addr: u64, size: usize, prot: usize) -> i64 {
+    if size == 0 || addr as usize & (PAGE - 1) != 0 {
         return EINVAL;
     }
-    // logger!(
-    //     "mprotect: addr=0x{:x}, size=0x{:x}, prot=0x{:x}",
-    //     addr,
-    //     size,
-    //     prot
-    // );
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        return EINVAL;
+    }
+
+    #[allow(static_mut_refs)]
+    let Some(process) = (unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    }) else {
+        return ESRCH;
+    };
+
+    let base = addr as usize;
+    let len = align_up(size, PAGE);
+    let permissions = VmPermissions::from_prot(prot);
+    let proc_mm = process.proc_mm.clone();
+    proc_mm.lock().protect_range(base, len, permissions);
+
+    let end = match base.checked_add(len) {
+        Some(end) => end,
+        None => return EINVAL,
+    };
+    let mut page = base;
+    while page < end {
+        if let Some(page_permissions) = proc_mm.lock().permissions_for_page(page) {
+            let accessible =
+                page_permissions.read || page_permissions.write || page_permissions.execute;
+            let flags = user_page_flags_with_access(
+                accessible,
+                page_permissions.write,
+                page_permissions.execute,
+            );
+            if update_user_page_flags(&mut process.mapper, page as u64, flags).is_err() {
+                return -(EIO as i64);
+            }
+        }
+        page += PAGE;
+    }
+
+    logger!(
+        "mprotect: addr=0x{:x}, size=0x{:x}, prot=0x{:x}",
+        addr,
+        size,
+        prot
+    );
     0
+}
+
+pub fn madvise(addr: u64, _size: usize, advice: i32) -> i64 {
+    const MADV_DONTNEED: i32 = 4;
+    const MADV_FREE: i32 = 8;
+    const MADV_HUGEPAGE: i32 = 14;
+    const MADV_NOHUGEPAGE: i32 = 15;
+
+    if addr as usize & (PAGE - 1) != 0 {
+        return EINVAL;
+    }
+
+    match advice {
+        MADV_DONTNEED | MADV_FREE | MADV_HUGEPAGE | MADV_NOHUGEPAGE => 0,
+        _ => EINVAL,
+    }
 }
 
 pub fn brk(addr: usize) -> i64 {
@@ -205,19 +295,18 @@ pub fn brk(addr: usize) -> i64 {
     };
 
     if addr == 0 {
-        // logger!(
-        //     "brk:- addr: {:#X} => {:#X}",
-        //     addr,
-        //     process.proc_mm.curr_brk()
-        // );
-        return process.proc_mm.curr_brk() as i64; // report current break
+        let proc_mm = process.proc_mm.lock();
+        logger!("brk:- addr: {:#X} => {:#X}", addr, proc_mm.curr_brk());
+        return proc_mm.curr_brk() as i64; // report current break
     }
-    let res = match process.proc_mm.set_brk(&mut process.mapper, addr) {
-        Ok(end) => end as i64,                       // success: return new break
-        Err(_) => process.proc_mm.curr_brk() as i64, // failure: return current break
+    let proc_mm = process.proc_mm.clone();
+    let mut proc_mm = proc_mm.lock();
+    let res = match proc_mm.set_brk(&mut process.mapper, addr) {
+        Ok(end) => end as i64,               // success: return new break
+        Err(_) => proc_mm.curr_brk() as i64, // failure: return current break
     };
 
-    // logger!("brk:- addr: {:#X} => {:#X}", addr, res);
+    logger!("brk:- addr: {:#X} => {:#X}", addr, res);
     res
 }
 
@@ -242,21 +331,8 @@ pub fn munmap(addr: u64, size: usize) -> i64 {
 
     let len = align_up(size, PAGE);
     let base = addr as usize;
-    let Some(kind) = p.proc_mm.remove_mmap(base, len) else {
-        return EINVAL;
-    };
-
-    match kind {
-        MmapKind::Owned => {
-            if let Err(()) = dealloc_pages(&mut p.mapper, addr, len) {
-                return -1;
-            }
-        }
-        MmapKind::Shared => {
-            if let Err(()) = unmap_user_pages(&mut p.mapper, addr, len) {
-                return -1;
-            }
-        }
+    if unmap_tracked_range(p, base, len).is_err() {
+        return -(EIO as i64);
     }
 
     0

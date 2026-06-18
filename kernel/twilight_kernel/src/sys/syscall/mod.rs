@@ -68,6 +68,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_FSTAT => service::fstat(arg1 as usize, arg2 as usize),
         SYS_LSTAT => service::lstat(arg1 as usize, arg2 as usize),
         SYS_POLL => service::poll(arg1 as usize, arg2 as usize, arg3 as isize),
+        SYS_SELECT => service::select(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize, arg5 as usize),
         SYS_LSEEK => service::lseek(arg1 as usize, arg2, arg3 as u8),
         SYS_MMAP => memory::mmap(
             arg1,
@@ -94,7 +95,9 @@ pub extern "sysv64" fn syscall_handler(
         SYS_PWRITEV => service::pwritev(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
         SYS_ACCESS => service::access(arg1 as usize, arg2 as i32),
         SYS_PIPE => service::pipe(arg1 as usize),
+        SYS_PAUSE => service::pause(),
         SYS_SCHED_YIELD => service::sched_yield(),
+        SYS_MADVISE => memory::madvise(arg1, arg2 as usize, arg3 as i32),
         SYS_GETPID => service::getpid(),
         SYS_SETPGID => service::setpgid(arg1 as i32, arg2 as i32),
         SYS_GETPPID => service::getppid(),
@@ -142,6 +145,15 @@ pub extern "sysv64" fn syscall_handler(
         ),
         SYS_GETSOCKNAME => service::getsockname(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_GETPEERNAME => service::getpeername(arg1 as i32, arg2 as usize, arg3 as usize),
+        SYS_CLONE => service::clone(
+            arg1,
+            arg2,
+            arg3 as usize,
+            arg4 as usize,
+            arg5,
+            _stack_frame,
+            regs,
+        ),
         SYS_FORK => service::fork(_stack_frame, regs),
         SYS_EXECVE => service::execve(
             arg1 as usize,
@@ -155,6 +167,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_UNAME => service::uname(arg1 as usize),
         SYS_GETCWD => service::getcwd(arg1 as usize, arg2 as usize),
         SYS_CHDIR => service::chdir(arg1 as usize),
+        SYS_FCHDIR => service::fchdir(arg1 as i32),
         SYS_RENAME => service::rename(arg1 as usize, arg2 as usize),
         SYS_MKDIR => service::mkdir(arg1 as usize, arg2 as usize),
         SYS_RMDIR => service::rmdir(arg1 as usize),
@@ -163,6 +176,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_CHMOD => service::chmod(arg1 as usize, arg2 as u32),
         SYS_UMASK => service::umask(arg1 as u32),
         SYS_GETRUSAGE => service::getrusage(arg1 as i32, arg2 as usize),
+        SYS_SYSINFO => service::sysinfo(arg1 as usize),
         SYS_GETUID => service::geteuid(),
         SYS_GETGID => service::getegid(),
         SYS_SET_UID => service::setuid(arg1),
@@ -232,7 +246,7 @@ pub extern "sysv64" fn syscall_handler(
             let timespec_ptr = arg2 as *mut Timespec;
             crate::driver::timer::pit::sys_clock_gettime(arg1 as i32, timespec_ptr)
         }
-        SYS_EXIT_GROUP => service::exit(arg1 as i32),
+        SYS_EXIT_GROUP => service::exit_group(arg1 as i32),
         SYS_WAIT4 => service::wait4(arg1 as i32, arg2 as usize, arg3 as i32, arg4 as usize),
         SYS_FUTEX => service::futex(
             arg1 as usize,
@@ -242,6 +256,9 @@ pub extern "sysv64" fn syscall_handler(
             arg5 as usize,
             arg6 as u32,
         ),
+        SYS_SCHED_GETAFFINITY => {
+            service::sched_getaffinity(arg1 as i32, arg2 as usize, arg3 as usize)
+        }
         SYS_OPENAT => {
             let upath = UserPtr(arg2 as *const u8);
 
@@ -328,6 +345,8 @@ pub extern "sysv64" fn syscall_handler(
         448 => crypto::sys_add_user_key(arg1 as u32, arg2 as *const u8, arg3 as usize) as i64,
         // SYS_SET_FILE_ATTR
         449 => fs_attr::sys_set_file_attr(arg1 as *const u8, arg2 as u32, arg3 as u32) as i64,
+        // clone3 – musl probes this; returning ENOSYS makes it fall back to clone.
+        SYS_CLONE3 => -(ENOSYS as i64),
         _ => {
             serial_println!("Unknown syscall number: {}", syscall_number);
             -(ENOSYS as i64)
@@ -335,7 +354,7 @@ pub extern "sysv64" fn syscall_handler(
         }
     };
 
-    if syscall_number == SYS_FORK || syscall_number == SYS_WAIT4 || syscall_number == SYS_EXECVE {
+    if syscall_number != 271 {
         serial_println!(
             "[syscall] pid={} nr={} res={} rip={:#x} rsp={:#x}",
             crate::sys::proc::id(),

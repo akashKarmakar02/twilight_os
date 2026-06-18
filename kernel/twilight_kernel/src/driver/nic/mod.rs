@@ -2,7 +2,7 @@ mod pcnet;
 mod rtl8139;
 
 use crate::driver::timer::cmos::CMOS;
-use crate::sys::pci::DeviceConfig;
+use crate::sys::pci::{DeviceConfig, PciClaimError, PciOwner, PciOwnerKind};
 use crate::{log, sys};
 use alloc::format;
 use alloc::sync::Arc;
@@ -242,13 +242,42 @@ impl Stats {
 }
 
 #[allow(dead_code)]
-fn find_device(device_id: u16, vendor_id: u16) -> Option<DeviceConfig> {
-    if let Some(dev) = sys::pci::find_device(device_id, vendor_id) {
-        dev.enable_bus_mastering();
-        return Some(dev);
-    }
+fn find_and_claim_device(
+    vendor_id: u16,
+    device_id: u16,
+    driver_name: &'static str,
+) -> Option<DeviceConfig> {
+    let Some(dev) = sys::pci::find_device(vendor_id, device_id) else {
+        return None;
+    };
 
-    None
+    let owner = PciOwner {
+        kind: PciOwnerKind::NativeTwilightDriver,
+        name: driver_name,
+    };
+
+    match sys::pci::claim_device(dev.bus, dev.device, dev.function, owner) {
+        Ok(()) => {
+            dev.enable_bus_mastering();
+            Some(dev)
+        }
+        Err(PciClaimError::AlreadyClaimed(owner)) => {
+            log!(
+                "NET DRV {} skipped: already claimed by {}/{}",
+                driver_name,
+                owner.kind.as_str(),
+                owner.name
+            );
+            None
+        }
+        Err(PciClaimError::NotFound) => {
+            log!(
+                "NET DRV {} skipped: PCI device disappeared before claim",
+                driver_name
+            );
+            None
+        }
+    }
 }
 
 #[doc(hidden)]
@@ -300,12 +329,12 @@ pub fn init() {
         }
     };
 
-    if let Some(dev) = find_device(0x10EC, 0x8139) {
+    if let Some(dev) = find_and_claim_device(0x10EC, 0x8139, "RTL8139") {
         let io = dev.io_base();
         let nic = rtl8139::Device::new(io);
         add(EthernetDevice::RTL8139(nic), "RTL8139");
     }
-    if let Some(dev) = find_device(0x1022, 0x2000) {
+    if let Some(dev) = find_and_claim_device(0x1022, 0x2000, "PCNET") {
         let io = dev.io_base();
         let nic = pcnet::Device::new(io);
         add(EthernetDevice::PCNET(nic), "PCNET");
