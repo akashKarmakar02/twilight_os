@@ -1,4 +1,8 @@
 use crate::compat::freebsd_kpi::bus_space::bus_space_read_1;
+use crate::compat::freebsd_kpi::callout::{
+    Callout, callout_active, callout_drain, callout_init, callout_initialized, callout_pending,
+    callout_reset, callout_stop,
+};
 use crate::compat::freebsd_kpi::device::{
     Device, device_get_device, device_get_nameunit, device_get_vendor, device_set_desc,
 };
@@ -14,6 +18,10 @@ use crate::compat::freebsd_kpi::pci::{pci_get_device, pci_get_vendor};
 use crate::compat::freebsd_kpi::resource::{
     RF_ACTIVE, Resource, SYS_RES_IOPORT, SYS_RES_IRQ, bus_alloc_resource_any, rman_get_bushandle,
     rman_get_bustag, rman_get_start,
+};
+use crate::compat::freebsd_kpi::taskqueue::{
+    Task, task_init, taskqueue_create, taskqueue_drain, taskqueue_enqueue, taskqueue_free,
+    taskqueue_len, taskqueue_run,
 };
 use crate::sys::pci::{PciClaimError, PciOwner, PciOwnerKind};
 use crate::{log, sys};
@@ -208,6 +216,8 @@ fn log_rtl8139_resources(device: &Device) {
     );
 
     register_dummy_intr(device, irq_resource, &mut softc);
+    exercise_callout();
+    exercise_taskqueue();
     mtx_destroy(&mut softc.lock);
     log!("freebsd_kpi_demo: mtx destroyed");
 }
@@ -272,4 +282,66 @@ fn register_dummy_intr(device: &Device, irq_resource: Resource, softc: &mut Rtl8
 
 fn rtl8139_demo_intr(_arg: usize) {
     log!("freebsd_kpi_demo: dummy interrupt handler called");
+}
+
+fn exercise_callout() {
+    let mut callout = Callout::new();
+    callout_init(&mut callout, true);
+
+    if callout_initialized(&callout) {
+        log!("freebsd_kpi_demo: callout initialized");
+    }
+
+    let result = callout_reset(&mut callout, 10, rtl8139_demo_callout, 0);
+    if result == 0 {
+        log!("freebsd_kpi_demo: callout armed");
+    } else {
+        log!("freebsd_kpi_demo: callout arm failed: {}", result);
+        return;
+    }
+
+    log!(
+        "freebsd_kpi_demo: callout pending={} active={}",
+        callout_pending(&callout),
+        callout_active(&callout)
+    );
+
+    let stopped = callout_stop(&mut callout);
+    log!("freebsd_kpi_demo: callout stopped result={}", stopped);
+
+    let drained = callout_drain(&mut callout);
+    log!("freebsd_kpi_demo: callout drained result={}", drained);
+}
+
+fn exercise_taskqueue() {
+    let mut task = Task::new();
+    let mut queue = taskqueue_create("freebsd_kpi_demo");
+    log!("freebsd_kpi_demo: taskqueue created");
+
+    task_init(&mut task, 0, rtl8139_demo_task, 0);
+    let result = taskqueue_enqueue(&mut queue, &mut task);
+    if result != 0 {
+        log!("freebsd_kpi_demo: task enqueue failed: {}", result);
+        taskqueue_free(queue);
+        return;
+    }
+
+    log!(
+        "freebsd_kpi_demo: task enqueued queue_len={}",
+        taskqueue_len(&queue)
+    );
+    taskqueue_run(&mut queue);
+    log!("freebsd_kpi_demo: taskqueue run");
+    taskqueue_drain(&mut queue, &mut task);
+    log!("freebsd_kpi_demo: taskqueue drained");
+    taskqueue_free(queue);
+    log!("freebsd_kpi_demo: taskqueue freed");
+}
+
+fn rtl8139_demo_callout(_arg: usize) {
+    log!("freebsd_kpi_demo: dummy callout fired");
+}
+
+fn rtl8139_demo_task(_context: usize, pending: i32) {
+    log!("freebsd_kpi_demo: dummy task ran pending={}", pending);
 }
