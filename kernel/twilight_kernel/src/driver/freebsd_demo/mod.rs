@@ -6,6 +6,11 @@ use crate::compat::freebsd_kpi::callout::{
 use crate::compat::freebsd_kpi::device::{
     Device, device_get_device, device_get_nameunit, device_get_vendor, device_set_desc,
 };
+use crate::compat::freebsd_kpi::dma::{
+    BUS_DMA_NOWAIT, BUS_DMA_ZERO, BUS_DMASYNC_PREREAD, BUS_DMASYNC_PREWRITE, BUS_SPACE_MAXADDR,
+    BUS_SPACE_MAXADDR_32BIT, BusDmaSegment, bus_dma_tag_create, bus_dma_tag_destroy,
+    bus_dmamap_load, bus_dmamap_sync, bus_dmamap_unload, bus_dmamem_alloc, bus_dmamem_free,
+};
 use crate::compat::freebsd_kpi::driver::{BUS_PROBE_DEFAULT, ENXIO, FreeBsdPciDriver};
 use crate::compat::freebsd_kpi::intr::{
     INTR_MPSAFE, INTR_TYPE_NET, IntrCookie, bus_setup_intr, bus_teardown_intr,
@@ -218,6 +223,7 @@ fn log_rtl8139_resources(device: &Device) {
     register_dummy_intr(device, irq_resource, &mut softc);
     exercise_callout();
     exercise_taskqueue();
+    exercise_dma();
     mtx_destroy(&mut softc.lock);
     log!("freebsd_kpi_demo: mtx destroyed");
 }
@@ -344,4 +350,85 @@ fn rtl8139_demo_callout(_arg: usize) {
 
 fn rtl8139_demo_task(_context: usize, pending: i32) {
     log!("freebsd_kpi_demo: dummy task ran pending={}", pending);
+}
+
+fn exercise_dma() {
+    let tag = match bus_dma_tag_create(
+        16,
+        0,
+        BUS_SPACE_MAXADDR_32BIT,
+        BUS_SPACE_MAXADDR,
+        4096,
+        1,
+        4096,
+        0,
+    ) {
+        Ok(tag) => {
+            log!("freebsd_kpi_demo: dma tag created");
+            tag
+        }
+        Err(error) => {
+            log!("freebsd_kpi_demo: dma tag create failed: {}", error);
+            return;
+        }
+    };
+
+    let (vaddr, mut map) = match bus_dmamem_alloc(&tag, BUS_DMA_NOWAIT | BUS_DMA_ZERO) {
+        Ok((vaddr, map)) => {
+            log!(
+                "freebsd_kpi_demo: dma memory allocated vaddr={:#x} paddr={:#x} size={}",
+                vaddr,
+                map.paddr,
+                map.size
+            );
+            (vaddr, map)
+        }
+        Err(error) => {
+            log!("freebsd_kpi_demo: dma memory allocation failed: {}", error);
+            let _ = bus_dma_tag_destroy(tag);
+            return;
+        }
+    };
+
+    let size = map.size;
+    let result = bus_dmamap_load(&tag, &mut map, vaddr, size, rtl8139_demo_dma_callback, 0);
+    if result != 0 {
+        log!("freebsd_kpi_demo: dma map load failed: {}", result);
+        let _ = bus_dmamem_free(&tag, vaddr, map);
+        let _ = bus_dma_tag_destroy(tag);
+        return;
+    }
+    log!("freebsd_kpi_demo: dma map loaded");
+
+    bus_dmamap_sync(&tag, &map, BUS_DMASYNC_PREREAD);
+    bus_dmamap_sync(&tag, &map, BUS_DMASYNC_PREWRITE);
+    bus_dmamap_unload(&tag, &mut map);
+    log!("freebsd_kpi_demo: dma map unloaded");
+
+    let result = bus_dmamem_free(&tag, vaddr, map);
+    if result == 0 {
+        log!("freebsd_kpi_demo: dma memory freed");
+    } else {
+        log!("freebsd_kpi_demo: dma memory free failed: {}", result);
+    }
+
+    let result = bus_dma_tag_destroy(tag);
+    if result == 0 {
+        log!("freebsd_kpi_demo: dma tag destroyed");
+    }
+}
+
+fn rtl8139_demo_dma_callback(_callback_arg: usize, segs: &[BusDmaSegment], error: i32) {
+    if error != 0 {
+        log!("freebsd_kpi_demo: dma callback error={}", error);
+        return;
+    }
+
+    if let Some(seg) = segs.first() {
+        log!(
+            "freebsd_kpi_demo: dma callback segment addr={:#x} len={}",
+            seg.ds_addr,
+            seg.ds_len
+        );
+    }
 }

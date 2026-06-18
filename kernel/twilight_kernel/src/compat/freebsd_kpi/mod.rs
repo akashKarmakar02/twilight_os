@@ -1,6 +1,7 @@
 pub mod bus_space;
 pub mod callout;
 pub mod device;
+pub mod dma;
 pub mod driver;
 pub mod intr;
 pub mod mutex;
