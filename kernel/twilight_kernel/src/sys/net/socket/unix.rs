@@ -155,6 +155,10 @@ struct UnixState {
     role: UnixRole,
     sock_type: SockType,
     bound_addr: Option<UnixAddr>,
+    /// True only for the socket that installed `bound_addr` in
+    /// `UNIX_REGISTRY`. Accepted stream sockets have the same local address,
+    /// but must not remove the listener's registry entry when they close.
+    owns_binding: bool,
     conn: Option<Arc<UnixConnection>>,
     reader_half: usize,
     writer_half: usize,
@@ -174,6 +178,7 @@ impl UnixState {
             role: UnixRole::Unbound,
             sock_type,
             bound_addr: None,
+            owns_binding: false,
             conn: None,
             reader_half: 0,
             writer_half: 0,
@@ -243,6 +248,7 @@ impl UnixSocket {
             let mut state = self.state.lock();
             state.role = UnixRole::Bound;
             state.bound_addr = Some(addr.clone());
+            state.owns_binding = true;
         }
         self.addr_len = addr.addr_len();
         {
@@ -302,6 +308,7 @@ impl UnixSocket {
                 role: UnixRole::Connected,
                 sock_type: SockType::Stream,
                 bound_addr: None,
+                owns_binding: false,
                 conn: Some(conn.clone()),
                 reader_half: 0, // acceptee reads what connecter writes (channels[0])
                 writer_half: 1, // acceptee writes to channels[1]
@@ -427,6 +434,10 @@ impl UnixSocket {
         } else {
             self.stream_read_impl(out, nonblock)
         }
+    }
+
+    pub fn sock_type(&self) -> SockType {
+        self.state.lock().sock_type
     }
 
     pub fn write(&mut self, data: &[u8], nonblock: bool) -> Result<usize, i32> {
@@ -623,20 +634,34 @@ impl UnixSocket {
 
     pub fn close(&mut self) {
         let conn;
+        let bound_to_remove;
         {
             let mut state = self.state.lock();
 
-            if let Some(bound) = state.bound_addr.take() {
-                let mut reg = UNIX_REGISTRY.lock();
-                reg.remove(&bound.to_string());
-            }
+            bound_to_remove = if state.owns_binding {
+                state.bound_addr.clone()
+            } else {
+                None
+            };
+            state.owns_binding = false;
 
-            conn = state.conn.clone();
+            conn = state.conn.take();
             state.role = UnixRole::Unbound;
             state.peer_addr = None;
 
             state.accept_waiters.notify_all();
             state.dgram_readers.notify_all();
+        }
+
+        if let Some(bound) = bound_to_remove {
+            let path = bound.to_string();
+            let mut reg = UNIX_REGISTRY.lock();
+            if reg
+                .get(&path)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &self.state))
+            {
+                reg.remove(&path);
+            }
         }
 
         if let Some(conn) = conn {

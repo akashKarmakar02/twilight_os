@@ -721,7 +721,11 @@ impl Process {
         let mut memory = ProcMM::new(max_end as usize);
         memory.elf_regions = elf_regions;
         let proc_mm = Arc::new(Mutex::new(memory));
-        let sid = process_session_id(parent_pid).unwrap_or(pid);
+        let sid = if parent_pid == 0 {
+            pid
+        } else {
+            process_session_id(parent_pid).unwrap_or(pid)
+        };
 
         let switch_stack = allocate_switch_stack().unwrap().as_mut_ptr::<u8>();
 
@@ -1363,6 +1367,7 @@ pub fn exit(code: i32) {
     }
 
     let parent_pid = slice[cur_idx].parent_pid;
+    reparent_children(slice, current_pid);
     crate::serial_println!("[exit] pid={} parent={}", current_pid, parent_pid);
     slice[cur_idx].close_all_fds();
     slice[cur_idx].state = ProcessState::Dead;
@@ -1423,6 +1428,7 @@ pub fn exit_group(code: i32) -> ! {
         }
     };
     let parent_pid = slice[leader_idx].parent_pid;
+    reparent_children(slice, tgid);
 
     for process in slice.iter_mut().filter(|process| process.tgid == tgid) {
         process.close_all_fds();
@@ -1466,6 +1472,7 @@ pub fn terminate_current_by_signal(sig: i32) -> ! {
     };
 
     let parent_pid = slice[cur_idx].parent_pid;
+    reparent_children(slice, current_pid);
     slice[cur_idx].close_all_fds();
     slice[cur_idx].state = ProcessState::Dead;
     slice[cur_idx].exit_code = 128 + sig;
@@ -1682,6 +1689,28 @@ fn find_process_index(processes: &[Process], pid: u16) -> Option<usize> {
     processes.iter().position(|process| process.pid == pid)
 }
 
+/// Adopt direct children of an exiting process into PID 1. Dead children stay
+/// as zombies and are reported to init so they can be reaped there.
+pub(crate) fn reparent_children(processes: &mut [Process], exiting_pid: u16) {
+    if exiting_pid == 1 || !processes.iter().any(|process| process.pid == 1) {
+        return;
+    }
+
+    let mut adopted_zombie = false;
+    for process in processes.iter_mut() {
+        if !process.is_thread && process.parent_pid == exiting_pid {
+            process.parent_pid = 1;
+            adopted_zombie |= matches!(process.state, ProcessState::Dead);
+        }
+    }
+
+    if adopted_zombie
+        && let Some(init) = processes.iter_mut().find(|process| process.pid == 1)
+    {
+        init.queue_signal(SIGCHLD);
+    }
+}
+
 fn find_next_runnable_index(processes: &[Process], current_idx: usize) -> Option<usize> {
     if processes.len() < 2 {
         return None;
@@ -1787,7 +1816,9 @@ pub fn init() {
     let page_table = crate::memory::create_page_table(page_table_frame);
     let mapper = unsafe { OffsetPageTable::new(page_table, VirtAddr::new(phys_mem_offset())) };
 
-    let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
+    // PID 0 belongs to the kernel bootstrap context. NEXT_PID remains at 1 so
+    // the first userspace process is the Unix init process (PID 1).
+    let pid = 0;
     PID.store(pid, Ordering::SeqCst);
 
     let proc_mm = Arc::new(Mutex::new(ProcMM::new(0)));
@@ -1856,7 +1887,7 @@ pub fn init() {
                 gs_base: VirtAddr::zero(),
                 fs_base: VirtAddr::zero(),
                 proc_mm,
-                parent_pid: 1,
+                parent_pid: 0,
                 pgid: pid,
                 sid: pid,
                 umask: 0o022,
@@ -1888,11 +1919,11 @@ pub fn init() {
         fs_base: VirtAddr::zero(),
         gs_base: VirtAddr::zero(),
         proc_mm: Arc::new(Mutex::new(ProcMM::new(0))),
-        parent_pid: 1,
-        pgid: 1,
-        sid: 1,
-        pid: 1,
-        tgid: 1,
+        parent_pid: 0,
+        pgid: 0,
+        sid: 0,
+        pid: 0,
+        tgid: 0,
         is_thread: false,
         pwd: String::from("/"),
         context_switch_rsp: VirtAddr::zero(),
@@ -1923,7 +1954,7 @@ pub fn init() {
     idle_task.gs_base = VirtAddr::new(&*idle_task.kernel_gs as *const _ as u64);
 
     #[allow(static_mut_refs)]
-    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(1).unwrap() };
+    let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(0).unwrap() };
 
     switch_tasks(&mut idle_task, proc);
 }

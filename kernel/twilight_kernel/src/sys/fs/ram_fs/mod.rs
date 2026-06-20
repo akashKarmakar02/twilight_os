@@ -13,9 +13,10 @@ use spin::rwlock::RwLock;
 pub mod initramfs;
 
 pub enum Node {
-    File { data: Vec<u8> },
+    File { data: Arc<RwLock<Vec<u8>>> },
     Dir { children: BTreeMap<String, Node> },
     Symlink { target: String },
+    Socket,
 }
 
 pub struct InitramfsFs {
@@ -59,7 +60,7 @@ impl InitramfsFs {
                                 current.insert(
                                     comp.to_string(),
                                     Node::File {
-                                        data: entry.data.to_vec(),
+                                        data: Arc::new(RwLock::new(entry.data.to_vec())),
                                     },
                                 );
                             }
@@ -125,6 +126,17 @@ impl InitramfsFs {
         Some(cur)
     }
 
+    fn get_node_mut<'a>(&'a mut self, comps: &[&str]) -> Option<&'a mut Node> {
+        let mut cur = &mut self.root;
+        for component in comps {
+            match cur {
+                Node::Dir { children } => cur = children.get_mut(*component)?,
+                _ => return None,
+            }
+        }
+        Some(cur)
+    }
+
     fn node_metadata(&self, comps: &[&str]) -> Option<Metadata> {
         let node = self.get_node(comps)?;
         let name = comps.last().copied().unwrap_or("");
@@ -132,13 +144,15 @@ impl InitramfsFs {
 
         let (file_type, size) = match node {
             Node::Dir { .. } => (FileType::Dir, 0),
-            Node::File { data } => (FileType::File, data.len()),
+            Node::File { data } => (FileType::File, data.read().len()),
             Node::Symlink { target } => (FileType::File, target.len()),
+            Node::Socket => (FileType::Socket, 0),
         };
         let mode = match node {
             Node::Dir { .. } => 0o040755,
             Node::File { .. } => 0o100777,
             Node::Symlink { .. } => 0o120777,
+            Node::Socket => 0o140777,
         };
 
         Some(Metadata {
@@ -157,21 +171,28 @@ impl InitramfsFs {
 }
 
 struct RamFile {
-    data: Vec<u8>,
+    data: Arc<RwLock<Vec<u8>>>,
 }
 
 impl VfsNodeOps for RamFile {
     fn read(&self, _device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
-        if lba >= self.data.len() {
+        let data = self.data.read();
+        if lba >= data.len() {
             return Ok(0);
         }
-        let n = min(buf.len(), self.data.len() - lba);
-        buf[..n].copy_from_slice(&self.data[lba..lba + n]);
+        let n = min(buf.len(), data.len() - lba);
+        buf[..n].copy_from_slice(&data[lba..lba + n]);
         Ok(n)
     }
 
-    fn write(&mut self, _device: &mut BlockDev, _lba: usize, _data: &[u8]) -> Result<(), ()> {
-        Err(())
+    fn write(&mut self, _device: &mut BlockDev, lba: usize, input: &[u8]) -> Result<(), ()> {
+        let end = lba.checked_add(input.len()).ok_or(())?;
+        let mut data = self.data.write();
+        if end > data.len() {
+            data.resize(end, 0);
+        }
+        data[lba..end].copy_from_slice(input);
+        Ok(())
     }
 
     fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
@@ -184,6 +205,11 @@ impl VfsNodeOps for RamFile {
 
     fn unlink(&mut self, _device: &mut BlockDev) -> Result<i32, ()> {
         Ok(-1)
+    }
+
+    fn truncate(&mut self, _device: &mut BlockDev, len: usize) -> Result<(), i32> {
+        self.data.write().resize(len, 0);
+        Ok(())
     }
 }
 
@@ -255,14 +281,33 @@ impl FileSystem for InitramfsFs {
             Node::Symlink { target } => Arc::new(RwLock::new(RamSymlink {
                 target: target.clone(),
             })),
+            Node::Socket => Arc::new(RwLock::new(RamFile {
+                data: Arc::new(RwLock::new(Vec::new())),
+            })),
         };
 
         Ok(VfsNode::new(dummy_blockdev(), meta, ops))
     }
 
     fn mkdir(&mut self, parent_dir: &str, path: &str, mode: u16) -> Result<(), ()> {
-        let _ = (parent_dir, path, mode);
-        Err(())
+        let _ = mode;
+        if path.is_empty() || path.contains('/') {
+            return Err(());
+        }
+        let parent = self.split_path(parent_dir);
+        let Some(Node::Dir { children }) = self.get_node_mut(&parent) else {
+            return Err(());
+        };
+        if children.contains_key(path) {
+            return Err(());
+        }
+        children.insert(
+            path.to_string(),
+            Node::Dir {
+                children: BTreeMap::new(),
+            },
+        );
+        Ok(())
     }
 
     fn rmdir(&mut self, path: &str) -> Result<(), ()> {
@@ -289,13 +334,36 @@ impl FileSystem for InitramfsFs {
     }
 
     fn rm(&mut self, path: &str) -> Result<(), ()> {
-        let _ = path;
-        Err(())
+        let mut components = self.split_path(path);
+        let Some(name) = components.pop() else {
+            return Err(());
+        };
+        let Some(Node::Dir { children }) = self.get_node_mut(&components) else {
+            return Err(());
+        };
+        children.remove(name).map(|_| ()).ok_or(())
     }
 
     fn touch(&mut self, parent_path: &str, filename: &str, mode: u16) -> Result<(), ()> {
-        let _ = (parent_path, filename, mode);
-        Err(())
+        if filename.is_empty() || filename.contains('/') {
+            return Err(());
+        }
+        let parent = self.split_path(parent_path);
+        let Some(Node::Dir { children }) = self.get_node_mut(&parent) else {
+            return Err(());
+        };
+        if children.contains_key(filename) {
+            return Err(());
+        }
+        let node = if mode & 0o170000 == 0o140000 {
+            Node::Socket
+        } else {
+            Node::File {
+                data: Arc::new(RwLock::new(Vec::new())),
+            }
+        };
+        children.insert(filename.to_string(), node);
+        Ok(())
     }
 
     fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {

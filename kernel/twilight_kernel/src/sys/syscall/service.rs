@@ -160,6 +160,9 @@ fn fill_statfs(out: &mut StatFs, stats: sys::fs::vfs::FsStats) {
 
 const FD_CLOEXEC: i32 = 0x1;
 const STATUS_FLAG_MUTABLE: i32 = O_APPEND | O_NONBLOCK;
+// Linux asm-generic FIONBIO. The argument points to an int: nonzero enables
+// O_NONBLOCK and zero disables it on the open file description.
+const FIONBIO: usize = 0x5421;
 
 #[inline]
 fn random_ephemeral_port() -> u16 {
@@ -2798,6 +2801,24 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
     };
 
     let mut file = file_ref.lock();
+
+    if matches!(&file.kind, OpenFileKind::Socket(_)) && cmd == FIONBIO {
+        if arg == 0 {
+            return -(EFAULT as i64);
+        }
+
+        // SAFETY: FIONBIO's Linux ABI requires `arg` to point to a readable
+        // userspace int. Twilight currently accesses syscall user pointers
+        // directly, as do the other pointer-taking syscalls in this module.
+        let enabled = unsafe { core::ptr::read_unaligned(arg as *const i32) } != 0;
+        if enabled {
+            file.status_flags |= O_NONBLOCK;
+        } else {
+            file.status_flags &= !O_NONBLOCK;
+        }
+        return 0;
+    }
+
     match &mut file.kind {
         OpenFileKind::Vfs(node_ref) => node_ref
             .lock()
