@@ -1,0 +1,10 @@
+name = "twilogd"
+description = "Twilight logging daemon"
+exec = "/sbin/twilogd"
+args = []
+enabled = true
+runlevel = "default"
+restart = "always"
+type = "foreground"
+stdout = "console"
+stderr = "console"

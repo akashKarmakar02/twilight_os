@@ -1,0 +1,10 @@
+name = "httpd"
+description = "Twilight HTTP server"
+exec = "/bin/httpd"
+args = []
+enabled = true
+runlevel = "default"
+restart = "on-failure"
+type = "foreground"
+stdout = "log"
+stderr = "log"

@@ -1,0 +1,10 @@
+name = "shell"
+description = "Twilight interactive shell"
+exec = "/bin/oksh"
+args = []
+enabled = true
+runlevel = "default"
+restart = "always"
+type = "foreground"
+stdout = "console"
+stderr = "console"
