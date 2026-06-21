@@ -371,7 +371,10 @@ pub extern "sysv64" fn syscall_handler(
         regs.rax = res as u64;
         service::deliver_pending_signal(_stack_frame, regs);
     }
-    crate::sys::proc::maybe_schedule();
+    // Syscall dispatch and signal delivery have completed and no syscall-local
+    // lock is intentionally held here, making this a safe deferred-reschedule
+    // point before returning to userspace.
+    crate::sys::preempt::cond_resched();
 
     if syscall_number == SYS_FORK || syscall_number == SYS_WAIT4 || syscall_number == SYS_EXECVE {
         serial_println!(

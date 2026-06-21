@@ -3,7 +3,7 @@ use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, Metadata, VfsNode, Vfs
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::rwlock::RwLock;
+use crate::utils::sync::RwLock;
 
 mod nodes;
 

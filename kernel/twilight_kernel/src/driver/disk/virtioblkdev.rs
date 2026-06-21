@@ -10,7 +10,7 @@ use conquer_once::spin::OnceCell;
 use core::mem::size_of;
 use core::ptr::{read_volatile, write_bytes, write_volatile};
 use core::sync::atomic::{Ordering, compiler_fence};
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use x86_64::align_up;
 use x86_64::instructions::port::Port;
 

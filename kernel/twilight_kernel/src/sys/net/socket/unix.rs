@@ -5,7 +5,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use twilight_common::syscall::types::{
     EADDRINUSE, EAGAIN, ECONNREFUSED, EDESTADDRREQ, EINTR, EINVAL, EISCONN, ENOTCONN, EOPNOTSUPP,
@@ -211,10 +211,24 @@ pub struct UnixPollState {
 
 // ---- UnixSocket ----
 
-#[derive(Clone)]
 pub struct UnixSocket {
     state: Arc<Mutex<UnixState>>,
+    /// Counts owning kernel handles independently of registry/state Arcs.
+    /// Temporary handles used after dropping an fd lock keep the endpoint
+    /// alive until their operation finishes.
+    handle_refs: Arc<AtomicUsize>,
     pub addr_len: u32,
+}
+
+impl Clone for UnixSocket {
+    fn clone(&self) -> Self {
+        self.handle_refs.fetch_add(1, Ordering::Relaxed);
+        Self {
+            state: self.state.clone(),
+            handle_refs: self.handle_refs.clone(),
+            addr_len: self.addr_len,
+        }
+    }
 }
 
 impl core::fmt::Debug for UnixSocket {
@@ -229,6 +243,7 @@ impl UnixSocket {
     pub fn new(sock_type: SockType) -> Self {
         Self {
             state: Arc::new(Mutex::new(UnixState::new(sock_type))),
+            handle_refs: Arc::new(AtomicUsize::new(1)),
             addr_len: 0,
         }
     }
@@ -320,9 +335,9 @@ impl UnixSocket {
                 default_peer: None,
             }));
 
-            listener
-                .backlog
-                .push_back(PendingAccept { state: client_state });
+            listener.backlog.push_back(PendingAccept {
+                state: client_state,
+            });
             listener.accept_waiters.notify_all();
         }
 
@@ -361,14 +376,12 @@ impl UnixSocket {
                         accepted_state.bound_addr = bound_addr.clone();
                     }
 
-                    let addr_len = bound_addr
-                        .as_ref()
-                        .map(|a| a.addr_len())
-                        .unwrap_or(0);
+                    let addr_len = bound_addr.as_ref().map(|a| a.addr_len()).unwrap_or(0);
 
                     return Ok((
                         UnixSocket {
                             state: pending.state.clone(),
+                            handle_refs: Arc::new(AtomicUsize::new(1)),
                             addr_len,
                         },
                         peer,
@@ -407,14 +420,12 @@ impl UnixSocket {
                 accepted_state.bound_addr = bound_addr.clone();
             }
 
-            let addr_len = bound_addr
-                .as_ref()
-                .map(|a| a.addr_len())
-                .unwrap_or(0);
+            let addr_len = bound_addr.as_ref().map(|a| a.addr_len()).unwrap_or(0);
 
             Ok(Some((
                 UnixSocket {
                     state: pending.state.clone(),
+                    handle_refs: Arc::new(AtomicUsize::new(1)),
                     addr_len,
                 },
                 peer,
@@ -566,10 +577,9 @@ impl UnixSocket {
         }
         let src = {
             let state = self.state.lock();
-            state
-                .bound_addr
-                .clone()
-                .unwrap_or(UnixAddr { path: String::new() })
+            state.bound_addr.clone().unwrap_or(UnixAddr {
+                path: String::new(),
+            })
         };
         target.dgram_queue.push_back(DgramMessage {
             data: buf.to_vec(),
@@ -758,6 +768,11 @@ impl UnixSocket {
 
 impl Drop for UnixSocket {
     fn drop(&mut self) {
-        self.close();
+        // Registry entries and pending connections also hold `state` Arcs, so
+        // Arc::strong_count(state) cannot identify the final socket handle.
+        // Close only when the independent owning-handle count reaches zero.
+        if self.handle_refs.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.close();
+        }
     }
 }

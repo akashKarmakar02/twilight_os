@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 use rand::{RngCore, SeedableRng};
 use rand_hc::Hc128Rng;
 use sha2::{Digest, Sha256};
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use x86_64::instructions::random::RdRand;
 
 lazy_static! {

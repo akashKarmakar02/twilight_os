@@ -14,7 +14,7 @@ use core::hint::spin_loop;
 use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use lazy_static::lazy_static;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use x86_64::VirtAddr;
 use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 

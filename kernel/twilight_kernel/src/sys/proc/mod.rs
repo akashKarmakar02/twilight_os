@@ -33,10 +33,9 @@ use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::arch::naked_asm;
 use core::mem::size_of;
-use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU16, Ordering};
-use spin::mutex::Mutex;
-use spin::rwlock::RwLock;
+use crate::utils::sync::Mutex;
+use crate::utils::sync::RwLock;
 use spin::Once;
 use twilight_common::syscall::types::{O_RDONLY, O_WRONLY};
 use x86_64::registers::control::Cr3;
@@ -59,7 +58,6 @@ const STATIC_TLS_SPILL_PAGES: u64 = 2;
 const TASK_COMM_LEN: usize = 16;
 static NEXT_PID: AtomicU16 = AtomicU16::new(1);
 static PID: AtomicU16 = AtomicU16::new(0);
-static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
 const INITIAL_CONTEXT_STACK_GUARD: u64 = 4096 * 2;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -164,7 +162,10 @@ const PF_R: u32 = 4;
 #[repr(C)]
 #[derive(Debug)]
 pub enum ProcessState {
+    /// Currently executing on the BSP.
     Running,
+    /// Eligible for scheduler selection but not currently executing.
+    Runnable,
     Sleeping,
     Waiting,
     SignalWait,
@@ -322,14 +323,17 @@ impl ProcessTable {
             // from a stale user preempt frame.
             prev_task.state = ProcessState::Waiting;
             prev_task.preempt_frame = 0;
-            next_task.state = ProcessState::Running;
-
             crate::serial_println!(
                 "[proc::run] switch parent pid={} -> child pid={}",
                 prev_task.pid,
                 next_task.pid,
             );
-            switch_tasks(prev_task, next_task);
+            if !switch_tasks_with_new_scheduler_guard(prev_task, next_task) {
+                prev_task.state = ProcessState::Running;
+                PID.store(current_pid, Ordering::SeqCst);
+                crate::serial_println!("[sched] process launch switch deferred");
+                return;
+            }
             crate::serial_println!("[proc::run] returned to pid={}", crate::sys::proc::id());
         }
     }
@@ -521,7 +525,7 @@ impl Process {
             self.state,
             ProcessState::Waiting | ProcessState::SignalWait | ProcessState::AwaitingIo
         ) {
-            self.state = ProcessState::Running;
+            self.state = ProcessState::Runnable;
             self.pending_io = false;
         }
     }
@@ -751,7 +755,7 @@ impl Process {
             is_thread: false,
             mapper,
             page_table_frame,
-            state: ProcessState::Running,
+            state: ProcessState::Runnable,
             addr_size_vec,
             exe_path: exe_path.to_string(),
             comm: task_comm_from_path(exe_path),
@@ -1115,7 +1119,7 @@ impl Process {
             is_thread: false,
             mapper,
             page_table_frame,
-            state: ProcessState::Running,
+            state: ProcessState::Runnable,
             addr_size_vec: self.addr_size_vec.clone(),
             exe_path: self.exe_path.clone(),
             comm: self.comm,
@@ -1198,7 +1202,7 @@ impl Process {
             parent_pid: self.parent_pid,
             pgid: self.pgid,
             sid: self.sid,
-            state: ProcessState::Running,
+            state: ProcessState::Runnable,
             addr_size_vec: Vec::new(),
             exe_path: self.exe_path.clone(),
             comm: self.comm,
@@ -1267,6 +1271,7 @@ pub fn resolve_current_page_fault(
     write: bool,
     execute: bool,
 ) -> PageFaultResolution {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
     let current = id();
     #[allow(static_mut_refs)]
     let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
@@ -1279,6 +1284,7 @@ pub fn resolve_current_page_fault(
 }
 
 pub fn process_group_id(pid: u16) -> Option<u16> {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut()? };
     table
@@ -1289,6 +1295,7 @@ pub fn process_group_id(pid: u16) -> Option<u16> {
 }
 
 pub fn process_session_id(pid: u16) -> Option<u16> {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut()? };
     table.proc_list.iter().find(|p| p.pid == pid).map(|p| p.sid)
@@ -1305,6 +1312,7 @@ pub fn signal_bit(sig: usize) -> u64 {
 }
 
 pub fn queue_signal(pid: u16, sig: usize) -> bool {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
     #[allow(static_mut_refs)]
     let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
         return false;
@@ -1318,6 +1326,7 @@ pub fn queue_signal(pid: u16, sig: usize) -> bool {
 }
 
 pub fn current_has_unblocked_signal() -> bool {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
     let current = id();
     #[allow(static_mut_refs)]
     let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
@@ -1337,6 +1346,12 @@ fn initial_context_stack_top(kernel_rsp: u64) -> u64 {
 }
 
 pub fn exit(code: i32) {
+    let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
+        crate::serial_println!("[sched] exit could not enter scheduler");
+        loop {
+            crate::task::executor::halt();
+        }
+    };
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
 
@@ -1360,7 +1375,7 @@ pub fn exit(code: i32) {
                 crate::task::executor::halt();
             }
         };
-        switch_by_index(slice, cur_idx, next_idx);
+        switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard);
         loop {
             crate::task::executor::halt();
         }
@@ -1382,13 +1397,13 @@ pub fn exit(code: i32) {
             ProcessState::Waiting | ProcessState::SignalWait | ProcessState::AwaitingIo
         ) {
             crate::serial_println!("[exit] wake parent pid={}", parent_pid);
-            slice[parent_idx].state = ProcessState::Running;
+            slice[parent_idx].state = ProcessState::Runnable;
             slice[parent_idx].pending_io = false;
         }
     }
 
     let next_idx = find_process_index(slice, parent_pid)
-        .filter(|&idx| matches!(slice[idx].state, ProcessState::Running))
+        .filter(|&idx| matches!(slice[idx].state, ProcessState::Runnable))
         .or_else(|| find_next_runnable_index(slice, cur_idx));
 
     let Some(next_idx) = next_idx else {
@@ -1403,7 +1418,7 @@ pub fn exit(code: i32) {
         current_pid,
         slice[next_idx].pid,
     );
-    switch_by_index(slice, cur_idx, next_idx);
+    switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard);
 
     loop {
         crate::task::executor::halt();
@@ -1411,6 +1426,12 @@ pub fn exit(code: i32) {
 }
 
 pub fn exit_group(code: i32) -> ! {
+    let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
+        crate::serial_println!("[sched] exit_group could not enter scheduler");
+        loop {
+            crate::task::executor::halt();
+        }
+    };
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
     let current_pid = id();
@@ -1443,7 +1464,7 @@ pub fn exit_group(code: i32) -> ! {
     }
 
     let next_idx = find_process_index(slice, parent_pid)
-        .filter(|&idx| matches!(slice[idx].state, ProcessState::Running))
+        .filter(|&idx| matches!(slice[idx].state, ProcessState::Runnable))
         .or_else(|| find_next_runnable_index(slice, cur_idx));
     let Some(next_idx) = next_idx else {
         loop {
@@ -1451,13 +1472,19 @@ pub fn exit_group(code: i32) -> ! {
         }
     };
 
-    switch_by_index(slice, cur_idx, next_idx);
+    switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard);
     loop {
         crate::task::executor::halt();
     }
 }
 
 pub fn terminate_current_by_signal(sig: i32) -> ! {
+    let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
+        crate::serial_println!("[sched] signal exit could not enter scheduler");
+        loop {
+            crate::task::executor::halt();
+        }
+    };
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
 
@@ -1485,13 +1512,13 @@ pub fn terminate_current_by_signal(sig: i32) -> ! {
             slice[parent_idx].state,
             ProcessState::Waiting | ProcessState::SignalWait | ProcessState::AwaitingIo
         ) {
-            slice[parent_idx].state = ProcessState::Running;
+            slice[parent_idx].state = ProcessState::Runnable;
             slice[parent_idx].pending_io = false;
         }
     }
 
     let next_idx = find_process_index(slice, parent_pid)
-        .filter(|&idx| matches!(slice[idx].state, ProcessState::Running))
+        .filter(|&idx| matches!(slice[idx].state, ProcessState::Runnable))
         .or_else(|| find_next_runnable_index(slice, cur_idx));
 
     let Some(next_idx) = next_idx else {
@@ -1506,7 +1533,7 @@ pub fn terminate_current_by_signal(sig: i32) -> ! {
         current_pid,
         slice[next_idx].pid,
     );
-    switch_by_index(slice, cur_idx, next_idx);
+    switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard);
 
     loop {
         crate::task::executor::halt();
@@ -1514,17 +1541,23 @@ pub fn terminate_current_by_signal(sig: i32) -> ! {
 }
 
 pub fn on_timer_tick() {
-    // NEED_RESCHED.store(true, Ordering::Relaxed);
+    crate::sys::preempt::set_need_resched();
     POLL_WAIT_QUEUE.notify_all();
 }
 
 pub fn maybe_schedule() {
-    if NEED_RESCHED.swap(false, Ordering::Relaxed) {
-        schedule_now();
-    }
+    crate::sys::preempt::cond_resched();
 }
 
 pub fn schedule_now() -> bool {
+    let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
+        return false;
+    };
+
+    // This invocation is now responsible for the pending request, even when
+    // there is currently no alternate runnable process.
+    crate::sys::preempt::clear_need_resched();
+
     #[allow(static_mut_refs)]
     let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
         return false;
@@ -1545,14 +1578,16 @@ pub fn schedule_now() -> bool {
         return false;
     };
 
-    switch_by_index(slice, cur_idx, next_idx);
-    true
+    switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard)
 }
 
 pub fn await_io() {
     let cur_pid = id();
 
     loop {
+        let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
+            return;
+        };
         #[allow(static_mut_refs)]
         let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
         let slice = table.proc_list.make_contiguous();
@@ -1562,22 +1597,21 @@ pub fn await_io() {
 
         if slice[cur_idx].pending_io {
             slice[cur_idx].pending_io = false;
-            slice[cur_idx].state = ProcessState::Running;
             return;
         }
 
         slice[cur_idx].state = ProcessState::AwaitingIo;
 
         if let Some(next_idx) = find_next_runnable_index(slice, cur_idx) {
-            switch_by_index(slice, cur_idx, next_idx);
+            switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard);
 
             // Context switched back. Check if we were woken properly.
+            let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
             #[allow(static_mut_refs)]
             let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
             if let Some(process) = table.get_process(cur_pid) {
                 if process.pending_io {
                     process.pending_io = false;
-                    process.state = ProcessState::Running;
                     return;
                 }
                 if matches!(process.state, ProcessState::Running) {
@@ -1586,19 +1620,26 @@ pub fn await_io() {
             }
         } else {
             // No other runnable process. Stay logically AwaitingIo.
+            drop(scheduler_guard);
             crate::task::executor::halt();
 
             // Woke up from halt (likely timer or IO interrupt).
             // Check if we were woken properly.
+            let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
             #[allow(static_mut_refs)]
             let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
             if let Some(process) = table.get_process(cur_pid) {
                 if process.pending_io {
                     process.pending_io = false;
-                    process.state = ProcessState::Running;
+                    if matches!(process.state, ProcessState::Runnable) {
+                        process.state = ProcessState::Running;
+                    }
                     return;
                 }
-                if matches!(process.state, ProcessState::Running) {
+                if matches!(process.state, ProcessState::Runnable) {
+                    // No context switch occurred: this task is still the BSP
+                    // current task and is resuming directly after HLT.
+                    process.state = ProcessState::Running;
                     return;
                 }
             }
@@ -1607,6 +1648,7 @@ pub fn await_io() {
 }
 
 pub fn wake_process(pid: u16) {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
 
@@ -1616,7 +1658,7 @@ pub fn wake_process(pid: u16) {
 
     match process.state {
         ProcessState::AwaitingIo => {
-            process.state = ProcessState::Running;
+            process.state = ProcessState::Runnable;
             process.pending_io = false;
         }
         ProcessState::Dead | ProcessState::Stopped => {}
@@ -1721,7 +1763,7 @@ fn find_next_runnable_index(processes: &[Process], current_idx: usize) -> Option
         if idx == current_idx {
             continue;
         }
-        if matches!(processes[idx].state, ProcessState::Running) {
+        if matches!(processes[idx].state, ProcessState::Runnable) {
             return Some(idx);
         }
     }
@@ -1729,9 +1771,107 @@ fn find_next_runnable_index(processes: &[Process], current_idx: usize) -> Option
     None
 }
 
-fn switch_by_index(processes: &mut [Process], cur_idx: usize, next_idx: usize) {
+/// Validate the BSP invariant at a stable scheduler boundary: exactly one
+/// process-table entry is Running, and it is the process selected for the CPU.
+fn validate_running_owner(processes: &[Process], expected_idx: usize) -> bool {
+    let mut running = processes
+        .iter()
+        .enumerate()
+        .filter(|(_, process)| matches!(process.state, ProcessState::Running));
+    let first = running.next().map(|(idx, _)| idx);
+    let extra = running.next().map(|(_, process)| process.pid);
+
+    if first != Some(expected_idx) || extra.is_some() {
+        crate::serial_println!(
+            "[sched] Running invariant violated: expected_pid={} first_running={:?} extra_running={:?}",
+            processes[expected_idx].pid,
+            first.map(|idx| processes[idx].pid),
+            extra,
+        );
+        return false;
+    }
+    true
+}
+
+/// Before selecting another task, no process other than the physical BSP
+/// current process may be marked Running. The current process may already be
+/// blocked or dead, in which case no Running entry is expected yet.
+fn validate_pre_switch_owner(processes: &[Process], current_idx: usize) -> bool {
+    if let Some((idx, process)) = processes
+        .iter()
+        .enumerate()
+        .find(|(_, process)| matches!(process.state, ProcessState::Running))
+        && idx != current_idx
+    {
+        crate::serial_println!(
+            "[sched] non-current process marked Running: current_pid={} running_pid={}",
+            processes[current_idx].pid,
+            process.pid,
+        );
+        return false;
+    }
+
+    let count = processes
+        .iter()
+        .filter(|process| matches!(process.state, ProcessState::Running))
+        .count();
+    if count > 1 {
+        crate::serial_println!("[sched] multiple Running tasks on BSP: count={}", count);
+        return false;
+    }
+    true
+}
+
+fn switch_tasks_with_new_scheduler_guard(current: &mut Process, next: &mut Process) -> bool {
+    let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
+        return false;
+    };
+    if !matches!(next.state, ProcessState::Runnable) {
+        crate::serial_println!(
+            "[sched] refused non-Runnable target pid={} state={:?}",
+            next.pid,
+            next.state,
+        );
+        return false;
+    }
+
+    if matches!(current.state, ProcessState::Running) {
+        current.state = ProcessState::Runnable;
+    }
+    next.state = ProcessState::Running;
+    crate::sys::preempt::clear_need_resched();
+    scheduler_guard.release_before_switch();
+    switch_tasks(current, next);
+    true
+}
+
+fn switch_by_index_guarded(
+    processes: &mut [Process],
+    cur_idx: usize,
+    next_idx: usize,
+    scheduler_guard: crate::sys::preempt::SchedulerGuard,
+) -> bool {
     if cur_idx == next_idx {
-        return;
+        return false;
+    }
+    if !validate_pre_switch_owner(processes, cur_idx) {
+        return false;
+    }
+    if !matches!(processes[next_idx].state, ProcessState::Runnable) {
+        crate::serial_println!(
+            "[sched] refused non-Runnable target pid={} state={:?}",
+            processes[next_idx].pid,
+            processes[next_idx].state,
+        );
+        return false;
+    }
+
+    if matches!(processes[cur_idx].state, ProcessState::Running) {
+        processes[cur_idx].state = ProcessState::Runnable;
+    }
+    processes[next_idx].state = ProcessState::Running;
+    if !validate_running_owner(processes, next_idx) {
+        return false;
     }
 
     let ptr = processes.as_mut_ptr();
@@ -1740,11 +1880,18 @@ fn switch_by_index(processes: &mut [Process], cur_idx: usize, next_idx: usize) {
         let next = &mut *ptr.add(next_idx);
 
         PID.store(next.pid, Ordering::SeqCst);
+        // switch_tasks() disables interrupts around the architecture switch.
+        // Release CPU-local scheduler bookkeeping first because the next task
+        // may enter userspace without returning through this Rust stack.
+        scheduler_guard.release_before_switch();
         switch_tasks(cur, next);
     }
+    true
 }
 
 fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
+    // Phase 1 intentionally preserves the known-safe user interrupt path.
+    // Kernel-mode ticks only leave need_resched set for a later safe point.
     if from_user != 0 {
         schedule_now();
     }
@@ -1752,6 +1899,7 @@ fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut Preemp
 }
 
 pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
+    crate::sys::preempt::irq_enter();
     crate::driver::timer::pit::pit_tick_isr();
 
     // EOI for IRQ0 (PIC timer)
@@ -1761,6 +1909,7 @@ pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mu
             .notify_end_of_interrupt(crate::arch::x86_64::idt::PIC_1_OFFSET);
     }
 
+    crate::sys::preempt::irq_exit();
     timer_preempt_common(frame, from_user)
 }
 
@@ -1768,11 +1917,13 @@ pub extern "C" fn apic_timer_preempt(
     frame: *mut PreemptFrame,
     from_user: u64,
 ) -> *mut PreemptFrame {
+    crate::sys::preempt::irq_enter();
     crate::driver::timer::pit::pit_tick_isr();
 
     // EOI for Local APIC
     crate::driver::apic::lapic::end_of_interrupt();
 
+    crate::sys::preempt::irq_exit();
     timer_preempt_common(frame, from_user)
 }
 
@@ -1878,7 +2029,7 @@ pub fn init() {
                 stack: 0,
                 stack_size: 0,
                 entry_point: 0,
-                state: ProcessState::Running,
+                state: ProcessState::Runnable,
                 page_table_frame,
                 mapper,
                 pwd: "/".to_string(),
@@ -1956,7 +2107,12 @@ pub fn init() {
     #[allow(static_mut_refs)]
     let proc = unsafe { PROCESS_TABLE.get_mut().unwrap().get_process(0).unwrap() };
 
-    switch_tasks(&mut idle_task, proc);
+    if !switch_tasks_with_new_scheduler_guard(&mut idle_task, proc) {
+        crate::serial_println!("[sched] initial process switch prevented");
+        loop {
+            crate::task::executor::halt();
+        }
+    }
 }
 
 #[repr(C)]

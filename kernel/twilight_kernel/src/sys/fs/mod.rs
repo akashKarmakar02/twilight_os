@@ -27,7 +27,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use conquer_once::TryInitError;
 use conquer_once::spin::OnceCell;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 
 pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
 

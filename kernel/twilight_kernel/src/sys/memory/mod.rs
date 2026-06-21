@@ -3,7 +3,7 @@ pub mod heap;
 pub mod phys;
 
 use crate::sys::memory::bitmap::with_frame_allocator;
-use crate::sys::proc::mem::{align_dn, align_up, PAGE};
+use crate::sys::proc::mem::{PAGE, align_dn, align_up};
 use crate::{log, serial_println};
 use conquer_once::spin::OnceCell;
 use core::ptr;

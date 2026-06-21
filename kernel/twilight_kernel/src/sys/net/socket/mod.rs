@@ -11,7 +11,7 @@ use lazy_static::lazy_static;
 use smoltcp::iface::SocketSet;
 use smoltcp::time::Duration;
 use smoltcp::wire::{IpAddress, IpEndpoint};
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use unix::UnixAddr;
 
 lazy_static! {

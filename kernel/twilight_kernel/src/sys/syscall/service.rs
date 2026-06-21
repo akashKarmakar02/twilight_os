@@ -5,7 +5,12 @@ use crate::sys::fs::pipe::make_pipe_ends;
 use crate::sys::fs::vfs::{FileType, VFS};
 use crate::sys::kmsg::IOCTL_KMSG_GET_HEAD;
 use crate::sys::net::bind_map::GLOBAL_PORT_MAP;
-use crate::sys::net::socket::{SocketFile, tcp::TcpSocket, udp::UdpSocket, unix::{UnixAddr, UnixSocket, SockType}};
+use crate::sys::net::socket::{
+    SocketFile,
+    tcp::TcpSocket,
+    udp::UdpSocket,
+    unix::{SockType, UnixAddr, UnixSocket},
+};
 use crate::sys::proc::{
     FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, SIGCHLD, SIGKILL, SIGPIPE, SIGSTOP,
     SignalAction, SignalAltStack, USER_STACK_SIZE, signal_bit,
@@ -22,7 +27,7 @@ use core::arch::asm;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU64, Ordering};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
-use spin::mutex::Mutex;
+use crate::utils::sync::Mutex;
 use twilight_common::syscall::types::*;
 
 fn join_paths(base: &str, rel: &str) -> String {
@@ -367,6 +372,21 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
         return result;
     }
 
+    // Unix socket operations may block in a wait queue.  Clone the socket's
+    // shared state and release the descriptor lock before entering that path.
+    if let OpenFileKind::Socket(SocketFile::Unix(socket)) = &file.kind {
+        let mut socket = socket.clone();
+        drop(file);
+        return match socket.write(buf, nonblock) {
+            Ok(written) => written as i64,
+            Err(EPIPE) => {
+                crate::sys::proc::queue_signal(current_pid, SIGPIPE);
+                -(EPIPE as i64)
+            }
+            Err(errno) => -(errno as i64),
+        };
+    }
+
     let (result, new_seek) = match &mut file.kind {
         OpenFileKind::Vfs(node_ref) => {
             let append = (status_flags & O_APPEND) != 0;
@@ -395,16 +415,14 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
         OpenFileKind::Socket(sock) => {
             // Handle Unix sockets with proper errno
             match sock {
-                SocketFile::Unix(usock) => {
-                    match usock.write(buf, nonblock) {
-                        Ok(written) => (written as i64, None),
-                        Err(EPIPE) => {
-                            crate::sys::proc::queue_signal(current_pid, SIGPIPE);
-                            (-(EPIPE as i64), None)
-                        }
-                        Err(e) => (-(e as i64), None),
+                SocketFile::Unix(usock) => match usock.write(buf, nonblock) {
+                    Ok(written) => (written as i64, None),
+                    Err(EPIPE) => {
+                        crate::sys::proc::queue_signal(current_pid, SIGPIPE);
+                        (-(EPIPE as i64), None)
                     }
-                }
+                    Err(e) => (-(e as i64), None),
+                },
                 _ => {
                     if nonblock && !sock.poll(IO::Write) {
                         (-(EAGAIN as i64), None)
@@ -688,6 +706,7 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
             Ok(f) => f,
             Err(code) => return code as i64,
         };
+        loop {
         let mut file = file_ref.lock();
         let status_flags = file.status_flags;
         let accmode = status_flags & O_ACCMODE;
@@ -695,6 +714,22 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
             return -(EBADF as i64);
         }
         let seek = file.seek;
+
+        // TTY reads may sleep waiting for a complete canonical line.  Test
+        // readiness while the descriptor is stable, then release every VFS
+        // guard before sleeping and retry from the top.
+        let is_tty = match &file.kind {
+            OpenFileKind::Vfs(node_ref) => node_ref.lock().metadata.name == "tty",
+            _ => false,
+        };
+        if is_tty && !crate::sys::console::tty::input_read_ready() {
+            if status_flags & O_NONBLOCK != 0 {
+                return -(EAGAIN as i64);
+            }
+            drop(file);
+            crate::sys::console::tty::wait_for_input();
+            continue;
+        }
 
         if let OpenFileKind::Pipe(pipe) = &file.kind {
             let pipe = pipe.clone();
@@ -705,6 +740,17 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
                 Err(errno) => -(errno as i64),
             };
             return result;
+        }
+
+        // Like pipes, Unix sockets own their blocking state independently of
+        // the fd entry.  Never carry the fd-table lock into await_io().
+        if let OpenFileKind::Socket(SocketFile::Unix(socket)) = &file.kind {
+            let mut socket = socket.clone();
+            drop(file);
+            return match socket.read(buf, (status_flags & O_NONBLOCK) != 0) {
+                Ok(n) => n as i64,
+                Err(errno) => -(errno as i64),
+            };
         }
 
         let (ret, advance_seek) = match &mut file.kind {
@@ -746,12 +792,10 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
             OpenFileKind::Socket(sock) => {
                 let nonblock = (status_flags & O_NONBLOCK) != 0;
                 match sock {
-                    SocketFile::Unix(usock) => {
-                        match usock.read(buf, nonblock) {
-                            Ok(n) => (n as i64, None),
-                            Err(e) => (-(e as i64), None),
-                        }
-                    }
+                    SocketFile::Unix(usock) => match usock.read(buf, nonblock) {
+                        Ok(n) => (n as i64, None),
+                        Err(e) => (-(e as i64), None),
+                    },
                     _ => {
                         if nonblock && !sock.poll(IO::Read) {
                             (-(EAGAIN as i64), None)
@@ -770,7 +814,8 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
             file.seek = file.seek.saturating_add(n);
         }
 
-        ret
+        return ret;
+        }
     }
 
     read_from_fd(process, fd as i32, buf)
@@ -3049,33 +3094,31 @@ fn poll_fd_set(fds: &mut [PollFd], process: &mut Process) -> Result<usize, i64> 
                     revents |= POLLERR;
                 }
             }
-            OpenFileKind::Socket(sock) => {
-                match sock {
-                    SocketFile::Unix(_) => {
-                        let ps = sock.poll_unix();
-                        if want_in && ps.readable {
-                            revents |= POLLIN;
-                        }
-                        if want_out && ps.writable {
-                            revents |= POLLOUT;
-                        }
-                        if ps.hangup {
-                            revents |= POLLHUP;
-                        }
-                        if ps.error {
-                            revents |= POLLERR;
-                        }
+            OpenFileKind::Socket(sock) => match sock {
+                SocketFile::Unix(_) => {
+                    let ps = sock.poll_unix();
+                    if want_in && ps.readable {
+                        revents |= POLLIN;
                     }
-                    _ => {
-                        if want_in && sock.poll(IO::Read) {
-                            revents |= POLLIN;
-                        }
-                        if want_out && sock.poll(IO::Write) {
-                            revents |= POLLOUT;
-                        }
+                    if want_out && ps.writable {
+                        revents |= POLLOUT;
+                    }
+                    if ps.hangup {
+                        revents |= POLLHUP;
+                    }
+                    if ps.error {
+                        revents |= POLLERR;
                     }
                 }
-            }
+                _ => {
+                    if want_in && sock.poll(IO::Read) {
+                        revents |= POLLIN;
+                    }
+                    if want_out && sock.poll(IO::Write) {
+                        revents |= POLLOUT;
+                    }
+                }
+            },
         }
 
         if revents != 0 {
@@ -3258,7 +3301,13 @@ pub fn ppoll(
     }
 }
 
-pub fn select(nfds: i32, readfds_ptr: usize, writefds_ptr: usize, exceptfds_ptr: usize, timeout_ptr: usize) -> i64 {
+pub fn select(
+    nfds: i32,
+    readfds_ptr: usize,
+    writefds_ptr: usize,
+    exceptfds_ptr: usize,
+    timeout_ptr: usize,
+) -> i64 {
     if nfds < 0 || nfds > FD_SETSIZE as i32 {
         return -(EINVAL as i64);
     }
@@ -3334,7 +3383,16 @@ pub fn select(nfds: i32, readfds_ptr: usize, writefds_ptr: usize, exceptfds_ptr:
     };
 
     if ready > 0 {
-        write_back_select_results(pfds, readfds_ptr, writefds_ptr, exceptfds_ptr, &mut readfds_local, &mut writefds_local, &mut exceptfds_local, n);
+        write_back_select_results(
+            pfds,
+            readfds_ptr,
+            writefds_ptr,
+            exceptfds_ptr,
+            &mut readfds_local,
+            &mut writefds_local,
+            &mut exceptfds_local,
+            n,
+        );
         return ready as i64;
     }
 
@@ -3372,7 +3430,16 @@ pub fn select(nfds: i32, readfds_ptr: usize, writefds_ptr: usize, exceptfds_ptr:
 
         if ready > 0 {
             wait_queue.finish_wait(wait_pid);
-            write_back_select_results(pfds, readfds_ptr, writefds_ptr, exceptfds_ptr, &mut readfds_local, &mut writefds_local, &mut exceptfds_local, n);
+            write_back_select_results(
+                pfds,
+                readfds_ptr,
+                writefds_ptr,
+                exceptfds_ptr,
+                &mut readfds_local,
+                &mut writefds_local,
+                &mut exceptfds_local,
+                n,
+            );
             return ready as i64;
         }
 
@@ -3392,13 +3459,31 @@ pub fn select(nfds: i32, readfds_ptr: usize, writefds_ptr: usize, exceptfds_ptr:
         };
 
         if ready > 0 {
-            write_back_select_results(pfds, readfds_ptr, writefds_ptr, exceptfds_ptr, &mut readfds_local, &mut writefds_local, &mut exceptfds_local, n);
+            write_back_select_results(
+                pfds,
+                readfds_ptr,
+                writefds_ptr,
+                exceptfds_ptr,
+                &mut readfds_local,
+                &mut writefds_local,
+                &mut exceptfds_local,
+                n,
+            );
             return ready as i64;
         }
     }
 }
 
-fn write_back_select_results(pfds: &[PollFd], readfds_ptr: usize, writefds_ptr: usize, exceptfds_ptr: usize, readfds: &mut FdSet, writefds: &mut FdSet, exceptfds: &mut FdSet, nfds: usize) {
+fn write_back_select_results(
+    pfds: &[PollFd],
+    readfds_ptr: usize,
+    writefds_ptr: usize,
+    exceptfds_ptr: usize,
+    readfds: &mut FdSet,
+    writefds: &mut FdSet,
+    exceptfds: &mut FdSet,
+    nfds: usize,
+) {
     for fd in 0..nfds {
         readfds.clr(fd);
         writefds.clr(fd);
@@ -3422,13 +3507,19 @@ fn write_back_select_results(pfds: &[PollFd], readfds_ptr: usize, writefds_ptr: 
     }
 
     if readfds_ptr != 0 {
-        unsafe { *(readfds_ptr as *mut FdSet) = *readfds; }
+        unsafe {
+            *(readfds_ptr as *mut FdSet) = *readfds;
+        }
     }
     if writefds_ptr != 0 {
-        unsafe { *(writefds_ptr as *mut FdSet) = *writefds; }
+        unsafe {
+            *(writefds_ptr as *mut FdSet) = *writefds;
+        }
     }
     if exceptfds_ptr != 0 {
-        unsafe { *(exceptfds_ptr as *mut FdSet) = *exceptfds; }
+        unsafe {
+            *(exceptfds_ptr as *mut FdSet) = *exceptfds;
+        }
     }
 }
 
@@ -3710,20 +3801,27 @@ pub fn accept4(fd: i32, addr_ptr: usize, addrlen_ptr: usize, flags: i32) -> i64 
         return -(ENOTSOCK as i64);
     };
 
-    let is_unix = matches!(sock, SocketFile::Unix(_));
+    let unix_socket = match sock {
+        SocketFile::Unix(socket) => Some(socket.clone()),
+        _ => None,
+    };
     let nonblock = (status_flags & O_NONBLOCK) != 0 || (flags & SOCK_NONBLOCK) != 0;
 
     let cloexec = (flags & SOCK_CLOEXEC) != 0;
 
-    if is_unix {
+    if let Some(unix_socket) = unix_socket {
+        // accept_new_unix() can sleep.  Drop the open-file lock first, then
+        // reacquire the current process only after the wait has completed.
+        drop(file);
+        let mut unix_socket = SocketFile::Unix(unix_socket);
         let res = if nonblock {
-            match sock.try_accept_new_unix() {
+            match unix_socket.try_accept_new_unix() {
                 Ok(Some(v)) => Ok(v),
                 Ok(None) => Err(-(EAGAIN as i64)),
                 Err(e) => Err(-(e as i64)),
             }
         } else {
-            sock.accept_new_unix().map_err(|e| -(e as i64))
+            unix_socket.accept_new_unix().map_err(|e| -(e as i64))
         };
 
         let (new_sock, peer) = match res {
@@ -3747,6 +3845,16 @@ pub fn accept4(fd: i32, addr_ptr: usize, addrlen_ptr: usize, flags: i32) -> i64 
             fd_flags: if cloexec { FD_CLOEXEC } else { 0 },
         };
 
+        #[allow(static_mut_refs)]
+        let process = unsafe {
+            PROCESS_TABLE
+                .get_mut()
+                .unwrap()
+                .get_process(crate::sys::proc::id())
+        };
+        let Some(process) = process else {
+            return -(ESRCH as i64);
+        };
         match install_fd_entry(process, entry, 0) {
             Ok(fd) => fd as i64,
             Err(code) => -(code as i64),
@@ -3906,18 +4014,24 @@ pub fn recvfrom(
         return -(ENOTSOCK as i64);
     };
 
-    match sock {
-        SocketFile::Unix(_) => {
-            let (n, src_addr) = match sock.recv_from_unix(buf, nonblock) {
-                Ok((n, a)) => (n, a),
-                Err(e) => return -(e as i64),
-            };
-            let addr_len = sock.addr_len_unix();
-            if let Err(e) = write_sockaddr_un(addr_ptr, addrlen_ptr, &src_addr, addr_len) {
-                return e;
-            }
-            n as i64
+    // recvfrom on a Unix socket may block.  Its Arc-backed socket state is
+    // safe to clone, allowing the descriptor lock to be released first.
+    if let SocketFile::Unix(socket) = sock {
+        let mut socket = SocketFile::Unix(socket.clone());
+        drop(file);
+        let (n, src_addr) = match socket.recv_from_unix(buf, nonblock) {
+            Ok((n, addr)) => (n, addr),
+            Err(errno) => return -(errno as i64),
+        };
+        let addr_len = socket.addr_len_unix();
+        if let Err(errno) = write_sockaddr_un(addr_ptr, addrlen_ptr, &src_addr, addr_len) {
+            return errno;
         }
+        return n as i64;
+    }
+
+    match sock {
+        SocketFile::Unix(_) => unreachable!(),
         _ => {
             if nonblock && !sock.poll(IO::Read) {
                 return -(EAGAIN as i64);
@@ -4381,7 +4495,7 @@ fn apply_signal_to_process(process: &mut Process, sig: usize) -> Option<u16> {
 
     if sig == SIGCONT {
         if matches!(process.state, crate::sys::proc::ProcessState::Stopped) {
-            process.state = crate::sys::proc::ProcessState::Running;
+            process.state = crate::sys::proc::ProcessState::Runnable;
             process.wait_status = 0xffff;
             process.wait_reported = false;
         }

@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp;
 use lazy_static::lazy_static;
-use spin::mutex::Mutex;
+use crate::utils::sync::Mutex;
 
 lazy_static! {
     pub static ref INITRAMFS: Mutex<CpioIterator> = Mutex::new(CpioIterator::default());

@@ -9,7 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::{Mutex, RwLock};
+use crate::utils::sync::{Mutex, RwLock};
 
 const ATTR_DIRECTORY: u8 = 0x10;
 const ATTR_VOLUME_ID: u8 = 0x08;

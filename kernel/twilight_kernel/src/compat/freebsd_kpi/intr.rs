@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use lazy_static::lazy_static;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 
 use super::device::{Device, DeviceId, device_get_nameunit};
 use super::driver::EINVAL;

@@ -12,7 +12,7 @@ use smoltcp::iface::Interface;
 use smoltcp::phy::DeviceCapabilities;
 use smoltcp::time::Instant;
 use smoltcp::wire::EthernetAddress;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 
 pub static NET: Mutex<Option<(Interface, EthernetDevice)>> = Mutex::new(None);
 

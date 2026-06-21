@@ -7,7 +7,7 @@ use core::convert::TryInto;
 use core::fmt;
 use core::hint::spin_loop;
 use lazy_static::lazy_static;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
 // Information Technology
 // AT Attachment with Packet Interface Extension (ATA/ATAPI-4)

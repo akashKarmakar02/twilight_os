@@ -3,7 +3,8 @@ pub(crate) use crate::sys::console::tty::{Tty, get_tty};
 use crate::sys::fs::vfs::VFS;
 use crate::sys::proc::{PROCESS_TABLE, Process};
 use alloc::string::String;
-use spin::{Mutex, Once};
+use crate::utils::sync::Mutex;
+use spin::Once;
 
 pub mod font;
 pub mod framebuffer;
@@ -42,6 +43,7 @@ pub fn init_console() {
         .map(|node| (node, "/sbin/twinit"))
         .or_else(|_| fs.open("/bin/twinit").map(|node| (node, "/bin/twinit")))
         .or_else(|_| fs.open("/bin/init").map(|node| (node, "/bin/init")));
+    drop(fs);
 
     if let Ok((node, path)) = init {
         #[allow(static_mut_refs)]

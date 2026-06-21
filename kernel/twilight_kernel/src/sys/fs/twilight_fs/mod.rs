@@ -14,7 +14,7 @@ use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
 use crate::sys::fs::twilight_fs::FsError::{
     FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode,
 };
-use crate::sys::fs::twilight_fs::inode::{Inode, TFSVfsNode, MODE_SOCKET, MODE_TYPE_MASK};
+use crate::sys::fs::twilight_fs::inode::{Inode, MODE_SOCKET, MODE_TYPE_MASK, TFSVfsNode};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
 use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
@@ -26,8 +26,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
-use spin::rwlock::RwLock;
+use crate::utils::sync::Mutex;
+use crate::utils::sync::RwLock;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
 static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);

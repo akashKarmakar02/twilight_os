@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::mutex::Mutex;
+use crate::utils::sync::Mutex;
 
 pub mod ata;
 pub mod ata_dma;

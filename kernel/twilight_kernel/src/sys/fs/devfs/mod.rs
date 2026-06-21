@@ -21,7 +21,7 @@ use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, VfsNode, VfsNodeOps};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::rwlock::RwLock;
+use crate::utils::sync::RwLock;
 
 pub struct DevFs {
     file_structure: Vec<(String, VfsNode)>,

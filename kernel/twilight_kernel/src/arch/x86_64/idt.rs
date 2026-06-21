@@ -5,10 +5,10 @@ use core::arch::naked_asm;
 use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
+use x86_64::VirtAddr;
 pub use x86_64::structures::idt::{
     InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode,
 };
-use x86_64::VirtAddr;
 
 #[repr(C, align(8))]
 pub struct Registers {
@@ -237,14 +237,17 @@ extern "x86-interrupt" fn page_fault_handler(
         let rsp = stack_frame.stack_pointer.as_u64();
         crate::serial_println!("User Stack Pointer (RSP): {:#x}", rsp);
 
-        use x86_64::structures::paging::Translate;
         use x86_64::structures::paging::OffsetPageTable;
+        use x86_64::structures::paging::Translate;
         let (level_4_page_table_frame, _) = x86_64::registers::control::Cr3::read();
         let phys_mem_offset = x86_64::VirtAddr::new(crate::sys::memory::phys_mem_offset());
-        let mapper = unsafe { OffsetPageTable::new(
-            &mut *(crate::sys::memory::phys_to_virt(level_4_page_table_frame.start_address()).as_mut_ptr()),
-            phys_mem_offset,
-        ) };
+        let mapper = unsafe {
+            OffsetPageTable::new(
+                &mut *(crate::sys::memory::phys_to_virt(level_4_page_table_frame.start_address())
+                    .as_mut_ptr()),
+                phys_mem_offset,
+            )
+        };
 
         for i in 0..16 {
             let addr = rsp.saturating_add(i * 8);
@@ -330,7 +333,7 @@ extern "x86-interrupt" fn segment_not_present_handler(
 // device interrupt
 use crate::driver::keyboard::keyboard_interrupt;
 use crate::driver::mouse::ps2::handle_interrupt_byte;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use x86_64::registers::control::Cr2;
 
 pub const PIC_1_OFFSET: u8 = 32;

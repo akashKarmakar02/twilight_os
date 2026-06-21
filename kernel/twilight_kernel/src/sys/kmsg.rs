@@ -1,6 +1,6 @@
 use core::cmp::min;
 use core::fmt::{self, Write};
-use spin::mutex::Mutex;
+use crate::utils::sync::Mutex;
 use x86_64::instructions::interrupts;
 
 pub const KMSG_RING_CAPACITY: usize = 64 * 1024;

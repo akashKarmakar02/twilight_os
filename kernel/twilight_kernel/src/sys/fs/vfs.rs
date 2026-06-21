@@ -6,8 +6,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::mutex::Mutex;
-use spin::rwlock::RwLock;
+use crate::utils::sync::Mutex;
+use crate::utils::sync::RwLock;
 
 pub static mut VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
 

@@ -2,9 +2,10 @@ use crate::log;
 use bit_field::BitField;
 use core::{cmp, slice};
 use limine::memory_map::EntryType;
-use spin::{Mutex, Once};
-use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB};
+use crate::utils::sync::Mutex;
+use spin::Once;
 use x86_64::PhysAddr;
+use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct UsableRegion {

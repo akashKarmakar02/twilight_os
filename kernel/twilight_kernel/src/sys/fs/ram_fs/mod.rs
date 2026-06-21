@@ -8,7 +8,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::min;
-use spin::rwlock::RwLock;
+use crate::utils::sync::RwLock;
 
 pub mod initramfs;
 

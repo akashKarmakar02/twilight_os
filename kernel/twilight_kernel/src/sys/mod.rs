@@ -7,6 +7,7 @@ pub mod kmsg;
 pub mod memory;
 pub mod net;
 pub mod pci;
+pub mod preempt;
 pub mod proc;
 pub mod rng;
 pub mod syscall;

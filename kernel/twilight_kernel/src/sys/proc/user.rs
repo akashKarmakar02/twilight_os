@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 use lazy_static::lazy_static;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 
 lazy_static! {
     pub static ref USER_ENV: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

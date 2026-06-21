@@ -4,7 +4,7 @@ use crate::arch::x86_64::halt;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
 use alloc::collections::VecDeque;
 use lazy_static::lazy_static;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 
 pub(crate) const PS2_PACKET_SIZE: usize = 3;
 const MAX_PACKETS: usize = 256;

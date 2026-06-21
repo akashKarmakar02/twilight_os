@@ -10,7 +10,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::fmt::Write;
 use core::{fmt, mem};
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use twilight_common::syscall::types::{EFAULT, EINVAL};
 
 /// Wait queue for processes blocked on TTY keyboard input.
@@ -181,6 +181,21 @@ enum AnsiState {
 }
 
 impl Tty {
+    /// Whether a read can complete without entering the input wait queue.
+    /// Canonical reads become ready only when a complete line (or VEOF) is
+    /// present; this mirrors the readiness rule used by Unix terminals.
+    pub fn input_read_ready(&self) -> bool {
+        let input = self.input_buffer.lock();
+        if self.icanon {
+            input
+                .iter()
+                .any(|byte| *byte == b'\n' || *byte == b'\r' || *byte == self.termios.c_cc[VEOF])
+        } else if self.vmin == 0 {
+            true
+        } else {
+            input.len() >= self.vmin as usize
+        }
+    }
     const FLUSH_THRESHOLD: usize = 512;
 
     pub fn new() -> Self {
@@ -1045,6 +1060,19 @@ pub fn get_tty() -> &'static mut Tty {
     unsafe {
         TTY.get_mut().unwrap()
     }
+}
+
+/// Check terminal readiness without retaining a VFS or descriptor guard.
+pub fn input_read_ready() -> bool {
+    get_tty().input_read_ready()
+}
+
+/// Sleep until keyboard input changes terminal readiness.  Callers must have
+/// released all fd/VFS guards before entering this function.
+pub fn wait_for_input() {
+    let pid = INPUT_WAIT_QUEUE.prepare_current();
+    crate::sys::proc::await_io();
+    INPUT_WAIT_QUEUE.finish_wait(pid);
 }
 
 /// Lightweight VFS wrapper that forwards /dev/tty ops to the single global TTY.

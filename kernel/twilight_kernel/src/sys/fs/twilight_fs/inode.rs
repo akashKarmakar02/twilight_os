@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use twilight_common::syscall::types::{EIO, EISDIR};
 
 pub const MODE_TYPE_MASK: u16 = 0xF000;

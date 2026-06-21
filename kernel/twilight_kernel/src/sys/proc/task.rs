@@ -2,10 +2,10 @@ use crate::arch::x86_64::io;
 use crate::sys::memory::bitmap::with_frame_allocator;
 use crate::sys::memory::phys_to_virt;
 use crate::sys::proc::Process;
+use x86_64::VirtAddr;
 use x86_64::instructions::interrupts;
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{FrameAllocator, Size4KiB};
-use x86_64::VirtAddr;
 
 #[derive(Default)]
 #[repr(C)]

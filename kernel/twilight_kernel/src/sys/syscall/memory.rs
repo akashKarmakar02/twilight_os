@@ -5,8 +5,8 @@ use crate::sys::memory::{
     alloc_pages, dealloc_pages, unmap_user_pages, update_user_page_flags,
     user_page_flags_with_access,
 };
-use crate::sys::proc::mem::{align_up, MmapKind, VmPermissions, PAGE};
 use crate::sys::proc::PROCESS_TABLE;
+use crate::sys::proc::mem::{MmapKind, PAGE, VmPermissions, align_up};
 use twilight_common::syscall::types::EIO;
 
 pub use crate::sys::proc::mem::{PROT_EXEC, PROT_READ, PROT_WRITE};

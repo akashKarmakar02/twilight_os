@@ -4,7 +4,7 @@ use alloc::{collections::BTreeMap, sync::Arc};
 use conquer_once::spin::OnceCell;
 use core::task::{Context, Poll, Waker};
 use crossbeam_queue::ArrayQueue;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use x86_64::instructions::interrupts;
 
 pub static EXECUTOR: OnceCell<Mutex<Executor>> = OnceCell::uninit();

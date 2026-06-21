@@ -3,7 +3,7 @@ use crate::utils::sync::WaitQueue;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
-use spin::mutex::Mutex;
+use crate::utils::sync::Mutex;
 use twilight_common::syscall::types::{EAGAIN, EINTR, EPIPE};
 
 pub const PIPE_BUF: usize = 4096;

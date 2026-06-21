@@ -13,7 +13,7 @@ use pc_keyboard::{
     DecodedKey, HandleControl, KeyCode, KeyEvent as PcKeyEvent, KeyState, Keyboard, ScancodeSet1,
     layouts,
 };
-use spin::{Mutex, RwLock};
+use crate::utils::sync::{Mutex, RwLock};
 
 pub mod ps2;
 

@@ -4,7 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use bit_field::BitField;
 use lazy_static::lazy_static;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use x86_64::PhysAddr;
 use x86_64::instructions::port::Port;
 

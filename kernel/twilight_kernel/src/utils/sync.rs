@@ -1,5 +1,8 @@
 use alloc::vec::Vec;
+use core::mem::ManuallyDrop;
 use x86_64::instructions::interrupts;
+
+use crate::sys::preempt::PreemptGuard;
 
 pub struct Mutex<T: ?Sized> {
     inner: spin::Mutex<T>,
@@ -12,10 +15,15 @@ impl<T> Mutex<T> {
         }
     }
 
+}
+
+impl<T: ?Sized> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<T> {
+        let preempt_guard = PreemptGuard::new_no_resched();
         MutexGuard {
-            guard: core::mem::ManuallyDrop::new(self.inner.lock()),
+            guard: ManuallyDrop::new(self.inner.lock()),
             irq_lock: false,
+            _preempt_guard: preempt_guard,
         }
     }
 
@@ -23,10 +31,12 @@ impl<T> Mutex<T> {
         let irq_lock = interrupts::are_enabled();
 
         interrupts::disable();
+        let preempt_guard = PreemptGuard::new_no_resched();
 
         MutexGuard {
-            guard: core::mem::ManuallyDrop::new(self.inner.lock()),
+            guard: ManuallyDrop::new(self.inner.lock()),
             irq_lock,
+            _preempt_guard: preempt_guard,
         }
     }
 
@@ -36,8 +46,10 @@ impl<T> Mutex<T> {
 }
 
 pub struct MutexGuard<'a, T: ?Sized + 'a> {
-    guard: core::mem::ManuallyDrop<spin::MutexGuard<'a, T>>,
+    guard: ManuallyDrop<spin::MutexGuard<'a, T>>,
     irq_lock: bool,
+    // Dropped after Drop::drop releases the spinlock and restores IRQ state.
+    _preempt_guard: PreemptGuard,
 }
 
 impl<T: ?Sized> core::ops::Deref for MutexGuard<'_, T> {
@@ -60,12 +72,95 @@ impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            core::mem::ManuallyDrop::drop(&mut self.guard);
+            ManuallyDrop::drop(&mut self.guard);
         }
 
         if self.irq_lock {
             interrupts::enable();
         }
+    }
+}
+
+pub struct RwLock<T: ?Sized> {
+    inner: spin::RwLock<T>,
+}
+
+impl<T> RwLock<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            inner: spin::RwLock::new(value),
+        }
+    }
+
+    /// Legacy mutable-static compatibility that still takes the write lock.
+    pub fn get_mut(&mut self) -> RwLockWriteGuard<'_, T> {
+        self.write()
+    }
+}
+
+impl<T: ?Sized> RwLock<T> {
+    pub fn read(&self) -> RwLockReadGuard<'_, T> {
+        let preempt_guard = PreemptGuard::new_no_resched();
+        RwLockReadGuard {
+            guard: ManuallyDrop::new(self.inner.read()),
+            _preempt_guard: preempt_guard,
+        }
+    }
+
+    pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+        let preempt_guard = PreemptGuard::new_no_resched();
+        RwLockWriteGuard {
+            guard: ManuallyDrop::new(self.inner.write()),
+            _preempt_guard: preempt_guard,
+        }
+    }
+}
+
+pub struct RwLockReadGuard<'a, T: ?Sized + 'a> {
+    guard: ManuallyDrop<spin::RwLockReadGuard<'a, T>>,
+    _preempt_guard: PreemptGuard,
+}
+
+impl<T: ?Sized> core::ops::Deref for RwLockReadGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T: ?Sized> Drop for RwLockReadGuard<'_, T> {
+    fn drop(&mut self) {
+        // SAFETY: guard is dropped exactly once here before preemption is
+        // re-enabled by the following PreemptGuard field drop.
+        unsafe { ManuallyDrop::drop(&mut self.guard) };
+    }
+}
+
+pub struct RwLockWriteGuard<'a, T: ?Sized + 'a> {
+    guard: ManuallyDrop<spin::RwLockWriteGuard<'a, T>>,
+    _preempt_guard: PreemptGuard,
+}
+
+impl<T: ?Sized> core::ops::Deref for RwLockWriteGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T: ?Sized> core::ops::DerefMut for RwLockWriteGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
+    fn drop(&mut self) {
+        // SAFETY: guard is dropped exactly once here before preemption is
+        // re-enabled by the following PreemptGuard field drop.
+        unsafe { ManuallyDrop::drop(&mut self.guard) };
     }
 }
 

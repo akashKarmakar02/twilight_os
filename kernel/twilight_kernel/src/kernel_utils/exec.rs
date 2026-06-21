@@ -1,6 +1,6 @@
 use conquer_once::spin::OnceCell;
 use core::arch::asm;
-use spin::Mutex;
+use crate::utils::sync::Mutex;
 use x86_64::structures::paging::PageTable;
 
 pub static PREVIOUS_TABLE: OnceCell<Mutex<PageTable>> = OnceCell::uninit();

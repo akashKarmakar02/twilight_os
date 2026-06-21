@@ -1,5 +1,5 @@
 use crate::println;
-use crate::sys::proc::task::{task_spinup, Context};
+use crate::sys::proc::task::{Context, task_spinup};
 use core::arch::asm;
 
 static mut TASK_A_STACK: [u8; 4096] = [0; 4096];

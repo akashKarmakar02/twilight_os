@@ -1,5 +1,5 @@
 use alloc::collections::BTreeMap;
-use spin::RwLock;
+use crate::utils::sync::RwLock;
 
 static USER_KEYS: RwLock<BTreeMap<u32, [u8; 32]>> = RwLock::new(BTreeMap::new());
 
