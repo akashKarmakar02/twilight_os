@@ -20,8 +20,10 @@ impl<T> Mutex<T> {
 impl<T: ?Sized> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<T> {
         let preempt_guard = PreemptGuard::new_no_resched();
+        let guard = self.inner.lock();
+        crate::sys::preempt::lock_count_inc();
         MutexGuard {
-            guard: ManuallyDrop::new(self.inner.lock()),
+            guard: ManuallyDrop::new(guard),
             irq_lock: false,
             _preempt_guard: preempt_guard,
         }
@@ -32,9 +34,11 @@ impl<T: ?Sized> Mutex<T> {
 
         interrupts::disable();
         let preempt_guard = PreemptGuard::new_no_resched();
+        let guard = self.inner.lock();
+        crate::sys::preempt::lock_count_inc();
 
         MutexGuard {
-            guard: ManuallyDrop::new(self.inner.lock()),
+            guard: ManuallyDrop::new(guard),
             irq_lock,
             _preempt_guard: preempt_guard,
         }
@@ -74,6 +78,7 @@ impl<T: ?Sized> Drop for MutexGuard<'_, T> {
         unsafe {
             ManuallyDrop::drop(&mut self.guard);
         }
+        crate::sys::preempt::lock_count_dec();
 
         if self.irq_lock {
             interrupts::enable();
@@ -101,16 +106,20 @@ impl<T> RwLock<T> {
 impl<T: ?Sized> RwLock<T> {
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         let preempt_guard = PreemptGuard::new_no_resched();
+        let guard = self.inner.read();
+        crate::sys::preempt::lock_count_inc();
         RwLockReadGuard {
-            guard: ManuallyDrop::new(self.inner.read()),
+            guard: ManuallyDrop::new(guard),
             _preempt_guard: preempt_guard,
         }
     }
 
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
         let preempt_guard = PreemptGuard::new_no_resched();
+        let guard = self.inner.write();
+        crate::sys::preempt::lock_count_inc();
         RwLockWriteGuard {
-            guard: ManuallyDrop::new(self.inner.write()),
+            guard: ManuallyDrop::new(guard),
             _preempt_guard: preempt_guard,
         }
     }
@@ -134,6 +143,7 @@ impl<T: ?Sized> Drop for RwLockReadGuard<'_, T> {
         // SAFETY: guard is dropped exactly once here before preemption is
         // re-enabled by the following PreemptGuard field drop.
         unsafe { ManuallyDrop::drop(&mut self.guard) };
+        crate::sys::preempt::lock_count_dec();
     }
 }
 
@@ -161,6 +171,7 @@ impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
         // SAFETY: guard is dropped exactly once here before preemption is
         // re-enabled by the following PreemptGuard field drop.
         unsafe { ManuallyDrop::drop(&mut self.guard) };
+        crate::sys::preempt::lock_count_dec();
     }
 }
 

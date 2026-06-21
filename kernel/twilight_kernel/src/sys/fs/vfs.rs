@@ -364,6 +364,7 @@ impl Vfs {
     }
 
     pub fn rmdir(&self, path: &str) -> Result<(), ()> {
+        let _vfs_guard = crate::sys::preempt::enter_vfs_context();
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
         guard.rmdir(rel)
@@ -420,6 +421,7 @@ impl Vfs {
     }
 
     pub fn get_attr(&self, path: &str, attr: u32) -> Result<u32, ()> {
+        let _vfs_guard = crate::sys::preempt::enter_vfs_context();
         let (rel, fs) = self.route(path).ok_or(())?;
         let mut guard = fs.lock();
         guard.get_attr(rel, attr)

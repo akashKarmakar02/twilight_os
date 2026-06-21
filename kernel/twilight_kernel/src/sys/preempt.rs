@@ -21,9 +21,54 @@ static IN_SCHEDULER: AtomicBool = AtomicBool::new(false);
 
 static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
 
+// --- Kernel-preemption context trackers -----------------------------------
+//
+// These counters are only incremented when `ENABLE_KERNEL_PREEMPTION` is true
+// (a compile-time const). When the flag is false the compiler eliminates every
+// increment/decrement, so existing behavior is preserved with zero overhead.
+//
+// Each counter is a depth (not a boolean) so that nested entry is balanced.
+// `can_preempt_kernel()` requires every counter to be zero before scheduling
+// from a kernel-mode timer interrupt.
+
+/// Number of kernel locks (Mutex/RwLock) currently held on this CPU.
+static HELD_LOCK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Non-zero while inside a fault/exception handler (page fault, double fault).
+static FAULT_CONTEXT: AtomicUsize = AtomicUsize::new(0);
+
+/// Non-zero while inside the heap allocator (alloc/dealloc).
+static ALLOCATOR_CONTEXT: AtomicUsize = AtomicUsize::new(0);
+
+/// Non-zero while mutating the process table or per-process fd/signal state.
+static PROCESS_TABLE_CONTEXT: AtomicUsize = AtomicUsize::new(0);
+
+/// Non-zero while inside a VFS operation critical section.
+static VFS_CONTEXT: AtomicUsize = AtomicUsize::new(0);
+
+/// Non-zero while mapping/unmapping/updating page-table entries.
+static PAGETABLE_CONTEXT: AtomicUsize = AtomicUsize::new(0);
+
 // Enable temporarily when diagnosing deferred scheduling. Keeping this false
 // avoids printing on every timer tick in normal builds.
 const PREEMPT_DEBUG: bool = false;
+
+/// Experimental kernel-mode timer preemption. **Disabled by default.**
+///
+/// When `false` (the default), timer interrupts schedule only when returning
+/// to userspace (`from_user != 0`). Kernel-mode timer ticks set `need_resched`
+/// and return; the reschedule is honored later at an explicit `cond_resched()`
+/// safe point. This preserves the existing, known-safe behavior exactly.
+///
+/// When `true`, the timer path may additionally call `schedule_now()` from
+/// kernel mode, but only if [`can_preempt_kernel()`] confirms that every safety
+/// condition is satisfied. This is experimental and may destabilize the kernel.
+pub const ENABLE_KERNEL_PREEMPTION: bool = false;
+
+/// Controls per-tick skip/allow logging for the kernel preemption path.
+/// Keeping this false avoids flooding the serial console on every kernel timer
+/// tick. Enable when diagnosing kernel preemption behavior.
+const KPREEMPT_DEBUG: bool = false;
 
 #[inline]
 pub fn preempt_disable() {
@@ -161,6 +206,244 @@ pub fn need_resched() -> bool {
 #[inline]
 pub fn in_scheduler() -> bool {
     IN_SCHEDULER.load(Ordering::SeqCst)
+}
+
+// --- Lock counting --------------------------------------------------------
+
+#[inline]
+pub fn lock_count_inc() {
+    if ENABLE_KERNEL_PREEMPTION {
+        HELD_LOCK_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[inline]
+pub fn lock_count_dec() {
+    if ENABLE_KERNEL_PREEMPTION {
+        decrement(&HELD_LOCK_COUNT, "held_lock_count");
+    }
+}
+
+#[inline]
+pub fn held_lock_count() -> usize {
+    HELD_LOCK_COUNT.load(Ordering::SeqCst)
+}
+
+#[inline]
+pub fn locks_held() -> bool {
+    held_lock_count() != 0
+}
+
+// --- Context guards -------------------------------------------------------
+
+/// RAII guard that increments a context counter on creation and decrements it
+/// on drop. When `ENABLE_KERNEL_PREEMPTION` is false the increment/decrement
+/// are compile-time eliminated, so the guard is zero-cost.
+#[must_use = "dropping the guard exits the context"]
+pub struct ContextGuard {
+    counter: &'static AtomicUsize,
+    name: &'static str,
+    active: bool,
+}
+
+impl ContextGuard {
+    fn enter(counter: &'static AtomicUsize, name: &'static str) -> Self {
+        if ENABLE_KERNEL_PREEMPTION {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+        Self {
+            counter,
+            name,
+            active: true,
+        }
+    }
+}
+
+impl Drop for ContextGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            if ENABLE_KERNEL_PREEMPTION {
+                decrement(self.counter, self.name);
+            }
+        }
+    }
+}
+
+pub fn enter_fault_context() -> ContextGuard {
+    ContextGuard::enter(&FAULT_CONTEXT, "fault_context")
+}
+
+pub fn enter_allocator_context() -> ContextGuard {
+    ContextGuard::enter(&ALLOCATOR_CONTEXT, "allocator_context")
+}
+
+pub fn enter_process_table_context() -> ContextGuard {
+    ContextGuard::enter(&PROCESS_TABLE_CONTEXT, "process_table_context")
+}
+
+pub fn enter_vfs_context() -> ContextGuard {
+    ContextGuard::enter(&VFS_CONTEXT, "vfs_context")
+}
+
+pub fn enter_pagetable_context() -> ContextGuard {
+    ContextGuard::enter(&PAGETABLE_CONTEXT, "pagetable_context")
+}
+
+#[inline]
+pub fn in_fault_context() -> bool {
+    FAULT_CONTEXT.load(Ordering::SeqCst) != 0
+}
+
+#[inline]
+pub fn in_allocator_context() -> bool {
+    ALLOCATOR_CONTEXT.load(Ordering::SeqCst) != 0
+}
+
+#[inline]
+pub fn in_process_table_context() -> bool {
+    PROCESS_TABLE_CONTEXT.load(Ordering::SeqCst) != 0
+}
+
+#[inline]
+pub fn in_vfs_context() -> bool {
+    VFS_CONTEXT.load(Ordering::SeqCst) != 0
+}
+
+#[inline]
+pub fn in_pagetable_context() -> bool {
+    PAGETABLE_CONTEXT.load(Ordering::SeqCst) != 0
+}
+
+// --- Kernel preemption predicate -----------------------------------------
+
+/// Returns `true` only if kernel-mode timer preemption is safe right now.
+///
+/// Every condition is checked in order; the first failure is logged (when
+/// `KPREEMPT_DEBUG` is enabled) and the function returns `false`. When
+/// uncertain the function returns `false` — it is always safer to skip
+/// kernel preemption than to crash.
+///
+/// # Safety conditions
+///
+/// * `ENABLE_KERNEL_PREEMPTION` is `true`
+/// * `need_resched` is set
+/// * `preempt_count == 0` (no preempt-disabled critical sections)
+/// * `irq_depth == 0` (not nested inside another interrupt — `irq_exit` has
+///   already been called before `timer_preempt_common` runs)
+/// * not already inside the scheduler
+/// * no kernel locks held
+/// * not inside a fault handler
+/// * not inside the allocator
+/// * not inside process-table/fd/signal mutation
+/// * not inside a VFS critical section
+/// * not inside page-table map/unmap/update code
+pub fn can_preempt_kernel() -> bool {
+    if !ENABLE_KERNEL_PREEMPTION {
+        return false;
+    }
+    if !need_resched() {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: need_resched=false");
+        }
+        return false;
+    }
+    if preempt_count() != 0 {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: preempt_count={}", preempt_count());
+        }
+        return false;
+    }
+    // irq_depth == 0 means we are not nested inside another interrupt.
+    // (irq_exit() is called before timer_preempt_common, so the current
+    // timer's own depth has already been decremented.)
+    if irq_depth() != 0 {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: irq_depth={}", irq_depth());
+        }
+        return false;
+    }
+    if in_scheduler() {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: in_scheduler=true");
+        }
+        return false;
+    }
+    if locks_held() {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: locks_held={}", held_lock_count());
+        }
+        return false;
+    }
+    if in_fault_context() {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: in_fault_context=true");
+        }
+        return false;
+    }
+    if in_allocator_context() {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: in_allocator_context=true");
+        }
+        return false;
+    }
+    if in_process_table_context() {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: in_process_table_context=true");
+        }
+        return false;
+    }
+    if in_vfs_context() {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: in_vfs_context=true");
+        }
+        return false;
+    }
+    if in_pagetable_context() {
+        if KPREEMPT_DEBUG {
+            crate::serial_println!("[kpreempt] skip: in_pagetable_context=true");
+        }
+        return false;
+    }
+    true
+}
+
+/// Log serial warnings if `schedule_now()` is called from an unsafe context.
+///
+/// These are diagnostic only — they do not block scheduling. The hard safety
+/// gate for kernel-mode preemption is [`can_preempt_kernel()`]. The
+/// [`SchedulerGuard`] already prevents reentrant scheduling and scheduling
+/// with `preempt_count > 0`. These warnings catch the remaining cases (locks
+/// held via non-`PreemptGuard` spinlocks, or raw context counters non-zero)
+/// that indicate a bug.
+pub fn warn_if_schedule_unsafe() {
+    if irq_depth() != 0 {
+        crate::serial_println!(
+            "[sched] WARNING: schedule_now with irq_depth={}",
+            irq_depth()
+        );
+    }
+    if locks_held() {
+        crate::serial_println!(
+            "[sched] WARNING: schedule_now while locks_held={}",
+            held_lock_count()
+        );
+    }
+    if in_fault_context() {
+        crate::serial_println!("[sched] WARNING: schedule_now inside fault context");
+    }
+    if in_allocator_context() {
+        crate::serial_println!("[sched] WARNING: schedule_now inside allocator context");
+    }
+    if in_process_table_context() {
+        crate::serial_println!("[sched] WARNING: schedule_now inside process-table context");
+    }
+    if in_vfs_context() {
+        crate::serial_println!("[sched] WARNING: schedule_now inside VFS context");
+    }
+    if in_pagetable_context() {
+        crate::serial_println!("[sched] WARNING: schedule_now inside pagetable context");
+    }
 }
 
 #[inline]

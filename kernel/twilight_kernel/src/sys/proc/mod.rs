@@ -544,6 +544,7 @@ impl Process {
     }
 
     pub fn dequeue_signal(&mut self, sig: usize) {
+        let _pt_guard = crate::sys::preempt::enter_process_table_context();
         if (1..=64).contains(&sig) {
             self.pending_signals &= !signal_bit(sig);
         }
@@ -1550,6 +1551,10 @@ pub fn maybe_schedule() {
 }
 
 pub fn schedule_now() -> bool {
+    // Diagnostic warnings for unsafe scheduling contexts. Does not block;
+    // SchedulerGuard below handles the hard checks (in_scheduler, preempt_count).
+    crate::sys::preempt::warn_if_schedule_unsafe();
+
     let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
         return false;
     };
@@ -1890,11 +1895,35 @@ fn switch_by_index_guarded(
 }
 
 fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
-    // Phase 1 intentionally preserves the known-safe user interrupt path.
-    // Kernel-mode ticks only leave need_resched set for a later safe point.
+    // need_resched is already set by on_timer_tick() (called via pit_tick_isr
+    // before this function). The logic below decides whether to act on it now.
+
+    // Existing safe path: interrupted userspace → schedule immediately.
     if from_user != 0 {
         schedule_now();
+        return frame;
     }
+
+    // Experimental kernel-mode preemption. Disabled unless the compile-time
+    // flag is set. When enabled, schedule only if every safety condition in
+    // can_preempt_kernel() is satisfied.
+    if crate::sys::preempt::ENABLE_KERNEL_PREEMPTION {
+        if crate::sys::preempt::can_preempt_kernel() {
+            let rip = unsafe { (*frame).rip };
+            let rsp = unsafe { (*frame).rsp };
+            crate::serial_println!(
+                "[kpreempt] allow: pid={} rip={:#x} rsp={:#x}",
+                id(),
+                rip,
+                rsp,
+            );
+            schedule_now();
+        }
+        // When can_preempt_kernel() returns false it has already logged the
+        // skip reason (gated by KPREEMPT_DEBUG). need_resched remains set and
+        // will be honored at the next cond_resched() safe point.
+    }
+
     frame
 }
 

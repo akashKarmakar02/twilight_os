@@ -100,6 +100,7 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame, err: u64) -> ! {
+    let _fault_guard = crate::sys::preempt::enter_fault_context();
     if from_user(&stack_frame) {
         println!(
             "[PROC {}] Segment Fault at RIP={:#x}. Killing.",
@@ -199,6 +200,7 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    let _fault_guard = crate::sys::preempt::enter_fault_context();
     let fault_addr = Cr2::read_raw();
     let can_resolve = !error_code.intersects(
         PageFaultErrorCode::PROTECTION_VIOLATION

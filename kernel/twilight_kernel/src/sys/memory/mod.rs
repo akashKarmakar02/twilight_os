@@ -186,6 +186,7 @@ pub fn map_user_frame(
     frame: PhysFrame<Size4KiB>,
     flags: PageTableFlags,
 ) -> Result<(), ()> {
+    let _pt_guard = crate::sys::preempt::enter_pagetable_context();
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(addr));
     with_frame_allocator(|frame_allocator| {
         // SAFETY: `frame` is exclusively owned by the caller, `page` is a

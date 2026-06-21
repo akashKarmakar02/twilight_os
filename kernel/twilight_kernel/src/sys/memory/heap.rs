@@ -28,12 +28,14 @@ impl PreemptSafeHeap {
 unsafe impl GlobalAlloc for PreemptSafeHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _preempt_guard = PreemptGuard::new_no_resched();
+        let _alloc_guard = crate::sys::preempt::enter_allocator_context();
         // SAFETY: forwarded with the exact layout supplied by GlobalAlloc.
         unsafe { GlobalAlloc::alloc(&self.inner, layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let _preempt_guard = PreemptGuard::new_no_resched();
+        let _alloc_guard = crate::sys::preempt::enter_allocator_context();
         // SAFETY: ptr/layout are forwarded unchanged to the allocator that
         // produced the allocation.
         unsafe { GlobalAlloc::dealloc(&self.inner, ptr, layout) };
