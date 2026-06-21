@@ -83,6 +83,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_BRK => memory::brk(arg1 as usize),
         SYS_DUP => service::dup(arg1 as i32),
         SYS_DUP2 => service::dup2(arg1 as i32, arg2 as i32),
+        SYS_DUP3 => service::dup3(arg1 as i32, arg2 as i32, arg3 as i32),
         SYS_IOCTL => {
             service::ioctl(arg1 as usize, arg2 as usize, arg3 as usize)
             // 0
@@ -102,6 +103,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_SETPGID => service::setpgid(arg1 as i32, arg2 as i32),
         SYS_GETPPID => service::getppid(),
         SYS_GETPGRP => service::getpgrp(),
+        SYS_SETSID => service::setsid(),
         SYS_GETPGID => service::getpgid(arg1 as i32),
         SYS_GETSID => service::getsid(arg1 as i32),
         SYS_STATFS => service::statfs(arg1 as usize, arg2 as usize),

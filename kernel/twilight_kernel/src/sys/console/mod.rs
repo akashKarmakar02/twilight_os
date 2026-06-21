@@ -37,10 +37,16 @@ pub fn put_char_in_tty(c: u8) {
 pub fn init_console() {
     #[allow(static_mut_refs)]
     let fs = unsafe { VFS.get_mut() };
-    if let Ok(node) = fs.open("/bin/init") {
+    let init = fs
+        .open("/sbin/twinit")
+        .map(|node| (node, "/sbin/twinit"))
+        .or_else(|_| fs.open("/bin/twinit").map(|node| (node, "/bin/twinit")))
+        .or_else(|_| fs.open("/bin/init").map(|node| (node, "/bin/init")));
+
+    if let Ok((node, path)) = init {
         #[allow(static_mut_refs)]
         let process_table = unsafe { PROCESS_TABLE.get_mut_unchecked() };
 
-        process_table.run(Process::new(node, "/bin/init", "/", &[], 0).unwrap());
+        process_table.run(Process::new(node, path, "/", &[path], 0).unwrap());
     }
 }

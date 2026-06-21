@@ -1,4 +1,4 @@
-BIN := twinit
+BIN := twilogctl
 RUST_TARGET ?= x86_64-unknown-linux-musl
 RUSTFLAGS ?= -C relocation-model=static -C link-arg=-no-pie
 RUST_SOURCES := $(shell find src -type f -name '*.rs')

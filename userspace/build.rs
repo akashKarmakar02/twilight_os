@@ -140,8 +140,41 @@ fn main() -> io::Result<()> {
     // Build standalone vi submodule at userspace/vi and install as /bin/vi.
     // This runs after apps/ to ensure the submodule binary wins if both exist.
     build_vi_submodule(out_bin_dir)?;
+    install_sbin_aliases(out_bin_dir)?;
 
     println!("\nAll done.");
+    Ok(())
+}
+
+fn install_sbin_aliases(out_bin_dir: &Path) -> io::Result<()> {
+    let Some(rootfs_dir) = out_bin_dir.parent() else {
+        return Ok(());
+    };
+    let sbin_dir = rootfs_dir.join("sbin");
+    fs::create_dir_all(&sbin_dir)?;
+
+    for name in [
+        "twinit",
+        "twinitctl",
+        "twilogd",
+        "twilogctl",
+        "test_service",
+    ] {
+        let source = out_bin_dir.join(name);
+        if !source.is_file() {
+            continue;
+        }
+        let destination = sbin_dir.join(name);
+        println!(
+            "Installing {} -> {}",
+            source.display(),
+            destination.display()
+        );
+        fs::copy(&source, &destination)?;
+        let mut permissions = fs::metadata(&destination)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(destination, permissions)?;
+    }
     Ok(())
 }
 
@@ -206,7 +239,6 @@ fn build_rust(path: &Path) -> io::Result<()> {
         .spawn()?;
 
     s.wait()?;
-
 
     Ok(())
 }
@@ -461,9 +493,7 @@ fn build_vi_submodule(out_bin_dir: &Path) -> io::Result<()> {
     }
 
     if !(vi_dir.join("Makefile").exists() || vi_dir.join("makefile").exists()) {
-        println!(
-            "userspace/vi exists but has no Makefile; skipping standalone vi build"
-        );
+        println!("userspace/vi exists but has no Makefile; skipping standalone vi build");
         return Ok(());
     }
 

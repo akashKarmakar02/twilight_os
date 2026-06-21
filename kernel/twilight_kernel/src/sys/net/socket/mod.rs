@@ -203,7 +203,16 @@ impl SocketFile {
         nonblock: bool,
     ) -> Result<(usize, UnixAddr), i32> {
         match self {
-            SocketFile::Unix(s) => s.recv_from(buf, nonblock),
+            SocketFile::Unix(s) => match s.sock_type() {
+                unix::SockType::Stream => {
+                    let n = s.read(buf, nonblock)?;
+                    let peer = s.remote_endpoint().unwrap_or(UnixAddr {
+                        path: alloc::string::String::new(),
+                    });
+                    Ok((n, peer))
+                }
+                unix::SockType::Dgram => s.recv_from(buf, nonblock),
+            },
             _ => Err(twilight_common::syscall::types::EOPNOTSUPP),
         }
     }

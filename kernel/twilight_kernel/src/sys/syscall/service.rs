@@ -160,6 +160,9 @@ fn fill_statfs(out: &mut StatFs, stats: sys::fs::vfs::FsStats) {
 
 const FD_CLOEXEC: i32 = 0x1;
 const STATUS_FLAG_MUTABLE: i32 = O_APPEND | O_NONBLOCK;
+// Linux asm-generic FIONBIO. The argument points to an int: nonzero enables
+// O_NONBLOCK and zero disables it on the open file description.
+const FIONBIO: usize = 0x5421;
 
 #[inline]
 fn random_ephemeral_port() -> u16 {
@@ -556,6 +559,46 @@ pub fn dup(oldfd: i32) -> i64 {
     match duplicate_fd(process, oldfd, 0, 0) {
         Ok(newfd) => newfd as i64,
         Err(code) => code as i64,
+    }
+}
+
+pub fn dup3(oldfd: i32, newfd: i32, flags: i32) -> i64 {
+    if oldfd < 0 || newfd < 0 {
+        return -(EBADF as i64);
+    }
+    if oldfd == newfd || flags & !O_CLOEXEC != 0 {
+        return -(EINVAL as i64);
+    }
+
+    #[allow(static_mut_refs)]
+    let process = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = process else {
+        return -(ESRCH as i64);
+    };
+
+    let file = match fd_slot(process, oldfd) {
+        Ok(entry) => entry.file.clone(),
+        Err(code) => return code as i64,
+    };
+    let entry = FdEntry {
+        file,
+        fd_flags: if flags & O_CLOEXEC != 0 {
+            FD_CLOEXEC
+        } else {
+            0
+        },
+    };
+    match process.replace_fd(newfd, entry) {
+        Ok(replaced) => {
+            drop(replaced);
+            newfd as i64
+        }
+        Err(errno) => -(errno as i64),
     }
 }
 
@@ -1256,8 +1299,12 @@ pub fn clone(
 
 pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i64 {
     let current_pid = crate::sys::proc::id();
-    let wnohang = 1;
-    let wuntraced = 2;
+    const WNOHANG: i32 = 1;
+    const WUNTRACED: i32 = 2;
+    const WCONTINUED: i32 = 8;
+    if options & !(WNOHANG | WUNTRACED | WCONTINUED) != 0 {
+        return -(EINVAL as i64);
+    }
     crate::serial_println!(
         "[wait4] pid={} target={} options={:#x}",
         current_pid,
@@ -1279,15 +1326,27 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
             // Since we might remove it, we collect index first.
             let mut remove_idx = None;
 
+            let current_pgid = table
+                .proc_list
+                .iter()
+                .find(|p| p.pid == current_pid)
+                .map(|p| p.pgid)
+                .unwrap_or(current_pid);
             for (i, p) in table.proc_list.iter().enumerate() {
                 if !p.is_thread && p.parent_pid == current_pid {
-                    if pid == -1 || p.pid as i32 == pid {
+                    let selected = match pid {
+                        -1 => true,
+                        0 => p.pgid == current_pgid,
+                        n if n > 0 => p.pid as i32 == n,
+                        n => n.checked_neg().is_some_and(|pgid| p.pgid as i32 == pgid),
+                    };
+                    if selected {
                         has_children = true;
                         if matches!(p.state, crate::sys::proc::ProcessState::Dead) {
                             remove_idx = Some(i);
                             wait_status = p.wait_status;
                             break;
-                        } else if (options & wuntraced) != 0
+                        } else if (options & WUNTRACED) != 0
                             && matches!(p.state, crate::sys::proc::ProcessState::Stopped)
                             && !p.wait_reported
                         {
@@ -1314,7 +1373,6 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
                         p.wait_status,
                     );
                     p.cleanup(table_frame);
-                    core::mem::forget(p);
                 }
             } else if let Some(idx) = stopped_pid {
                 if let Some(p) = table.proc_list.get_mut(idx) {
@@ -1335,7 +1393,7 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
             return rpid as i64;
         }
 
-        if (options & wnohang) != 0 {
+        if (options & WNOHANG) != 0 {
             return 0;
         }
 
@@ -2743,6 +2801,24 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
     };
 
     let mut file = file_ref.lock();
+
+    if matches!(&file.kind, OpenFileKind::Socket(_)) && cmd == FIONBIO {
+        if arg == 0 {
+            return -(EFAULT as i64);
+        }
+
+        // SAFETY: FIONBIO's Linux ABI requires `arg` to point to a readable
+        // userspace int. Twilight currently accesses syscall user pointers
+        // directly, as do the other pointer-taking syscalls in this module.
+        let enabled = unsafe { core::ptr::read_unaligned(arg as *const i32) } != 0;
+        if enabled {
+            file.status_flags |= O_NONBLOCK;
+        } else {
+            file.status_flags &= !O_NONBLOCK;
+        }
+        return 0;
+    }
+
     match &mut file.kind {
         OpenFileKind::Vfs(node_ref) => node_ref
             .lock()
@@ -3483,6 +3559,7 @@ pub fn bind(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
     let Some(process) = proc_opt else {
         return -(ESRCH as i64);
     };
+    let process_pwd = process.pwd.clone();
     let file_ref = match clone_open_file(process, fd) {
         Ok(f) => f,
         Err(code) => return code as i64,
@@ -3493,29 +3570,39 @@ pub fn bind(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
     };
 
     if family == AF_UNIX {
-        let addr = match parse_sockaddr_un(addr_ptr, addr_len) {
+        let mut addr = match parse_sockaddr_un(addr_ptr, addr_len) {
             Ok(a) => a,
             Err(e) => return -(e as i64),
         };
-        match sock.bind_unix(addr) {
-            Ok(()) => {
-                let path = match &sock {
-                    SocketFile::Unix(usock) => {
-                        usock.local_endpoint().map(|a| a.path)
-                    }
-                    _ => None,
-                };
-                if let Some(path) = path {
-                    let (parent, name) = split_parent_name(&path);
-                    #[allow(static_mut_refs)]
-                    match unsafe { VFS.get_mut().touch(parent, name, 0o140777) } {
-                        Ok(()) => {}
-                        Err(_) => {}
-                    }
-                }
-                0
+        addr.path = if addr.path.starts_with('/') {
+            normalize_path(&addr.path)
+        } else {
+            normalize_path(&join_paths(&process_pwd, &addr.path))
+        };
+
+        let (parent, name) = split_parent_name(&addr.path);
+        #[allow(static_mut_refs)]
+        let fs = unsafe { VFS.get_mut() };
+        let parent_metadata = match fs.metadata(parent) {
+            Ok(metadata) => metadata,
+            Err(_) => return -(ENOENT as i64),
+        };
+        if parent_metadata.file_type != FileType::Dir {
+            return -(ENOTDIR as i64);
+        }
+        if fs.metadata(&addr.path).is_ok() {
+            return -(EADDRINUSE as i64);
+        }
+        if fs.touch(parent, name, 0o140777).is_err() {
+            return -(EACCES as i64);
+        }
+
+        match sock.bind_unix(addr.clone()) {
+            Ok(()) => 0,
+            Err(e) => {
+                let _ = fs.rm(&addr.path);
+                -(e as i64)
             }
-            Err(e) => -(e as i64),
         }
     } else {
         let ep = match parse_sockaddr_in(addr_ptr, addr_len) {
@@ -4374,13 +4461,20 @@ pub fn kill(pid: i32, sig: i32) -> i64 {
     }
 
     let mut parents_to_notify = Vec::new();
+    let mut dead_targets = Vec::new();
     let slice = table.proc_list.make_contiguous();
     for target in targets {
         if let Some(process) = slice.iter_mut().find(|p| p.pid == target) {
             if let Some(parent_pid) = apply_signal_to_process(process, sig as usize) {
                 parents_to_notify.push(parent_pid);
+                if matches!(process.state, crate::sys::proc::ProcessState::Dead) {
+                    dead_targets.push(target);
+                }
             }
         }
+    }
+    for target in dead_targets {
+        crate::sys::proc::reparent_children(slice, target);
     }
     for parent_pid in parents_to_notify {
         notify_parent_for_child_event(slice, parent_pid);
@@ -4416,7 +4510,7 @@ pub fn getpgrp() -> i64 {
 
 pub fn getpgid(pid: i32) -> i64 {
     if pid < 0 || pid > u16::MAX as i32 {
-        return -(EINVAL as i64);
+        return -(ESRCH as i64);
     }
 
     let target_pid = if pid == 0 {
@@ -4444,18 +4538,57 @@ pub fn setpgid(pid: i32, pgid: i32) -> i64 {
 
     #[allow(static_mut_refs)]
     let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-    match table.proc_list.iter_mut().find(|p| p.pid == target_pid) {
-        Some(process) => {
-            process.pgid = new_pgid;
-            0
-        }
-        None => -(ESRCH as i64),
+    let Some(current) = table.proc_list.iter().find(|p| p.pid == current_pid) else {
+        return -(ESRCH as i64);
+    };
+    let current_sid = current.sid;
+    let target = table.proc_list.iter().find(|p| p.pid == target_pid);
+    let Some(target) = target else {
+        return -(ESRCH as i64);
+    };
+    if target_pid != current_pid && target.parent_pid != current_pid {
+        return -(ESRCH as i64);
     }
+    if target.sid != current_sid || target.pid == target.sid {
+        return -(EPERM as i64);
+    }
+    if new_pgid != target_pid
+        && !table
+            .proc_list
+            .iter()
+            .any(|p| p.pgid == new_pgid && p.sid == current_sid)
+    {
+        return -(EPERM as i64);
+    }
+
+    table
+        .proc_list
+        .iter_mut()
+        .find(|p| p.pid == target_pid)
+        .expect("setpgid target disappeared")
+        .pgid = new_pgid;
+    0
+}
+
+pub fn setsid() -> i64 {
+    let current_pid = crate::sys::proc::id();
+    #[allow(static_mut_refs)]
+    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+
+    if table.proc_list.iter().any(|p| p.pgid == current_pid) {
+        return -(EPERM as i64);
+    }
+    let Some(process) = table.proc_list.iter_mut().find(|p| p.pid == current_pid) else {
+        return -(ESRCH as i64);
+    };
+    process.sid = current_pid;
+    process.pgid = current_pid;
+    current_pid as i64
 }
 
 pub fn getsid(pid: i32) -> i64 {
     if pid < 0 || pid > u16::MAX as i32 {
-        return -(EINVAL as i64);
+        return -(ESRCH as i64);
     }
 
     let target_pid = if pid == 0 {
