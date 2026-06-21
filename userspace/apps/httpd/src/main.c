@@ -2,11 +2,13 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 static const char *k_root_default = "/var/www";
@@ -33,6 +35,45 @@ static void write_all(int fd, const void *buf, size_t len) {
     p += (size_t)n;
     len -= (size_t)n;
   }
+}
+
+static void log_err(const char *fmt, ...) {
+  char buf[512];
+  int pos = 0;
+
+  time_t now = time(NULL);
+  if (now != (time_t)-1)
+    pos = snprintf(buf, sizeof(buf), "[%lld] ", (long long)now);
+
+  va_list args;
+  va_start(args, fmt);
+  int n = vsnprintf(buf + pos, sizeof(buf) - pos, fmt, args);
+  va_end(args);
+  if (n > 0)
+    pos += n;
+  if (pos >= (int)sizeof(buf))
+    pos = (int)sizeof(buf) - 1;
+  buf[pos++] = '\n';
+
+  write_all(2, buf, (size_t)pos);
+}
+
+static void log_access(int status, const char *method, const char *path) {
+  char buf[384];
+  int pos = 0;
+
+  time_t now = time(NULL);
+  if (now != (time_t)-1)
+    pos = snprintf(buf, sizeof(buf), "[%lld] ", (long long)now);
+
+  int n = snprintf(buf + pos, sizeof(buf) - pos, "%d %s %s", status, method, path);
+  if (n > 0)
+    pos += n;
+  if (pos >= (int)sizeof(buf))
+    pos = (int)sizeof(buf) - 1;
+  buf[pos++] = '\n';
+
+  write_all(1, buf, (size_t)pos);
 }
 
 static void send_simple(int fd, int code, const char *reason,
@@ -162,6 +203,9 @@ static void try_send_404(int cfd, const char *k_root) {
 }
 
 static void handle_client(int cfd, const char *k_root) {
+  int status = 200;
+  char method[16] = {0};
+  char path[1024] = {0};
   char req[4096];
   ssize_t n = read(cfd, req, sizeof(req) - 1);
   if (n <= 0)
@@ -174,36 +218,40 @@ static void handle_client(int cfd, const char *k_root) {
   if (!line_end) {
     send_simple(cfd, 400, "Bad Request", "text/plain; charset=utf-8",
                 "bad request\n");
-    return;
+    status = 400;
+    goto log;
   }
   *line_end = 0;
 
   // Parse: METHOD SP PATH SP VERSION
-  char method[16], path[1024], version[16];
-  method[0] = path[0] = version[0] = 0;
+  char version[16] = {0};
   if (sscanf(req, "%15s %1023s %15s", method, path, version) != 3) {
     send_simple(cfd, 400, "Bad Request", "text/plain; charset=utf-8",
                 "bad request\n");
-    return;
+    status = 400;
+    goto log;
   }
 
   if (strcmp(method, "GET") != 0) {
     send_simple(cfd, 405, "Method Not Allowed", "text/plain; charset=utf-8",
                 "only GET is supported\n");
-    return;
+    status = 405;
+    goto log;
   }
 
   if (!is_safe_path(path)) {
     send_simple(cfd, 404, "Not Found", "text/plain; charset=utf-8",
                 "not found\n");
-    return;
+    status = 404;
+    goto log;
   }
 
   char fs_path[1400];
   build_fs_path(fs_path, sizeof(fs_path), k_root, path);
   if (fs_path[0] == 0) {
     try_send_404(cfd, k_root);
-    return;
+    status = 404;
+    goto log;
   }
 
   const char *ctype = content_type_for_path(fs_path);
@@ -217,29 +265,34 @@ static void handle_client(int cfd, const char *k_root) {
     
     if (!ctype) {
         try_send_404(cfd, k_root);
-        return;
+        status = 404;
+        goto log;
     }
   }
 
   int test = open(fs_path, O_RDONLY);
   if (test < 0) {
     try_send_404(cfd, k_root);
-    return;
+    status = 404;
+    goto log;
   }
   close(test);
 
   send_file(cfd, 200, "OK", fs_path, ctype);
+
+log:
+  log_access(status, method, path);
 }
 
 int main(int argc, char const *argv[]) {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s < 0) {
-    const char *msg = "httpd: socket failed\n";
-    write_all(2, msg, strlen(msg));
+    log_err("httpd: socket failed");
     return 1;
   }
 
-  // Make accept non-blocking so we can exit on Ctrl+C without signals.
+  // Keep accept non-blocking so each readiness notification can be drained
+  // completely before returning to poll.
   int fl = fcntl(s, F_GETFL, 0);
   if (fl >= 0) {
     (void)fcntl(s, F_SETFL, fl | O_NONBLOCK);
@@ -258,67 +311,42 @@ int main(int argc, char const *argv[]) {
   int ret_val =  bind(s, (struct sockaddr *)&addr, sizeof(addr));
 
   if (ret_val != 0) {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "httpd: bind failed: %s\n", strerror(errno));
-    write_all(2, buf, strlen(buf));
+    log_err("httpd: bind: %s", strerror(errno));
     close(s);
     return 1;
   }
 
   if (listen(s, 16) != 0) {
-    const char *msg = "httpd: listen failed\n";
-    write_all(2, msg, strlen(msg));
+    log_err("httpd: listen failed");
     close(s);
     return 1;
   }
 
-  printf("%d\n", argc);
-  char *path;
+  const char *root;
   if (argc <= 1) {
-    path = k_root_default;
+    root = k_root_default;
   } else {
-    char *given_path = argv[1];
-    if (given_path[0] == "/") {
-      path = given_path;
-    } else if ((given_path[0] == "." && given_path[1] == "/") || (given_path[0] == ".")) {
-      char cwd_buf[512];
-      getcwd(cwd_buf, 512);
-      path = cwd_buf;
-    }
+    root = argv[1];
   }
+  uint16_t port = 80;
 
-  const char *ready = "httpd: serving /var/www on port 80\n";
-  write_all(1, ready, strlen(ready));
+  log_err("httpd: serving %s on port %u", root, port);
 
   for (;;) {
-    struct pollfd fds[2];
-    fds[0].fd = 0;
+    struct pollfd fds[1];
+    fds[0].fd = s;
     fds[0].events = POLLIN;
     fds[0].revents = 0;
-    fds[1].fd = s;
-    fds[1].events = POLLIN;
-    fds[1].revents = 0;
 
-    int pr = poll(fds, 2, -1);
+    int pr = poll(fds, 1, -1);
     if (pr < 0) {
       if (errno == EINTR)
         continue;
       continue;
     }
 
-    if (fds[0].revents & POLLIN) {
-      char c = 0;
-      ssize_t rn = read(0, &c, 1);
-      if (rn == 1 && (unsigned char)c == 0x03) {
-        const char *bye = "httpd: exiting\n";
-        write_all(1, bye, strlen(bye));
-        close(s);
-        return 0;
-      }
-    }
-
     // Drain all pending connections.
-    for (;;) {
+    while (fds[0].revents & POLLIN) {
       int cfd = accept(s, NULL, NULL);
       if (cfd < 0) {
         if (errno == EAGAIN || errno == EINTR)
@@ -333,7 +361,7 @@ int main(int argc, char const *argv[]) {
         (void)fcntl(cfd, F_SETFL, cfl & ~O_NONBLOCK);
       }
 
-      handle_client(cfd, path);
+      handle_client(cfd, root);
       close(cfd);
     }
   }
