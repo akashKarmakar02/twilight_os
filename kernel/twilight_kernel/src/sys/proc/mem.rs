@@ -1,5 +1,8 @@
 use crate::sys::fs::vfs::VfsNode;
+use crate::sys::fs::memfd::MemFd;
 use crate::sys::memory::{alloc_pages, dealloc_pages};
+use crate::utils::sync::Mutex;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use x86_64::structures::paging::OffsetPageTable;
 
@@ -73,12 +76,13 @@ pub enum MmapKind {
     Shared,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct MmapRegion {
     pub base: usize,
     pub len: usize,
     pub kind: MmapKind,
     pub permissions: VmPermissions,
+    pub memfd: Option<Arc<Mutex<MemFd>>>,
 }
 
 #[derive(Clone)]
@@ -178,6 +182,23 @@ impl ProcMM {
             len,
             kind,
             permissions,
+            memfd: None,
+        });
+    }
+
+    pub fn track_memfd_mmap(
+        &mut self,
+        base: usize,
+        len: usize,
+        permissions: VmPermissions,
+        memfd: Arc<Mutex<MemFd>>,
+    ) {
+        self.mmap_regions.push(MmapRegion {
+            base,
+            len,
+            kind: MmapKind::Shared,
+            permissions,
+            memfd: Some(memfd),
         });
     }
 
@@ -279,23 +300,20 @@ impl ProcMM {
                 continue;
             }
 
-            removed.push(MmapRegion {
-                base: overlap_start,
-                len: overlap_end - overlap_start,
-                ..region
-            });
+            let mut overlap = region.clone();
+            overlap.base = overlap_start;
+            overlap.len = overlap_end - overlap_start;
+            removed.push(overlap);
             if region.base < overlap_start {
-                kept.push(MmapRegion {
-                    len: overlap_start - region.base,
-                    ..region
-                });
+                let mut left = region.clone();
+                left.len = overlap_start - region.base;
+                kept.push(left);
             }
             if overlap_end < region_end {
-                kept.push(MmapRegion {
-                    base: overlap_end,
-                    len: region_end - overlap_end,
-                    ..region
-                });
+                let mut right = region;
+                right.base = overlap_end;
+                right.len = region_end - overlap_end;
+                kept.push(right);
             }
         }
         self.mmap_regions = kept;
@@ -364,7 +382,7 @@ fn protect_mmap_regions(
         return regions.to_vec();
     };
     let mut result = Vec::with_capacity(regions.len() + 2);
-    for &region in regions {
+    for region in regions.iter().cloned() {
         let region_end = region.base.saturating_add(region.len);
         let overlap_start = core::cmp::max(base, region.base);
         let overlap_end = core::cmp::min(end, region_end);
@@ -373,23 +391,20 @@ fn protect_mmap_regions(
             continue;
         }
         if region.base < overlap_start {
-            result.push(MmapRegion {
-                len: overlap_start - region.base,
-                ..region
-            });
+            let mut left = region.clone();
+            left.len = overlap_start - region.base;
+            result.push(left);
         }
-        result.push(MmapRegion {
-            base: overlap_start,
-            len: overlap_end - overlap_start,
-            permissions,
-            ..region
-        });
+        let mut middle = region.clone();
+        middle.base = overlap_start;
+        middle.len = overlap_end - overlap_start;
+        middle.permissions = permissions;
+        result.push(middle);
         if overlap_end < region_end {
-            result.push(MmapRegion {
-                base: overlap_end,
-                len: region_end - overlap_end,
-                ..region
-            });
+            let mut right = region;
+            right.base = overlap_end;
+            right.len = region_end - overlap_end;
+            result.push(right);
         }
     }
     result

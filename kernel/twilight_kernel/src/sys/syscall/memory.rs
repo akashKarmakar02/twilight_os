@@ -7,7 +7,7 @@ use crate::sys::memory::{
 };
 use crate::sys::proc::PROCESS_TABLE;
 use crate::sys::proc::mem::{MmapKind, PAGE, VmPermissions, align_up};
-use twilight_common::syscall::types::EIO;
+use twilight_common::syscall::types::{EIO, EOPNOTSUPP};
 
 pub use crate::sys::proc::mem::{PROT_EXEC, PROT_READ, PROT_WRITE};
 
@@ -137,10 +137,33 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
 
         let file_ref = entry.file.clone();
         let file = file_ref.lock();
+        if let crate::sys::proc::OpenFileKind::MemFd(memfd) = &file.kind {
+            if (flags & MAP_SHARED) == 0 {
+                return -(EOPNOTSUPP as i64);
+            }
+            let memfd = memfd.clone();
+            drop(file);
+            if let Err(errno) = memfd.lock().map_shared(
+                &mut process.mapper,
+                va,
+                len,
+                size,
+                prot,
+                offset as usize,
+            ) {
+                return -(errno as i64);
+            }
+            process
+                .proc_mm
+                .lock()
+                .track_memfd_mmap(va, len, permissions, memfd);
+            return va as i64;
+        }
         let mut node_guard = match &file.kind {
             crate::sys::proc::OpenFileKind::Vfs(node_ref) => node_ref.lock(),
             crate::sys::proc::OpenFileKind::Pipe(_) => return EINVAL,
             crate::sys::proc::OpenFileKind::Socket(_) => return EINVAL,
+            crate::sys::proc::OpenFileKind::MemFd(_) => unreachable!(),
         };
         if node_guard.metadata.file_type == crate::sys::fs::vfs::FileType::Dir {
             return EINVAL;
@@ -209,6 +232,16 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
         va
     );
     va as i64
+}
+
+pub fn msync(addr: u64, size: usize, _flags: i32) -> i64 {
+    if size == 0 {
+        return 0;
+    }
+    if (addr as usize) & (PAGE - 1) != 0 {
+        return EINVAL;
+    }
+    0
 }
 
 pub fn mprotect(addr: u64, size: usize, prot: usize) -> i64 {

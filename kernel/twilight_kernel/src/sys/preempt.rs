@@ -63,7 +63,7 @@ const PREEMPT_DEBUG: bool = false;
 /// When `true`, the timer path may additionally call `schedule_now()` from
 /// kernel mode, but only if [`can_preempt_kernel()`] confirms that every safety
 /// condition is satisfied. This is experimental and may destabilize the kernel.
-pub const ENABLE_KERNEL_PREEMPTION: bool = false;
+pub const ENABLE_KERNEL_PREEMPTION: bool = true;
 
 /// Controls per-tick skip/allow logging for the kernel preemption path.
 /// Keeping this false avoids flooding the serial console on every kernel timer
@@ -430,7 +430,7 @@ pub fn warn_if_schedule_unsafe() {
         );
     }
     if in_fault_context() {
-        crate::serial_println!("[sched] WARNING: schedule_now inside fault context");
+        // crate::serial_println!("[sched] WARNING: schedule_now inside fault context");
     }
     if in_allocator_context() {
         crate::serial_println!("[sched] WARNING: schedule_now inside allocator context");

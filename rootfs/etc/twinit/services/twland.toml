@@ -1,0 +1,10 @@
+name = "twland"
+description = "Twilight Wayland compositor"
+exec = "/bin/twland"
+args = []
+enabled = true
+runlevel = "default"
+restart = "always"
+type = "foreground"
+stdout = "log"
+stderr = "log"

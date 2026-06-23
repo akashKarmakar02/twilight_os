@@ -78,6 +78,7 @@ pub extern "sysv64" fn syscall_handler(
             arg5,
             arg6,
         ),
+        SYS_MSYNC => memory::msync(arg1, arg2 as usize, arg3 as i32),
         SYS_MPROTECT => memory::mprotect(arg1, arg2 as usize, arg3 as usize),
         SYS_MUNMAP => memory::munmap(arg1, arg2 as usize),
         SYS_BRK => memory::brk(arg1 as usize),
@@ -89,7 +90,7 @@ pub extern "sysv64" fn syscall_handler(
             // 0
         }
         SYS_FCNTL => service::fcntl(arg1 as i32, arg2 as i32, arg3),
-        SYS_FTRUNCATE => service::ftruncate(arg1 as i32, arg2 as u64),
+        SYS_FTRUNCATE => service::ftruncate(arg1 as i32, arg2 as i64),
         SYS_READV => service::readv(arg1 as usize, arg2, arg3),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
         SYS_PREADV => service::preadv(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
@@ -130,6 +131,11 @@ pub extern "sysv64" fn syscall_handler(
             arg5 as usize,
             arg6 as usize,
         ),
+        SYS_SENDMSG => service::sendmsg(arg1 as i32, arg2 as usize, arg3 as i32),
+        SYS_RECVMSG => service::recvmsg(arg1 as i32, arg2 as usize, arg3 as i32),
+        SYS_SOCKETPAIR => {
+            service::socketpair(arg1 as i32, arg2 as i32, arg3 as i32, arg4 as usize)
+        }
         SYS_SHUTDOWN => service::shutdown(arg1 as i32, arg2 as i32),
         SYS_SETSOCKOPT => service::setsockopt(
             arg1 as i32,
@@ -305,6 +311,7 @@ pub extern "sysv64" fn syscall_handler(
         }
         SYS_SET_ROBUST_LIST => service::set_robust_list(arg1 as usize, arg2 as usize),
         SYS_GETRANDOM => service::getrandom(arg1 as usize, arg2 as usize, arg3 as u32),
+        SYS_MEMFD_CREATE => service::memfd_create(arg1 as usize, arg2 as u32),
         SYS_RSEQ => service::rseq(arg1 as usize, arg2 as u32, arg3 as u32, arg4 as u32),
         SYS_REBOOT => {
             // Linux reboot magic numbers
@@ -357,14 +364,14 @@ pub extern "sysv64" fn syscall_handler(
     };
 
     if syscall_number != 271 {
-        serial_println!(
-            "[syscall] pid={} nr={} res={} rip={:#x} rsp={:#x}",
-            crate::sys::proc::id(),
-            syscall_number,
-            res,
-            _stack_frame.instruction_pointer.as_u64(),
-            _stack_frame.stack_pointer.as_u64(),
-        );
+        // serial_println!(
+        //     "[syscall] pid={} nr={} res={} rip={:#x} rsp={:#x}",
+        //     crate::sys::proc::id(),
+        //     syscall_number,
+        //     res,
+        //     _stack_frame.instruction_pointer.as_u64(),
+        //     _stack_frame.stack_pointer.as_u64(),
+        // );
     }
 
     if !restored_from_signal {
@@ -377,12 +384,12 @@ pub extern "sysv64" fn syscall_handler(
     crate::sys::preempt::cond_resched();
 
     if syscall_number == SYS_FORK || syscall_number == SYS_WAIT4 || syscall_number == SYS_EXECVE {
-        serial_println!(
-            "[syscall] pid={} nr={} return rax={:#x}",
-            crate::sys::proc::id(),
-            syscall_number,
-            regs.rax,
-        );
+        // serial_println!(
+        //     "[syscall] pid={} nr={} return rax={:#x}",
+        //     crate::sys::proc::id(),
+        //     syscall_number,
+        //     regs.rax,
+        // );
     }
 }
 

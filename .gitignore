@@ -5,6 +5,7 @@
 /.idea
 /.zig-cache
 /rootfs/bin
+/rootfs/sbin
 twilight_kernel/kernel
 kernel/twilight_kernel/kernel
 twilight-os.iso
