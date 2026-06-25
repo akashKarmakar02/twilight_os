@@ -157,6 +157,7 @@ mod tests {
             service_type: ServiceType::Foreground,
             stdout: OutputMode::Console,
             stderr: OutputMode::Console,
+            txpc: None,
         };
         let mut state = ServiceState::new(config);
         state.status = status;

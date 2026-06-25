@@ -1,0 +1,17 @@
+name = "txpc-echo"
+description = "TXPC bootstrap echo test service"
+exec = "/bin/txpc_echo_service"
+args = []
+enabled = false
+runlevel = "default"
+restart = "never"
+type = "foreground"
+stdout = "log"
+stderr = "log"
+
+[txpc]
+name = "dev.twilight.echo"
+on_demand = true
+
+[txpc.policy]
+allow_all = true
