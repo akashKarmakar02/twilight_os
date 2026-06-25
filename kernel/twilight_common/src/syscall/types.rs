@@ -94,6 +94,7 @@ pub const SOCK_DGRAM: i32 = 2;
 
 pub const SOL_SOCKET: i32 = 1;
 pub const SO_REUSEADDR: i32 = 2;
+pub const SO_PEERCRED: i32 = 17;
 pub const SCM_RIGHTS: i32 = 1;
 
 pub const MSG_DONTWAIT: i32 = 0x40;

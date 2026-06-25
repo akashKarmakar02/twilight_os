@@ -135,9 +135,9 @@ impl SocketFile {
 
     // ---- Unix-specific dispatch ----
 
-    pub fn connect_unix(&mut self, addr: UnixAddr) -> Result<(), i32> {
+    pub fn connect_unix(&mut self, addr: UnixAddr, cred: unix::PeerCredentials) -> Result<(), i32> {
         match self {
-            SocketFile::Unix(s) => s.connect(addr),
+            SocketFile::Unix(s) => s.connect(addr, cred),
             _ => Err(twilight_common::syscall::types::EOPNOTSUPP),
         }
     }
@@ -248,6 +248,13 @@ impl SocketFile {
         match self {
             SocketFile::Unix(s) => s.addr_len,
             _ => 0,
+        }
+    }
+
+    pub fn peer_cred_unix(&self) -> Option<unix::PeerCredentials> {
+        match self {
+            SocketFile::Unix(s) => s.peer_cred,
+            _ => None,
         }
     }
 }

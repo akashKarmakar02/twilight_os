@@ -23,6 +23,16 @@ pub struct UnixControl {
     pub rights: Vec<PassedFile>,
 }
 
+/// Kernel-verified credentials of the process on the other end of a
+/// connected AF_UNIX socket.  Layout matches Linux `struct ucred`
+/// (12 bytes: pid i32, uid u32, gid u32).
+#[derive(Clone, Copy, Debug)]
+pub struct PeerCredentials {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 pub struct UnixMessage {
     pub data: Vec<u8>,
     pub control: UnixControl,
@@ -177,6 +187,8 @@ enum UnixRole {
 
 struct PendingAccept {
     state: Arc<Mutex<UnixState>>,
+    /// Credentials of the connecting process, captured at connect() time.
+    connector_cred: PeerCredentials,
 }
 
 // ---- DgramMessage ----
@@ -239,6 +251,10 @@ lazy_static! {
         Mutex::new(BTreeMap::new());
 }
 
+pub fn unregister_path(path: &str) {
+    UNIX_REGISTRY.lock().remove(path);
+}
+
 // ---- PollState ----
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -258,6 +274,8 @@ pub struct UnixSocket {
     /// alive until their operation finishes.
     handle_refs: Arc<AtomicUsize>,
     pub addr_len: u32,
+    /// Credentials of the peer process, filled at accept()/socketpair() time.
+    pub peer_cred: Option<PeerCredentials>,
 }
 
 impl Clone for UnixSocket {
@@ -267,6 +285,7 @@ impl Clone for UnixSocket {
             state: self.state.clone(),
             handle_refs: self.handle_refs.clone(),
             addr_len: self.addr_len,
+            peer_cred: self.peer_cred,
         }
     }
 }
@@ -285,10 +304,11 @@ impl UnixSocket {
             state: Arc::new(Mutex::new(UnixState::new(sock_type))),
             handle_refs: Arc::new(AtomicUsize::new(1)),
             addr_len: 0,
+            peer_cred: None,
         }
     }
 
-    pub fn pair(sock_type: SockType) -> (Self, Self) {
+    pub fn pair(sock_type: SockType, cred: PeerCredentials) -> (Self, Self) {
         match sock_type {
             SockType::Stream => {
                 let conn = UnixConnection::new();
@@ -329,11 +349,13 @@ impl UnixSocket {
                         state: left,
                         handle_refs: Arc::new(AtomicUsize::new(1)),
                         addr_len: 0,
+                        peer_cred: Some(cred),
                     },
                     Self {
                         state: right,
                         handle_refs: Arc::new(AtomicUsize::new(1)),
                         addr_len: 0,
+                        peer_cred: Some(cred),
                     },
                 )
             }
@@ -355,11 +377,13 @@ impl UnixSocket {
                         state: left,
                         handle_refs: Arc::new(AtomicUsize::new(1)),
                         addr_len: 0,
+                        peer_cred: Some(cred),
                     },
                     Self {
                         state: right,
                         handle_refs: Arc::new(AtomicUsize::new(1)),
                         addr_len: 0,
+                        peer_cred: Some(cred),
                     },
                 )
             }
@@ -403,7 +427,7 @@ impl UnixSocket {
         Ok(())
     }
 
-    pub fn connect(&mut self, addr: UnixAddr) -> Result<(), i32> {
+    pub fn connect(&mut self, addr: UnixAddr, cred: PeerCredentials) -> Result<(), i32> {
         {
             let state = self.state.lock();
             if state.sock_type != SockType::Stream {
@@ -456,12 +480,15 @@ impl UnixSocket {
 
             listener.backlog.push_back(PendingAccept {
                 state: client_state,
+                connector_cred: cred,
             });
             listener.accept_waiters.notify_all();
         }
 
         // Connecter uses the other half of the same connection
         self.addr_len = addr.addr_len();
+        // Both sides get the connector's credentials (matching Linux behaviour).
+        self.peer_cred = Some(cred);
         {
             let mut state = self.state.lock();
             state.conn = Some(conn);
@@ -502,6 +529,7 @@ impl UnixSocket {
                             state: pending.state.clone(),
                             handle_refs: Arc::new(AtomicUsize::new(1)),
                             addr_len,
+                            peer_cred: Some(pending.connector_cred),
                         },
                         peer,
                     ));
@@ -546,6 +574,7 @@ impl UnixSocket {
                     state: pending.state.clone(),
                     handle_refs: Arc::new(AtomicUsize::new(1)),
                     addr_len,
+                    peer_cred: Some(pending.connector_cred),
                 },
                 peer,
             )))

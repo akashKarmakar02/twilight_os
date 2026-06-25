@@ -10,7 +10,7 @@ use crate::sys::net::socket::{
     SocketFile,
     tcp::TcpSocket,
     udp::UdpSocket,
-    unix::{PassedFile, SockType, UnixAddr, UnixControl, UnixSocket},
+    unix::{PassedFile, PeerCredentials, SockType, UnixAddr, UnixControl, UnixSocket},
 };
 use crate::sys::proc::{
     FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, SIGCHLD, SIGKILL, SIGPIPE, SIGSTOP,
@@ -1678,12 +1678,12 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
     if options & !(WNOHANG | WUNTRACED | WCONTINUED) != 0 {
         return -(EINVAL as i64);
     }
-    crate::serial_println!(
-        "[wait4] pid={} target={} options={:#x}",
-        current_pid,
-        pid,
-        options,
-    );
+    // crate::serial_println!(
+    //     "[wait4] pid={} target={} options={:#x}",
+    //     current_pid,
+    //     pid,
+    //     options,
+    // );
 
     loop {
         let mut reaped_pid = None;
@@ -2946,8 +2946,16 @@ pub fn unlink(path_ptr: usize) -> i64 {
     let fs = unsafe { VFS.get_mut() };
 
     if let Ok(mut inode) = fs.open(full_path.as_str()) {
-        inode.unlink().unwrap() as i64
+        let result = inode.unlink().unwrap() as i64;
+        if result == 0 {
+            crate::sys::net::socket::unix::unregister_path(full_path.as_str());
+        }
+        result
     } else {
+        // Keep AF_UNIX pathname state in sync with Linux-style unlink
+        // semantics: unlinking a socket pathname removes the name even if
+        // existing connected/listening socket objects continue to live by fd.
+        crate::sys::net::socket::unix::unregister_path(full_path.as_str());
         0
     }
 }
@@ -4005,7 +4013,12 @@ pub fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv_ptr: usize) -> 
         _ => return -(EPROTONOSUPPORT as i64),
     };
 
-    let (left, right) = UnixSocket::pair(sock_type);
+    let cred = PeerCredentials {
+        pid: crate::sys::proc::id() as u32,
+        uid: 0,
+        gid: 0,
+    };
+    let (left, right) = UnixSocket::pair(sock_type, cred);
     let status_flags = O_RDWR | if nonblock { O_NONBLOCK } else { 0 };
     let fd_flags = if cloexec { FD_CLOEXEC } else { 0 };
 
@@ -4252,7 +4265,12 @@ pub fn connect(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
             Ok(a) => a,
             Err(e) => return -(e as i64),
         };
-        match sock.connect_unix(addr) {
+        let cred = PeerCredentials {
+            pid: crate::sys::proc::id() as u32,
+            uid: 0,
+            gid: 0,
+        };
+        match sock.connect_unix(addr, cred) {
             Ok(()) => 0,
             Err(e) => -(e as i64),
         }
@@ -4759,7 +4777,7 @@ pub fn setsockopt(fd: i32, level: i32, optname: i32, _optval: usize, _optlen: us
     -(ENOPROTOOPT as i64)
 }
 
-pub fn getsockopt(fd: i32, _level: i32, _optname: i32, _optval: usize, _optlen_ptr: usize) -> i64 {
+pub fn getsockopt(fd: i32, level: i32, optname: i32, optval: usize, optlen_ptr: usize) -> i64 {
     if fd < 0 {
         return -(ENOTSOCK as i64);
     }
@@ -4778,9 +4796,39 @@ pub fn getsockopt(fd: i32, _level: i32, _optname: i32, _optval: usize, _optlen_p
         Err(code) => return code as i64,
     };
     let file = file_ref.lock();
-    if !matches!(&file.kind, OpenFileKind::Socket(_)) {
+    let OpenFileKind::Socket(sock) = &file.kind else {
         return -(ENOTSOCK as i64);
+    };
+
+    if level == SOL_SOCKET && optname == SO_PEERCRED {
+        let cred = match sock.peer_cred_unix() {
+            Some(c) => c,
+            None => return -(ENOTCONN as i64),
+        };
+        if optval == 0 || optlen_ptr == 0 {
+            return -(EFAULT as i64);
+        }
+        // Write the 12-byte Linux `struct ucred` to userspace.
+        // Layout: pid (i32), uid (u32), gid (u32) — total 12 bytes.
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Ucred {
+            pid: i32,
+            uid: u32,
+            gid: u32,
+        }
+        let ucred = Ucred {
+            pid: cred.pid as i32,
+            uid: cred.uid,
+            gid: cred.gid,
+        };
+        unsafe {
+            *(optval as *mut Ucred) = ucred;
+            *(optlen_ptr as *mut u32) = 12;
+        }
+        return 0;
     }
+
     -(ENOPROTOOPT as i64)
 }
 
