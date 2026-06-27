@@ -116,10 +116,7 @@ pub fn load_service_configs(directory: &Path, runlevel: &str) -> Vec<ServiceConf
             }
             Ok(config)
                 if config.runlevel == runlevel
-                    && config
-                        .txpc
-                        .as_ref()
-                        .is_some_and(|txpc| txpc.on_demand) =>
+                    && config.txpc.as_ref().is_some_and(|txpc| txpc.on_demand) =>
             {
                 println!(
                     "twinit: loaded on-demand service {} ({})",
@@ -177,19 +174,21 @@ pub fn parse_service_config(contents: &str) -> Result<ServiceConfig, String> {
             format!("{}.{}", current_section, key)
         };
 
-        if current_section.is_empty() && !matches!(
-            key,
-            "name"
-                | "description"
-                | "exec"
-                | "args"
-                | "enabled"
-                | "runlevel"
-                | "restart"
-                | "type"
-                | "stdout"
-                | "stderr"
-        ) {
+        if current_section.is_empty()
+            && !matches!(
+                key,
+                "name"
+                    | "description"
+                    | "exec"
+                    | "args"
+                    | "enabled"
+                    | "runlevel"
+                    | "restart"
+                    | "type"
+                    | "stdout"
+                    | "stderr"
+            )
+        {
             return Err(format!("line {}: unsupported field {key}", index + 1));
         }
 
@@ -248,7 +247,7 @@ pub fn parse_service_config(contents: &str) -> Result<ServiceConfig, String> {
             Some(value) => parse_bool(value)?,
             None => false,
         };
-        
+
         let policy = if fields.keys().any(|k| k.starts_with("txpc.policy.")) {
             let allow_all = match fields.get("txpc.policy.allow_all") {
                 Some(value) => parse_bool(value)?,
@@ -397,7 +396,9 @@ fn parse_int_array(value: &str) -> Result<Vec<u32>, String> {
     for part in body.split(',') {
         let part = part.trim();
         if !part.is_empty() {
-            let num = part.parse::<u32>().map_err(|_| format!("invalid integer {part}"))?;
+            let num = part
+                .parse::<u32>()
+                .map_err(|_| format!("invalid integer {part}"))?;
             values.push(num);
         }
     }

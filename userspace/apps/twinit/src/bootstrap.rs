@@ -28,8 +28,14 @@ struct PendingConnect {
     peer_pid: i32,
     /// Client UID (from SO_PEERCRED at accept time).
     peer_uid: u32,
+    txpc_wire: bool,
     /// When this pending connect was created — used for timeout.
     created: Instant,
+}
+
+enum BootstrapRequest<'a> {
+    Register { target_name: &'a str, txpc_wire: bool },
+    Connect { target_name: &'a str, txpc_wire: bool },
 }
 
 pub struct BootstrapServer {
@@ -125,6 +131,12 @@ impl BootstrapServer {
                 continue;
             };
 
+            if services[idx].registered_txpc_fd.is_none() && services[idx].pid.is_none() {
+                // The on-demand service exited or failed before REGISTER.
+                let _ = pc.client_stream.write_all(b"NOT_FOUND\n");
+                continue;
+            }
+
             if services[idx].registered_txpc_fd.is_none() {
                 // Still waiting — keep it queued.
                 still_pending.push(pc);
@@ -132,7 +144,14 @@ impl BootstrapServer {
             }
 
             // Service is now registered — complete the connect.
-            Self::complete_connect(&mut pc.client_stream, services, pc.peer_pid, pc.peer_uid, &pc.target_name);
+            Self::complete_connect(
+                &mut pc.client_stream,
+                services,
+                pc.peer_pid,
+                pc.peer_uid,
+                &pc.target_name,
+                pc.txpc_wire,
+            );
         }
 
         self.pending_connects = still_pending;
@@ -155,15 +174,24 @@ impl BootstrapServer {
             }
         };
 
-        let line = payload.trim();
-        if let Some(target) = line.strip_prefix("REGISTER ") {
-            Self::handle_register(stream, services, cred.pid, target.trim(), passed_fd);
-        } else if let Some(target) = line.strip_prefix("CONNECT ") {
-            self.handle_connect(stream, services, cred.pid, cred.uid, target.trim());
-        } else {
-            let _ = stream.write_all(b"ERR unknown_command\n");
-            if let Some(fd) = passed_fd {
-                unsafe { crate::os::close(fd) };
+        match parse_bootstrap_request(&payload) {
+            Some(BootstrapRequest::Register {
+                target_name,
+                txpc_wire,
+            }) => {
+                Self::handle_register(stream, services, cred.pid, target_name, passed_fd, txpc_wire);
+            }
+            Some(BootstrapRequest::Connect {
+                target_name,
+                txpc_wire,
+            }) => {
+                self.handle_connect(stream, services, cred.pid, cred.uid, target_name, txpc_wire);
+            }
+            None => {
+                let _ = stream.write_all(b"ERR unknown_command\n");
+                if let Some(fd) = passed_fd {
+                    unsafe { crate::os::close(fd) };
+                }
             }
         }
     }
@@ -174,6 +202,7 @@ impl BootstrapServer {
         peer_pid: i32,
         target_name: &str,
         passed_fd: Option<RawFd>,
+        txpc_wire: bool,
     ) {
         let Some(fd) = passed_fd else {
             let _ = stream.write_all(b"ERR missing_fd\n");
@@ -210,9 +239,8 @@ impl BootstrapServer {
             return;
         }
 
-        println!("twinit: bootstrap: REGISTER {} successful (pid={})", target_name, peer_pid);
         service.registered_txpc_fd = Some(stream_to_store);
-        let _ = stream.write_all(b"OK\n");
+        let _ = stream.write_all(ok_response(txpc_wire).as_bytes());
     }
 
     fn handle_connect(
@@ -222,6 +250,7 @@ impl BootstrapServer {
         peer_pid: i32,
         peer_uid: u32,
         target_name: &str,
+        txpc_wire: bool,
     ) {
         // Find the target service
         let target_service_idx = services.iter().position(|s| {
@@ -244,11 +273,11 @@ impl BootstrapServer {
             if txpc.on_demand {
                 // Start the service if it isn't already running.
                 if service.pid.is_none() {
-                    println!(
-                        "twinit: bootstrap: on-demand launch of {} for CONNECT {}",
-                        service.config.name, target_name
-                    );
                     service::start_service(&mut services[target_idx]);
+                    if services[target_idx].pid.is_none() {
+                        let _ = client_stream.write_all(b"NOT_FOUND\n");
+                        return;
+                    }
                 } else {
                     println!(
                         "twinit: bootstrap: {} already running (pid={}), waiting for REGISTER",
@@ -266,6 +295,7 @@ impl BootstrapServer {
                             target_name: target_name.to_string(),
                             peer_pid,
                             peer_uid,
+                            txpc_wire,
                             created: Instant::now(),
                         });
                     }
@@ -282,7 +312,7 @@ impl BootstrapServer {
         }
 
         // Service is registered — complete the connect immediately.
-        Self::complete_connect(client_stream, services, peer_pid, peer_uid, target_name);
+        Self::complete_connect(client_stream, services, peer_pid, peer_uid, target_name, txpc_wire);
     }
 
     /// Shared path for completing a CONNECT (both immediate and deferred
@@ -293,6 +323,7 @@ impl BootstrapServer {
         peer_pid: i32,
         peer_uid: u32,
         target_name: &str,
+        txpc_wire: bool,
     ) {
         // Find the client service for capabilities
         let client_caps: Option<Vec<String>> = services
@@ -335,12 +366,9 @@ impl BootstrapServer {
         };
 
         if !allowed {
-            println!("twinit: bootstrap: CONNECT {} denied for pid={}", target_name, peer_pid);
             let _ = client_stream.write_all(b"DENIED policy\n");
             return;
         }
-
-        println!("twinit: bootstrap: CONNECT {} allowed for pid={}", target_name, peer_pid);
 
         // Connection allowed: create socketpair
         let (s1, s2) = match ipc::create_socketpair() {
@@ -355,16 +383,62 @@ impl BootstrapServer {
         let target_fd_ref = services[target_idx].registered_txpc_fd.as_ref().unwrap();
 
         // Send to service
-        if let Err(e) = ipc::send_fd(target_fd_ref, "INCOMING\n", s2.as_raw_fd()) {
+        let incoming = incoming_response(txpc_wire, peer_pid);
+        if let Err(e) = ipc::send_fd(target_fd_ref, &incoming, s2.as_raw_fd()) {
             eprintln!("twinit: bootstrap: failed to send fd to target {target_name}: {e}");
             let _ = client_stream.write_all(b"ERR dispatch_failed\n");
             return;
         }
 
         // Send to client
-        if let Err(e) = ipc::send_fd(client_stream, "OK\n", s1.as_raw_fd()) {
+        if let Err(e) = ipc::send_fd(client_stream, ok_response(txpc_wire), s1.as_raw_fd()) {
             eprintln!("twinit: bootstrap: failed to send fd to client pid={peer_pid}: {e}");
             return;
         }
+    }
+}
+
+fn parse_bootstrap_request(payload: &str) -> Option<BootstrapRequest<'_>> {
+    let line = payload.trim();
+    if let Some(target) = line.strip_prefix("REGISTER ") {
+        return Some(BootstrapRequest::Register {
+            target_name: target.trim(),
+            txpc_wire: false,
+        });
+    }
+    if let Some(target) = line.strip_prefix("CONNECT ") {
+        return Some(BootstrapRequest::Connect {
+            target_name: target.trim(),
+            txpc_wire: false,
+        });
+    }
+
+    let mut lines = payload.lines();
+    match lines.next()?.trim() {
+        "TXPC_REGISTER" => Some(BootstrapRequest::Register {
+            target_name: lines.next()?.trim(),
+            txpc_wire: true,
+        }),
+        "TXPC_CONNECT" => Some(BootstrapRequest::Connect {
+            target_name: lines.next()?.trim(),
+            txpc_wire: true,
+        }),
+        _ => None,
+    }
+}
+
+fn ok_response(txpc_wire: bool) -> &'static str {
+    if txpc_wire {
+        "TXPC_OK\n"
+    } else {
+        "OK\n"
+    }
+}
+
+fn incoming_response(txpc_wire: bool, peer_pid: i32) -> String {
+    if txpc_wire {
+        format!("TXPC_INCOMING\n{peer_pid}\n")
+    } else {
+        "INCOMING\n".to_string()
     }
 }

@@ -76,7 +76,13 @@ unsafe extern "C" {
     pub fn nanosleep(request: *const Timespec, remainder: *mut Timespec) -> c_int;
     pub fn _exit(status: c_int) -> !;
     pub fn socketpair(domain: c_int, type_: c_int, protocol: c_int, sv: *mut c_int) -> c_int;
-    pub fn getsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: *mut c_void, optlen: *mut u32) -> c_int;
+    pub fn getsockopt(
+        sockfd: c_int,
+        level: c_int,
+        optname: c_int,
+        optval: *mut c_void,
+        optlen: *mut u32,
+    ) -> c_int;
     pub fn sendmsg(sockfd: c_int, msg: *const Msghdr, flags: c_int) -> isize;
     pub fn recvmsg(sockfd: c_int, msg: *mut Msghdr, flags: c_int) -> isize;
     pub fn close(fd: c_int) -> c_int;

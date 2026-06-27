@@ -11,9 +11,9 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::bootstrap::BootstrapServer;
 use crate::config::{OutputMode, RestartPolicy, ServiceConfig, ServiceType};
 use crate::control::ControlServer;
-use crate::bootstrap::BootstrapServer;
 use crate::os;
 
 pub const RESTART_LIMIT: u32 = 5;
@@ -100,7 +100,6 @@ pub fn start_service(service: &mut ServiceState) {
             service.stderr_buffer.clear();
             service.pid = Some(pid);
             service.status = RuntimeStatus::Running;
-            println!("twinit: started service {} pid={pid}", service.config.name);
         }
         Err(error) => {
             service.status = RuntimeStatus::Failed(-1);
@@ -344,10 +343,6 @@ fn handle_child_exit(services: &mut [ServiceState], pid: i32, wait_status: i32) 
     let outcome = decode_wait_status(wait_status);
     match outcome {
         WaitOutcome::Exited(code) => {
-            println!(
-                "twinit: service {} pid={pid} exited status={code}",
-                service.config.name
-            );
             service.status = if code == 0 {
                 RuntimeStatus::Exited(code)
             } else {
