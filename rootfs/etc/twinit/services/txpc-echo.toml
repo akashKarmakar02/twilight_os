@@ -1,5 +1,5 @@
-name = "txpc-echo"
-description = "TXPC bootstrap echo test service"
+name = "txpc-test-server"
+description = "TXPC bootstrap test server"
 exec = "/bin/txpc_echo_service"
 args = []
 enabled = false
@@ -10,8 +10,9 @@ stdout = "log"
 stderr = "log"
 
 [txpc]
-name = "dev.twilight.echo"
+name = "dev.twilight.test"
 on_demand = true
 
 [txpc.policy]
-allow_all = true
+allow_uids = [0]
+require_cap = ["gui"]
