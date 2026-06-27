@@ -72,8 +72,8 @@ int main(void) {
     }
 
     // sv[0] is the service's endpoint, sv[1] is given to twinit
-    if (send_fd(boot_sock, "REGISTER dev.twilight.echo\n", sv[1]) < 0) {
-        perror("txpc_echo_service: send_fd REGISTER");
+    if (send_fd(boot_sock, "TXPC_REGISTER\ndev.twilight.test\n", sv[1]) < 0) {
+        perror("txpc_echo_service: send_fd TXPC_REGISTER");
         return 1;
     }
     close(sv[1]);
@@ -85,7 +85,7 @@ int main(void) {
         return 1;
     }
     resp[r] = '\0';
-    if (strncmp(resp, "OK", 2) != 0) {
+    if (strncmp(resp, "TXPC_OK", 7) != 0) {
         printf("txpc_echo_service: failed to register: %s", resp);
         return 1;
     }
@@ -100,20 +100,20 @@ int main(void) {
             break;
         }
 
-        if (strncmp(buf, "INCOMING", 8) == 0) {
+        if (strncmp(buf, "TXPC_INCOMING", 13) == 0) {
             printf("txpc_echo_service: received client connection (fd=%d)\n", client_fd);
-            
-            // simple echo loop for this client
+
+            if (write(client_fd, "hello from server\n", 18) < 0) {
+                perror("txpc_echo_service: write to client");
+                close(client_fd);
+                continue;
+            }
+
             char msg[128];
             ssize_t n = read(client_fd, msg, sizeof(msg) - 1);
             if (n > 0) {
                 msg[n] = '\0';
-                printf("txpc_echo_service: received '%s'\n", msg);
-                if (strncmp(msg, "ping", 4) == 0) {
-                    write(client_fd, "pong", 4);
-                } else {
-                    write(client_fd, msg, n);
-                }
+                printf("txpc_echo_service: client replied: %s", msg);
             }
             close(client_fd);
         } else {

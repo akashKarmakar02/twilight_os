@@ -42,7 +42,13 @@ fn run() -> io::Result<()> {
     send_get_registry(&mut stream)?;
     let globals = read_registry_globals(&mut stream)?;
 
-    for required in ["wl_compositor", "wl_shm", "wl_seat", "wl_output"] {
+    for required in [
+        "wl_compositor",
+        "wl_shm",
+        "wl_seat",
+        "wl_output",
+        "xdg_wm_base",
+    ] {
         if !globals.contains_key(required) {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
@@ -83,7 +89,7 @@ fn send_get_registry(stream: &mut UnixStream) -> io::Result<()> {
 fn read_registry_globals(stream: &mut UnixStream) -> io::Result<BTreeMap<String, Global>> {
     let mut globals = BTreeMap::new();
 
-    for _ in 0..4 {
+    for _ in 0..5 {
         let (header, payload) = read_message(stream)?;
         if header.object_id != REGISTRY_ID || header.opcode != WL_REGISTRY_GLOBAL {
             return Err(io::Error::new(

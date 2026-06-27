@@ -48,8 +48,8 @@ int main(void) {
         return 1;
     }
 
-    if (write(boot_sock, "CONNECT dev.twilight.echo\n", 26) < 0) {
-        perror("txpc_client: write CONNECT");
+    if (write(boot_sock, "TXPC_CONNECT\ndev.twilight.test\n", 31) < 0) {
+        perror("txpc_client: write TXPC_CONNECT");
         return 1;
     }
 
@@ -61,14 +61,14 @@ int main(void) {
         return 1;
     }
 
-    if (strncmp(buf, "OK", 2) != 0) {
+    if (strncmp(buf, "TXPC_OK", 7) != 0) {
         printf("txpc_client: connection denied: %s\n", buf);
         return 1;
     }
 
-    printf("txpc_client: connected to dev.twilight.echo (fd=%d)\n", service_fd);
+    printf("txpc_client: connected to dev.twilight.test (fd=%d)\n", service_fd);
     
-    if (write(service_fd, "ping", 4) < 0) {
+    if (write(service_fd, "hello from client\n", 18) < 0) {
         perror("txpc_client: write to service");
         return 1;
     }

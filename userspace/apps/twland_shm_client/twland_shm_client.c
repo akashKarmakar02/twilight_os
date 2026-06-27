@@ -51,6 +51,7 @@ typedef struct {
     Global shm;
     Global seat;
     Global output;
+    Global xdg_wm_base;
 } Globals;
 
 static void put_u32(uint8_t *buf, size_t *offset, uint32_t value) {
@@ -191,7 +192,7 @@ static int get_registry(int fd, Globals *globals) {
     put_u32(payload, &offset, REGISTRY_ID);
     if (send_message(fd, 1, WL_DISPLAY_GET_REGISTRY, payload, offset) < 0) return -1;
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         uint32_t object = 0;
         uint16_t opcode = 0;
         uint8_t event[256];
@@ -224,11 +225,14 @@ static int get_registry(int fd, Globals *globals) {
             globals->seat = (Global){name, version, 1};
         } else if (strcmp(interface, "wl_output") == 0) {
             globals->output = (Global){name, version, 1};
+        } else if (strcmp(interface, "xdg_wm_base") == 0) {
+            globals->xdg_wm_base = (Global){name, version, 1};
         }
     }
 
     if (!globals->compositor.seen || !globals->shm.seen ||
-        !globals->seat.seen || !globals->output.seen) {
+        !globals->seat.seen || !globals->output.seen ||
+        !globals->xdg_wm_base.seen) {
         errno = ENOENT;
         return -1;
     }
