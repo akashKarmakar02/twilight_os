@@ -3,8 +3,10 @@
 This stage adds the first visible Wayland-style rendering path to Twilight OS.
 It is still a debug compositor path, not a full desktop compositor.
 
-`twland` now accepts shared-memory buffers from clients, creates simple
-roleless `wl_surface` objects, and blits committed pixels into `/dev/fb0`.
+`twland` accepts shared-memory buffers from clients and blits committed pixels
+into `/dev/fb0`. This document describes the original shm rendering foundation;
+the current preferred visible path is the xdg-shell flow documented in
+`docs/system/twland_xdg_shell.md`.
 
 ## Implemented objects
 
@@ -33,6 +35,7 @@ wl_shm_pool.destroy
 wl_buffer.destroy
 wl_surface.attach
 wl_surface.damage
+wl_surface.frame
 wl_surface.commit
 ```
 
@@ -45,21 +48,27 @@ wl_registry.global
 wl_callback.done
 ```
 
-## Temporary roleless-surface behavior
+## Roleless-surface debug behavior
 
 Real Wayland clients normally need a shell role, such as `xdg_surface` and
-`xdg_toplevel`, before a surface is mapped. Twilight does not implement
-`xdg-shell` yet.
+`xdg_toplevel`, before a surface is mapped.
 
-For this PR only, `twland` has a temporary debug behavior:
+The original shm milestone used this temporary debug behavior:
 
 ```text
 roleless wl_surface.commit -> direct framebuffer blit
 ```
 
-This is intentionally not fully Wayland-compliant. It exists so the kernel IPC,
-memfd, shared mmap, and userspace compositor plumbing can be tested with visible
-pixels before window-management protocol is added.
+That path is intentionally not fully Wayland-compliant and is now disabled by
+default in `twland` with:
+
+```rust
+TWLAND_ALLOW_ROLELESS_DEBUG_SURFACES = false
+```
+
+Use `twland_xdg_client` for the current visible rendering test. The old
+`twland_shm_client` remains useful as a protocol/debug reference if the constant
+is temporarily flipped back on during local experiments.
 
 ## wl_shm flow
 
@@ -73,6 +82,8 @@ client draws pixels
 client sends wl_shm.create_pool with fd via SCM_RIGHTS
 twland mmap(PROT_READ, MAP_SHARED)
 client creates wl_buffer from pool
+client creates an xdg toplevel surface
+client waits for configure / sends ack_configure
 client attaches buffer to surface
 client damages and commits surface
 twland blits to /dev/fb0
@@ -119,7 +130,7 @@ FBIOPAN_DISPLAY
 
 to sync the framebuffer.
 
-## Test client
+## Legacy shm test client
 
 `twland_shm_client` draws a 200x120 test rectangle:
 
@@ -127,7 +138,7 @@ to sync the framebuffer.
 - green border
 - blue diagonal
 
-Expected output:
+With roleless debug surfaces enabled, expected output is:
 
 ```text
 twland_shm_client: connected
@@ -145,6 +156,9 @@ Expected visual result:
 ```text
 a colored rectangle appears near the top-left of the framebuffer
 ```
+
+For the default build, use `twland_xdg_client` instead; it follows the
+xdg-shell configure/ack/commit sequence and should draw a 400x300 test window.
 
 ## Logs
 
@@ -171,8 +185,8 @@ source=twland message=twland: blit ...
 
 ## Current limitations
 
-- No `xdg-shell`.
-- No window roles.
+- xdg-shell support is minimal and documented separately.
+- No real desktop shell policy or decorations.
 - No keyboard or pointer input.
 - No frame scheduling.
 - No damage optimization beyond basic clipping.
@@ -183,10 +197,9 @@ source=twland message=twland: blit ...
 
 ## Future stages
 
-1. `xdg_wm_base`
-2. `xdg_surface` / `xdg_toplevel`
-3. configure / ack_configure
-4. frame callbacks
-5. keyboard/pointer input
-6. real window placement
-7. decorations/session shell
+1. keyboard/pointer input
+2. real focus tracking
+3. real window placement
+4. decorations/session shell
+5. resize/maximize/fullscreen
+6. frame scheduling
