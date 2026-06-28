@@ -63,7 +63,7 @@ const PREEMPT_DEBUG: bool = false;
 /// When `true`, the timer path may additionally call `schedule_now()` from
 /// kernel mode, but only if [`can_preempt_kernel()`] confirms that every safety
 /// condition is satisfied. This is experimental and may destabilize the kernel.
-pub const ENABLE_KERNEL_PREEMPTION: bool = true;
+pub const ENABLE_KERNEL_PREEMPTION: bool = false;
 
 /// Controls per-tick skip/allow logging for the kernel preemption path.
 /// Keeping this false avoids flooding the serial console on every kernel timer
