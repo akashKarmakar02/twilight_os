@@ -26,6 +26,13 @@ const TWINIT_RUNTIME_DIR: &str = "/run/twinit";
 const TWINIT_CONTROL_SOCK: &str = "/run/twinit/control.sock";
 const TWINIT_BOOTSTRAP_SOCK: &str = "/run/twinit/bootstrap.sock";
 
+/// Starts `twinit`, handles early command-line actions, and supervises services.
+///
+/// On startup, this checks whether the process is running as PID 1, prepares the
+/// runtime directories, handles `--shutdown`, `--reboot`, and `--single` early
+/// exit options, then binds the control and bootstrap sockets and loads the
+/// service set for the active runlevel. Services marked as on-demand are left
+/// stopped until the bootstrap broker receives a connection.
 fn main() {
     let pid = std::process::id();
     if pid != 1 {
@@ -89,6 +96,17 @@ fn main() {
     supervise(&mut services, &mut control, &mut bootstrap);
 }
 
+/// Ensures the runtime directories exist.
+///
+/// Creates `/run` and the Twinit runtime directory if needed. If either
+/// directory cannot be created for a reason other than it already existing,
+/// an error is printed and the remaining directories are not processed.
+///
+/// # Examples
+///
+/// ```
+/// ensure_runtime_directory();
+/// ```
 fn ensure_runtime_directory() {
     for directory in ["/run", TWINIT_RUNTIME_DIR] {
         match fs::create_dir(directory) {

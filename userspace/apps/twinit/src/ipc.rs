@@ -6,6 +6,18 @@ use std::ptr;
 
 use crate::os;
 
+/// Retrieves the peer credentials associated with a Unix socket.
+///
+/// # Examples
+///
+/// ```
+/// let cred = get_peercred(stream.as_raw_fd()).unwrap();
+/// assert!(cred.pid >= 0);
+/// ```
+///
+/// # Returns
+///
+/// The peer's process ID, user ID, and group ID.
 pub fn get_peercred(fd: RawFd) -> io::Result<os::Ucred> {
     let mut cred = os::Ucred {
         pid: 0,
@@ -32,6 +44,19 @@ pub fn get_peercred(fd: RawFd) -> io::Result<os::Ucred> {
     }
 }
 
+/// Creates a connected pair of Unix domain streams.
+///
+/// # Examples
+///
+/// ```
+/// let (left, right) = create_socketpair().unwrap();
+/// left.write_all(b"ping").unwrap();
+/// let mut buf = [0u8; 4];
+/// right.read_exact(&mut buf).unwrap();
+/// assert_eq!(&buf, b"ping");
+/// ```
+///
+/// @returns A pair of connected `UnixStream`s.
 pub fn create_socketpair() -> io::Result<(UnixStream, UnixStream)> {
     let mut fds = [-1, -1];
     // SAFETY: fds is a valid array of 2 integers.
@@ -46,6 +71,39 @@ pub fn create_socketpair() -> io::Result<(UnixStream, UnixStream)> {
     Ok((s1, s2))
 }
 
+/// Sends a message and attaches a file descriptor to the Unix stream.
+
+///
+
+/// # Parameters
+
+///
+
+/// * `stream` - The Unix stream to send on.
+
+/// * `message` - The message payload to send.
+
+/// * `fd` - The file descriptor to attach.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// # use std::os::unix::io::AsRawFd;
+
+/// # use std::os::unix::net::UnixStream;
+
+/// # fn send_fd(_: &UnixStream, _: &str, _: i32) -> std::io::Result<()> { Ok(()) }
+
+/// let (stream, _peer) = UnixStream::pair().unwrap();
+
+/// send_fd(&stream, "hello", stream.as_raw_fd()).unwrap();
+
+/// ```
 pub fn send_fd(stream: &UnixStream, message: &str, fd: RawFd) -> io::Result<()> {
     let mut iov = os::Iovec {
         iov_base: message.as_ptr() as *mut _,
@@ -89,6 +147,18 @@ pub fn send_fd(stream: &UnixStream, message: &str, fd: RawFd) -> io::Result<()> 
     Ok(())
 }
 
+/// Receives a message from a Unix stream and extracts an attached file descriptor if present.
+///
+/// # Errors
+///
+/// Returns an error if receiving from the socket fails or if the stream reaches EOF.
+///
+/// # Examples
+///
+/// ```
+/// let (payload, fd) = recv_fd(&stream).unwrap();
+/// assert!(!payload.is_empty());
+/// ```
 pub fn recv_fd(stream: &UnixStream) -> io::Result<(String, Option<RawFd>)> {
     let mut buf = [0u8; 1024];
     let mut iov = os::Iovec {

@@ -45,6 +45,13 @@ pub struct BootstrapServer {
 }
 
 impl BootstrapServer {
+    /// Creates a bootstrap server with no listener and an empty pending queue.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let server = BootstrapServer::new();
+    /// ```
     pub fn new() -> Self {
         Self {
             listener: None,
@@ -52,6 +59,16 @@ impl BootstrapServer {
         }
     }
 
+    /// Binds the bootstrap server to a Unix socket path.
+    ///
+    /// Any existing filesystem socket at `path` is removed before binding.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// server.bind("/tmp/twinit-bootstrap.sock");
+    /// ```
+    pub fn bind(&mut self, path: &str) {
     pub fn bind(&mut self, path: &str) {
         let _ = fs::remove_file(path);
         match UnixListener::bind(path) {
@@ -68,6 +85,19 @@ impl BootstrapServer {
         }
     }
 
+    /// Accepts queued client connections and processes pending on-demand connects.
+    ///
+    /// This method accepts all available connections from the bootstrap listener,
+    /// handles each client request, and then revisits deferred `CONNECT` requests
+    /// that are waiting for a service to register.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut server = BootstrapServer::new();
+    /// let mut services: [ServiceState; 0] = [];
+    /// server.poll_clients(&mut services);
+    /// ```
     pub fn poll_clients(&mut self, services: &mut [ServiceState]) {
         // 1. Accept new connections into a local buffer to avoid borrowing
         //    self.listener while mutating self.pending_connects.
@@ -94,7 +124,33 @@ impl BootstrapServer {
         self.drain_pending(services);
     }
 
-    /// Try to fulfill or expire every pending on-demand connect.
+    /// Fulfills pending on-demand connects when their service registers or expires them after a timeout.
+    
+    ///
+    
+    /// Pending connections are removed from the queue if the target service does not register in time,
+    
+    /// no matching service exists, or the service exits before registering. Connections that are still
+    
+    /// waiting remain queued for a later poll call.
+    
+    ///
+    
+    /// # Examples
+    
+    ///
+    
+    /// ```
+    
+    /// # use std::time::Instant;
+    
+    /// # fn example() {
+    
+    /// #     let _ = Instant::now();
+    
+    /// # }
+    
+    /// ```
     fn drain_pending(&mut self, services: &mut [ServiceState]) {
         if self.pending_connects.is_empty() {
             return;
@@ -157,6 +213,10 @@ impl BootstrapServer {
         self.pending_connects = still_pending;
     }
 
+    /// Handles a bootstrap request from one client connection.
+    ///
+    /// Reads the client's peer credentials and request payload, then dispatches
+    /// the request to registration, connection, or error handling as appropriate.
     fn handle_client(&mut self, stream: &mut UnixStream, services: &mut [ServiceState]) {
         let cred = match ipc::get_peercred(stream.as_raw_fd()) {
             Ok(cred) => cred,
@@ -196,6 +256,31 @@ impl BootstrapServer {
         }
     }
 
+    /// Registers a service's txpc socket for later connect dispatch.
+    ///
+    /// Requires a passed file descriptor from the service process identified by `peer_pid`.
+    /// The registration succeeds only when the service exists, is configured for the named
+    /// txpc endpoint, and has not already registered a txpc socket.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_pid` - PID of the service process that owns the registration request.
+    /// * `target_name` - Expected txpc endpoint name for the service.
+    /// * `passed_fd` - File descriptor to store as the service's txpc socket.
+    /// * `txpc_wire` - Uses `TXPC_OK` when `true`, otherwise `OK`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::os::unix::net::UnixStream;
+    /// # use std::os::unix::io::RawFd;
+    /// # let (mut stream, _peer) = UnixStream::pair().unwrap();
+    /// # let mut services = vec![];
+    /// # let peer_pid = 1234;
+    /// # let target_name = "example";
+    /// # let passed_fd: Option<RawFd> = None;
+    /// handle_register(&mut stream, &mut services, peer_pid, target_name, passed_fd, false);
+    /// ```
     fn handle_register(
         stream: &mut UnixStream,
         services: &mut [ServiceState],
@@ -243,6 +328,27 @@ impl BootstrapServer {
         let _ = stream.write_all(ok_response(txpc_wire).as_bytes());
     }
 
+    /// Handles a client connect request for a txpc service.
+    ///
+    /// If the target service is already registered, the connection is completed immediately.
+    /// If the service is marked on-demand and has not registered yet, this queues the client
+    /// until the service registers or the request times out.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::os::unix::net::UnixStream;
+    /// # fn demo(mut server: BootstrapServer, mut client: UnixStream, mut services: &mut [ServiceState]) {
+    /// server.handle_connect(&mut client, &mut services, 1234, 1000, "my-service", false);
+    /// # }
+    /// ```
+    ///
+    /// @param client_stream The client connection used to send the response.
+    /// @param services The available service states.
+    /// @param peer_pid The client's process ID.
+    /// @param peer_uid The client's user ID.
+    /// @param target_name The requested txpc service name.
+    /// @param txpc_wire Whether the request and response use the txpc wire format.
     fn handle_connect(
         &mut self,
         client_stream: &mut UnixStream,
@@ -315,8 +421,27 @@ impl BootstrapServer {
         Self::complete_connect(client_stream, services, peer_pid, peer_uid, target_name, txpc_wire);
     }
 
-    /// Shared path for completing a CONNECT (both immediate and deferred
-    /// on-demand). Applies policy, creates a socketpair, and sends the fds.
+    /// Completes a client connection to a registered txpc service.
+    ///
+    /// Applies the service's access policy, creates a socket pair, and sends one
+    /// end to the target service and the other to the client.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::os::unix::net::UnixStream;
+    /// # fn complete_connect(
+    /// #     _client_stream: &mut UnixStream,
+    /// #     _services: &mut [()],
+    /// #     _peer_pid: i32,
+    /// #     _peer_uid: u32,
+    /// #     _target_name: &str,
+    /// #     _txpc_wire: bool,
+    /// # ) {}
+    /// # let (mut client, _peer) = UnixStream::pair().unwrap();
+    /// # let mut services = [];
+    /// complete_connect(&mut client, &mut services, 1234, 1000, "example", false);
+    /// ```
     fn complete_connect(
         client_stream: &mut UnixStream,
         services: &mut [ServiceState],
@@ -398,6 +523,23 @@ impl BootstrapServer {
     }
 }
 
+/// Parses a bootstrap request from its wire format.
+///
+/// Supports `REGISTER <target>` and `CONNECT <target>` as well as the
+/// multi-line `TXPC_REGISTER` and `TXPC_CONNECT` forms.
+///
+/// # Examples
+///
+/// ```
+/// let req = parse_bootstrap_request("CONNECT my.service").unwrap();
+/// match req {
+///     BootstrapRequest::Connect { target_name, txpc_wire } => {
+///         assert_eq!(target_name, "my.service");
+///         assert!(!txpc_wire);
+///     }
+///     _ => unreachable!(),
+/// }
+/// ```
 fn parse_bootstrap_request(payload: &str) -> Option<BootstrapRequest<'_>> {
     let line = payload.trim();
     if let Some(target) = line.strip_prefix("REGISTER ") {
@@ -427,6 +569,18 @@ fn parse_bootstrap_request(payload: &str) -> Option<BootstrapRequest<'_>> {
     }
 }
 
+/// Builds the success response for a bootstrap request.
+///
+/// # Returns
+///
+/// `"TXPC_OK\n"` when `txpc_wire` is `true`, or `"OK\n"` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(ok_response(false), "OK\n");
+/// assert_eq!(ok_response(true), "TXPC_OK\n");
+/// ```
 fn ok_response(txpc_wire: bool) -> &'static str {
     if txpc_wire {
         "TXPC_OK\n"
@@ -435,6 +589,14 @@ fn ok_response(txpc_wire: bool) -> &'static str {
     }
 }
 
+/// Builds the response sent to a service for an incoming connection.
+///
+/// # Examples
+///
+/// ```
+/// let msg = incoming_response(false, 1234);
+/// assert_eq!(msg, "INCOMING\n");
+/// ```
 fn incoming_response(txpc_wire: bool, peer_pid: i32) -> String {
     if txpc_wire {
         format!("TXPC_INCOMING\n{peer_pid}\n")

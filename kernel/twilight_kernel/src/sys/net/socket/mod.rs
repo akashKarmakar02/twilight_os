@@ -135,6 +135,18 @@ impl SocketFile {
 
     // ---- Unix-specific dispatch ----
 
+    /// Connects a Unix socket to a peer address with peer credentials.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let result = socket.connect_unix(addr, cred);
+    /// assert!(result.is_ok() || result == Err(twilight_common::syscall::types::EOPNOTSUPP));
+    /// ```
+    ///
+    /// @param addr The peer Unix address.
+    /// @param cred The peer credentials to associate with the connection.
+    /// @returns `Ok(())` if the socket connects, or `EOPNOTSUPP` for non-Unix sockets.
     pub fn connect_unix(&mut self, addr: UnixAddr, cred: unix::PeerCredentials) -> Result<(), i32> {
         match self {
             SocketFile::Unix(s) => s.connect(addr, cred),
@@ -244,6 +256,18 @@ impl SocketFile {
         }
     }
 
+    /// Gets the stored length of the Unix socket address.
+    ///
+    /// # Returns
+    ///
+    /// The Unix socket address length, or `0` for non-Unix sockets.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let len = socket.addr_len_unix();
+    /// assert_eq!(len, 0);
+    /// ```
     pub fn addr_len_unix(&self) -> u32 {
         match self {
             SocketFile::Unix(s) => s.addr_len,
@@ -251,6 +275,13 @@ impl SocketFile {
         }
     }
 
+    /// Returns the peer credentials for a Unix socket.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let cred = socket_file.peer_cred_unix();
+    /// ```
     pub fn peer_cred_unix(&self) -> Option<unix::PeerCredentials> {
         match self {
             SocketFile::Unix(s) => s.peer_cred,
@@ -259,6 +290,14 @@ impl SocketFile {
     }
 }
 
+/// Generates a random ephemeral port number.
+///
+/// # Examples
+///
+/// ```
+/// let port = random_port();
+/// assert!((49152..=65535).contains(&port));
+/// ```
 fn random_port() -> u16 {
     49152 + sys::rng::get_u16() % 16384
 }

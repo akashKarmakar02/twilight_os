@@ -13,6 +13,14 @@ use twilight_common::syscall::numbers::*;
 use twilight_common::syscall::types::{EFAULT, EINVAL, ENOSYS, Rlimit64, Timespec};
 use x86_64::structures::idt::InterruptStackFrame;
 
+/// Dispatches a syscall, stores the result in `regs`, and delivers pending signals.
+///
+/// # Examples
+///
+/// ```
+/// syscall_handler(&mut stack_frame, &mut regs);
+/// assert_eq!(regs.rax, 0);
+/// ```
 #[allow(dead_code)]
 pub extern "sysv64" fn syscall_handler(
     _stack_frame: &mut InterruptStackFrame,

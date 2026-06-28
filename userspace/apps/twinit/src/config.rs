@@ -82,6 +82,20 @@ pub struct ServiceConfig {
 // Loading
 // ---------------------------------------------------------------------------
 
+/// Loads service configurations from a directory for the given runlevel.
+///
+/// Reads `.toml` service files in sorted order, parses each file, and keeps
+/// enabled services that match `runlevel`. Services with an on-demand TXPC
+/// configuration are also included when their runlevel matches.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// # let configs = load_service_configs(Path::new("/etc/twinit/services"), "default");
+/// # let _ = configs;
+/// ```
+pub fn load_service_configs(directory: &Path, runlevel: &str) -> Vec<ServiceConfig> {
 pub fn load_service_configs(directory: &Path, runlevel: &str) -> Vec<ServiceConfig> {
     let Ok(entries) = fs::read_dir(directory) else {
         println!(
@@ -131,6 +145,31 @@ pub fn load_service_configs(directory: &Path, runlevel: &str) -> Vec<ServiceConf
     configs
 }
 
+/// Creates the built-in interactive fallback shell service configuration.
+
+///
+
+/// # Parameters
+
+///
+
+/// * `runlevel` - The runlevel assigned to the returned configuration.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// let service = fallback_shell("default");
+
+/// assert_eq!(service.name, "fallback-shell");
+
+/// assert_eq!(service.runlevel, "default");
+
+/// ```
 pub fn fallback_shell(runlevel: &str) -> ServiceConfig {
     ServiceConfig {
         name: "fallback-shell".to_string(),
@@ -151,6 +190,27 @@ pub fn fallback_shell(runlevel: &str) -> ServiceConfig {
 // Parsing
 // ---------------------------------------------------------------------------
 
+/// Parses a service configuration file into a `ServiceConfig`.
+///
+/// # Errors
+///
+/// Returns an error if the file contains an invalid field, a duplicate field, a missing required
+/// field, or a value that does not match the expected format.
+///
+/// # Examples
+///
+/// ```
+/// let contents = r#"
+/// name = "example"
+/// exec = "/bin/example"
+/// enabled = true
+/// "#;
+///
+/// let config = parse_service_config(contents).unwrap();
+/// assert_eq!(config.name, "example");
+/// assert_eq!(config.exec, "/bin/example");
+/// ```
+pub fn parse_service_config(contents: &str) -> Result<ServiceConfig, String> {
 pub fn parse_service_config(contents: &str) -> Result<ServiceConfig, String> {
     let mut fields = HashMap::<String, String>::new();
     let mut current_section = String::new();
@@ -349,6 +409,14 @@ fn parse_string(value: &str) -> Result<String, String> {
     Ok(result)
 }
 
+/// Parses a bracketed list of quoted strings.
+///
+/// # Examples
+///
+/// ```
+/// let values = parse_string_array(r#"["a", "b c"]"#).unwrap();
+/// assert_eq!(values, vec!["a", "b c"]);
+/// ```
 fn parse_string_array(value: &str) -> Result<Vec<String>, String> {
     let value = value.trim();
     if !value.starts_with('[') || !value.ends_with(']') {
@@ -382,6 +450,14 @@ fn parse_string_array(value: &str) -> Result<Vec<String>, String> {
     Ok(values)
 }
 
+/// Parses a bracketed list of unsigned integers.
+///
+/// # Examples
+///
+/// ```
+/// let values = parse_int_array("[1, 2, 3]").unwrap();
+/// assert_eq!(values, vec![1, 2, 3]);
+/// ```
 fn parse_int_array(value: &str) -> Result<Vec<u32>, String> {
     let value = value.trim();
     if !value.starts_with('[') || !value.ends_with(']') {
@@ -405,6 +481,14 @@ fn parse_int_array(value: &str) -> Result<Vec<u32>, String> {
     Ok(values)
 }
 
+/// Parses a boolean literal.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(parse_bool("true").unwrap(), true);
+/// assert_eq!(parse_bool("false").unwrap(), false);
+/// ```
 fn parse_bool(value: &str) -> Result<bool, String> {
     match value {
         "true" => Ok(true),

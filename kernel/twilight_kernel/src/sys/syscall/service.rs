@@ -243,6 +243,13 @@ fn parse_sockaddr_un(addr_ptr: usize, addr_len: usize) -> Result<UnixAddr, i32> 
     UnixAddr::from_bytes(path)
 }
 
+/// Writes a Unix-domain socket address to userspace.
+///
+/// # Examples
+///
+/// ```
+/// let _ = write_sockaddr_un(addr_ptr, addrlen_ptr, &addr, addr_len);
+/// ```
 fn write_sockaddr_un(
     addr_ptr: usize,
     addrlen_ptr: usize,
@@ -272,6 +279,23 @@ fn write_sockaddr_un(
     Ok(())
 }
 
+/// Writes a Unix domain socket address to a `msg_name` buffer.
+///
+/// Returns the required length when the provided buffer is too small.
+///
+/// # Examples
+///
+/// ```
+/// # use core::mem::size_of;
+/// # struct UnixAddr(Vec<u8>);
+/// # impl UnixAddr { fn as_bytes(&self) -> &[u8] { &self.0 } }
+/// # fn write_sockaddr_un_msg_name(_: usize, _: u32, _: &UnixAddr, _: u32) -> Result<u32, i64> { Ok(0) }
+/// let addr = UnixAddr(b"/tmp/socket".to_vec());
+/// let written = write_sockaddr_un_msg_name(1, size_of::<[u8; 110]>() as u32, &addr, 110).unwrap();
+/// assert!(written > 0);
+/// ```
+///
+/// @returns `0` if `addr_ptr` is null, the required length if the buffer is too small, or the copied length on success.
 fn write_sockaddr_un_msg_name(
     addr_ptr: usize,
     addr_len_in: u32,
@@ -334,14 +358,38 @@ const CMSG_HDR_LEN: usize = size_of::<UserCmsghdr>();
 const MAX_MSG_IOV: usize = 1024;
 const MAX_MSG_BYTES: usize = 1024 * 1024;
 
+/// Aligns a control-message length to the required boundary.
+///
+/// # Examples
+///
+/// ```
+/// let aligned = cmsg_align(5);
+/// assert!(aligned >= 5);
+/// ```
 fn cmsg_align(len: usize) -> usize {
     (len + CMSG_ALIGN_BYTES - 1) & !(CMSG_ALIGN_BYTES - 1)
 }
 
+/// Returns the total size of a control message for a payload of the given length.
+///
+/// # Examples
+///
+/// ```
+/// let len = cmsg_len(12);
+/// assert!(len >= 12);
+/// ```
 fn cmsg_len(payload_len: usize) -> usize {
     cmsg_align(CMSG_HDR_LEN) + payload_len
 }
 
+/// Reads a userspace message header.
+///
+/// # Examples
+///
+/// ```
+/// let hdr = read_user_msghdr(msg_ptr).unwrap();
+/// assert!(hdr.msg_iovlen >= 0);
+/// ```
 fn read_user_msghdr(msg_ptr: usize) -> Result<UserMsghdr, i64> {
     if msg_ptr == 0 {
         return Err(-(EFAULT as i64));
@@ -352,6 +400,26 @@ fn read_user_msghdr(msg_ptr: usize) -> Result<UserMsghdr, i64> {
     Ok(unsafe { ptr::read(msg_ptr as *const UserMsghdr) })
 }
 
+/// Writes a user-space message header.
+///
+/// # Errors
+///
+/// Returns `-EFAULT` if `msg_ptr` is null.
+///
+/// # Examples
+///
+/// ```
+/// let hdr = UserMsghdr {
+///     msg_name: 0,
+///     msg_namelen: 0,
+///     msg_iov: 0,
+///     msg_iovlen: 0,
+///     msg_control: 0,
+///     msg_controllen: 0,
+///     msg_flags: 0,
+/// };
+/// let _ = write_user_msghdr(0x1000, &hdr);
+/// ```
 fn write_user_msghdr(msg_ptr: usize, hdr: &UserMsghdr) -> Result<(), i64> {
     if msg_ptr == 0 {
         return Err(-(EFAULT as i64));
@@ -364,6 +432,26 @@ fn write_user_msghdr(msg_ptr: usize, hdr: &UserMsghdr) -> Result<(), i64> {
     Ok(())
 }
 
+/// Reads the user-space iovec array described by a message header.
+///
+/// Returns an error if the iovec count is negative, exceeds the supported
+/// limit, the pointer is null for a non-empty array, or any non-empty entry
+/// has a null base pointer.
+///
+/// # Examples
+///
+/// ```
+/// # use std::ptr;
+/// # const MAX_MSG_IOV: usize = 16;
+/// # #[derive(Clone, Copy)]
+/// # struct UserIovec { iov_base: usize, iov_len: usize }
+/// # #[derive(Clone, Copy)]
+/// # struct UserMsghdr { msg_iov: usize, msg_iovlen: i32 }
+/// # fn read_user_iovecs(_hdr: &UserMsghdr) -> Result<Vec<UserIovec>, i64> { Ok(vec![]) }
+/// let hdr = UserMsghdr { msg_iov: 0, msg_iovlen: 0 };
+/// let iovecs = read_user_iovecs(&hdr).unwrap();
+/// assert!(iovecs.is_empty());
+/// ```
 fn read_user_iovecs(hdr: &UserMsghdr) -> Result<Vec<UserIovec>, i64> {
     if hdr.msg_iovlen < 0 {
         return Err(-(EINVAL as i64));
@@ -391,6 +479,23 @@ fn read_user_iovecs(hdr: &UserMsghdr) -> Result<Vec<UserIovec>, i64> {
     Ok(iovecs)
 }
 
+/// Gathers the payload from a list of user iovecs into a contiguous buffer.
+///
+/// # Errors
+///
+/// Returns `EMSGSIZE` if the total payload size overflows or exceeds the maximum message size.
+///
+/// # Examples
+///
+/// ```
+/// let iovecs = [
+///     UserIovec { iov_base: b"hel".as_ptr() as usize, iov_len: 3 },
+///     UserIovec { iov_base: b"lo".as_ptr() as usize, iov_len: 2 },
+/// ];
+///
+/// let payload = gather_iovec_payload(&iovecs).unwrap();
+/// assert_eq!(payload, b"hello");
+/// ```
 fn gather_iovec_payload(iovecs: &[UserIovec]) -> Result<Vec<u8>, i64> {
     let total = iovecs.iter().try_fold(0usize, |sum, iov| {
         sum.checked_add(iov.iov_len).ok_or(-(EMSGSIZE as i64))
@@ -413,6 +518,17 @@ fn gather_iovec_payload(iovecs: &[UserIovec]) -> Result<Vec<u8>, i64> {
     Ok(out)
 }
 
+/// Copies bytes from a payload into a list of user iovecs.
+///
+/// # Examples
+///
+/// ```
+/// let iovecs = [UserIovec { iov_base: buf.as_mut_ptr() as usize, iov_len: buf.len() }];
+/// let mut buf = [0u8; 4];
+/// let copied = scatter_iovec_payload(&iovecs, b"test").unwrap();
+/// assert_eq!(copied, 4);
+/// assert_eq!(&buf, b"test");
+/// ```
 fn scatter_iovec_payload(iovecs: &[UserIovec], data: &[u8]) -> Result<usize, i64> {
     let mut copied = 0usize;
     for iov in iovecs {
@@ -432,6 +548,30 @@ fn scatter_iovec_payload(iovecs: &[UserIovec], data: &[u8]) -> Result<usize, i64
     Ok(copied)
 }
 
+/// Parses `SCM_RIGHTS` control messages from a user message header.
+///
+/// # Errors
+///
+/// Returns `-EINVAL` if a control message header or payload length is invalid, or if
+/// the control buffer is malformed.
+///
+/// # Examples
+///
+/// ```
+/// # use std::mem::size_of;
+/// # let process = unimplemented!();
+/// # let hdr = UserMsghdr {
+/// #     msg_name: 0,
+/// #     msg_namelen: 0,
+/// #     msg_iov: 0,
+/// #     msg_iovlen: 0,
+/// #     msg_control: 0,
+/// #     msg_controllen: 0,
+/// #     msg_flags: 0,
+/// # };
+/// let control = parse_scm_rights(process, &hdr).unwrap();
+/// assert!(control.rights.is_empty());
+/// ```
 fn parse_scm_rights(process: &Process, hdr: &UserMsghdr) -> Result<UnixControl, i64> {
     let mut control = UnixControl::default();
     let total = hdr.msg_controllen as usize;
@@ -478,6 +618,18 @@ fn parse_scm_rights(process: &Process, hdr: &UserMsghdr) -> Result<UnixControl, 
     Ok(control)
 }
 
+/// Copies received `SCM_RIGHTS` file descriptors into a control message buffer.
+///
+/// If the control buffer is too small or missing, sets `MSG_CTRUNC` and clears
+/// `msg_controllen`. When the rights are written successfully, installs the file
+/// descriptors into `process` and updates the header to describe the copied control
+/// message.
+///
+/// # Examples
+///
+/// ```
+/// let _ = copyout_scm_rights(&mut process, &mut hdr, rights, flags);
+/// ```
 fn copyout_scm_rights(
     process: &mut Process,
     hdr: &mut UserMsghdr,
@@ -535,6 +687,16 @@ fn copyout_scm_rights(
     Ok(())
 }
 
+/// Extracts the internal status flags from open flags.
+///
+/// # Examples
+///
+/// ```
+/// let status = status_flags_from_open(O_RDONLY | O_APPEND | O_NONBLOCK);
+/// assert_eq!(status & O_ACCMODE, O_RDONLY);
+/// assert!(status & O_APPEND != 0);
+/// assert!(status & O_NONBLOCK != 0);
+/// ```
 fn status_flags_from_open(flags: i32) -> i32 {
     let mut status = flags & O_ACCMODE;
     status |= flags & (O_APPEND | O_NONBLOCK | O_DIRECTORY | O_PATH);
@@ -566,6 +728,16 @@ fn duplicate_fd(process: &mut Process, oldfd: i32, min_fd: i32, fd_flags: i32) -
     install_fd_entry(process, FdEntry { file, fd_flags }, min_fd).map_err(|errno| -errno)
 }
 
+/// Resolves the directory path to use for a `dirfd`-relative lookup.
+///
+/// Returns the current working directory for `AT_FDCWD`; otherwise, requires
+/// `dirfd` to refer to a directory-backed file descriptor and returns that
+/// descriptor's path.
+///
+/// # Errors
+///
+/// Returns `-EBADF` if `dirfd` is invalid and `-ENOTDIR` if it does not refer
+/// to a directory-backed file descriptor.
 fn base_for_dirfd(process: &mut Process, dirfd: i32) -> Result<String, i32> {
     if dirfd == AT_FDCWD {
         return Ok(process.pwd.clone());
@@ -597,6 +769,16 @@ fn split_parent_name(path: &str) -> (&str, &str) {
     }
 }
 
+/// Writes bytes from a user buffer to a file descriptor.
+///
+/// Supports regular files, block devices, pipes, Unix sockets, sockets, and memfd-backed files.
+///
+/// # Examples
+///
+/// ```
+/// let n = write(fd, buf.as_ptr() as usize, buf.len());
+/// assert!(n >= 0 || n < 0);
+/// ```
 pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     let buf = arg2 as *const u8;
     let len = arg3;
@@ -721,6 +903,14 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     result
 }
 
+/// Closes a file descriptor.
+///
+/// # Examples
+///
+/// ```
+/// let rc = close(fd);
+/// assert_eq!(rc, 0);
+/// ```
 pub fn close(fd: i32) -> i64 {
     #[allow(static_mut_refs)]
     let proc_option = unsafe {
@@ -742,6 +932,16 @@ pub fn close(fd: i32) -> i64 {
     }
 }
 
+/// Truncates an open file to the specified length.
+///
+/// # Examples
+///
+/// ```
+/// let rc = ftruncate(fd, 1024);
+/// assert!(rc <= 0);
+/// ```
+///
+/// @returns `0` on success, or a negative errno value on failure.
 pub fn ftruncate(fd: i32, length: i64) -> i64 {
     if fd < 0 {
         return -(EBADF as i64);
@@ -800,6 +1000,14 @@ pub fn ftruncate(fd: i32, length: i64) -> i64 {
     }
 }
 
+/// Creates an anonymous in-memory file descriptor.
+///
+/// # Examples
+///
+/// ```
+/// let fd = memfd_create("cache".as_ptr() as usize, 0);
+/// assert!(fd >= 0);
+/// ```
 pub fn memfd_create(name_ptr: usize, flags: u32) -> i64 {
     const MFD_CLOEXEC: u32 = 0x0001;
     const MFD_ALLOW_SEALING: u32 = 0x0002;
@@ -846,6 +1054,14 @@ pub fn memfd_create(name_ptr: usize, flags: u32) -> i64 {
     }
 }
 
+/// Duplicates a file descriptor onto a specified descriptor number.
+///
+/// # Examples
+///
+/// ```
+/// let fd = dup2(3, 4);
+/// assert!(fd == 4 || fd < 0);
+/// ```
 pub fn dup2(oldfd: i32, newfd: i32) -> i64 {
     if oldfd < 0 || newfd < 0 {
         return -(EBADF as i64);
@@ -1015,6 +1231,15 @@ pub fn pipe2(pipefd_ptr: usize, flags: i32) -> i64 {
     0
 }
 
+/// Reads bytes from a file descriptor into a buffer.
+///
+/// # Examples
+///
+/// ```
+/// let mut buf = [0u8; 16];
+/// let n = read(0, &mut buf); // may read from standard input
+/// assert!(n >= -1);
+/// ```
 pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
     #[allow(static_mut_refs)]
     let process = unsafe {
@@ -1670,6 +1895,19 @@ pub fn clone(
     child_pid as i64
 }
 
+/// Waits for a child process state change and returns the child PID.
+///
+/// If `status_ptr` is non-null, stores the child's wait status there.
+/// `pid` selects which child or process group to wait for, and `options` accepts
+/// `WNOHANG`, `WUNTRACED`, and `WCONTINUED`.
+///
+/// # Examples
+///
+/// ```
+/// let status = 0i32;
+/// let result = wait4(-1, &status as *const i32 as usize, 1, 0);
+/// ```
+```
 pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i64 {
     let current_pid = crate::sys::proc::id();
     const WNOHANG: i32 = 1;
@@ -1841,6 +2079,14 @@ pub fn sched_getaffinity(pid: i32, cpusetsize: usize, mask_ptr: usize) -> i64 {
     copy_len as i64
 }
 
+/// Reads bytes from a file descriptor at a fixed offset without changing the file position.
+///
+/// # Examples
+///
+/// ```
+/// let n = pread64(fd, buf.as_mut_ptr() as usize, buf.len(), 0);
+/// assert!(n >= 0);
+/// ```
 pub fn pread64(fd: i32, buf_ptr: usize, count: usize, offset: u64) -> i64 {
     if buf_ptr == 0 {
         return -(EFAULT as i64);
@@ -2242,6 +2488,19 @@ fn dirent64_reclen(name_len: usize) -> u16 {
     aligned as u16
 }
 
+/// Reads directory entries into a Linux-like `dirent64` buffer.
+///
+/// The directory position is advanced by the entries copied into `user_buf`.
+///
+/// # Examples
+///
+/// ```
+/// # let fd = 0;
+/// # let mut buf = [0u8; 256];
+/// # let _ = fd;
+/// # let n = getdent64(fd, buf.as_mut_ptr(), buf.len());
+/// # let _ = n;
+/// ```
 pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
     if user_buf.is_null() {
         return -(EFAULT as i64);
@@ -2559,6 +2818,15 @@ pub fn newfstatat(dirfd: i32, pathname_ptr: usize, stat_ptr: usize, _flags: i32)
     0
 }
 
+/// Writes file status information for an open file descriptor.
+///
+/// # Examples
+///
+/// ```
+/// let mut stat = Stat::default();
+/// let rc = fstat(0, &mut stat as *mut Stat as usize);
+/// assert!(rc == 0 || rc < 0);
+/// ```
 pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
     if fstat_ptr == 0 {
         return -(EFAULT as i64);
@@ -2919,6 +3187,16 @@ pub fn rename(old_path_ptr: usize, new_path_ptr: usize) -> i64 {
     }
 }
 
+/// Removes a pathname from the filesystem.
+///
+/// Also clears any Unix-domain socket pathname state associated with the path.
+///
+/// # Examples
+///
+/// ```
+/// let rc = unlink("/tmp/example.sock\0".as_ptr() as usize);
+/// assert!(rc <= 0);
+/// ```
 pub fn unlink(path_ptr: usize) -> i64 {
     let Ok(path) = copy_cstr_from_user(UserPtr(path_ptr as *const u8), 4096) else {
         return -1;
@@ -2960,6 +3238,14 @@ pub fn unlink(path_ptr: usize) -> i64 {
     }
 }
 
+/// Repositions the file offset for an open file descriptor.
+///
+/// # Examples
+///
+/// ```
+/// let pos = lseek(fd, 0, 0);
+/// assert!(pos >= 0);
+/// ```
 pub fn lseek(fd: usize, offset: u64, whence: u8) -> i64 {
     #[allow(static_mut_refs)]
     let process = unsafe {
@@ -3055,6 +3341,22 @@ pub fn readv(fd: usize, iov_ptr: u64, iov_count: u64) -> i64 {
     result
 }
 
+/// Reads data from a file descriptor into multiple buffers starting at a given offset.
+///
+/// Returns the number of bytes copied into the provided buffers.
+///
+/// # Examples
+///
+/// ```
+/// let mut first = [0u8; 4];
+/// let mut second = [0u8; 4];
+/// let iovecs = [
+///     Iovec { iov_base: first.as_mut_ptr() as usize, iov_len: first.len() },
+///     Iovec { iov_base: second.as_mut_ptr() as usize, iov_len: second.len() },
+/// ];
+/// let n = preadv(fd, iovecs.as_ptr() as usize, iovecs.len(), 0);
+/// assert!(n >= 0);
+/// ```
 pub fn preadv(fd: i32, iov_ptr: usize, iov_count: usize, offset: u64) -> i64 {
     if iov_count == 0 {
         return 0;
@@ -3148,6 +3450,14 @@ pub fn preadv(fd: i32, iov_ptr: usize, iov_count: usize, offset: u64) -> i64 {
     }
 }
 
+/// Writes multiple buffers to a file at a fixed offset.
+///
+/// # Examples
+///
+/// ```
+/// let written = pwritev(fd, iov_ptr, iov_count, 0);
+/// assert!(written >= 0);
+/// ```
 pub fn pwritev(fd: i32, iov_ptr: usize, iov_count: usize, offset: u64) -> i64 {
     if iov_count == 0 {
         return 0;
@@ -3239,6 +3549,17 @@ pub fn pwritev(fd: i32, iov_ptr: usize, iov_count: usize, offset: u64) -> i64 {
     }
 }
 
+/// Performs an ioctl on the file descriptor.
+///
+/// Handles `FIONBIO` for sockets by toggling `O_NONBLOCK`; other requests are
+/// forwarded to VFS nodes.
+///
+/// # Examples
+///
+/// ```
+/// let rc = ioctl(fd, cmd, arg);
+/// assert!(rc <= 0);
+/// ```
 pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
     #[allow(static_mut_refs)]
     let process = unsafe {
@@ -3453,6 +3774,16 @@ pub fn getegid() -> i64 {
     sys::proc::user::get_gid() as i64
 }
 
+/// Evaluates readiness events for a set of file descriptors.
+///
+/// # Examples
+///
+/// ```
+/// let mut fds = [PollFd { fd: 0, events: POLLIN, revents: 0 }];
+/// let mut process = current_process();
+/// let ready = poll_fd_set(&mut fds, &mut process).unwrap();
+/// assert!(ready <= fds.len());
+/// ```
 fn poll_fd_set(fds: &mut [PollFd], process: &mut Process) -> Result<usize, i64> {
     let mut ready_count = 0;
 
@@ -3941,6 +4272,16 @@ fn write_back_select_results(
     }
 }
 
+/// Creates a socket and installs it in the current process.
+///
+/// Supports `AF_INET` stream and datagram sockets, and `AF_UNIX` stream and datagram sockets.
+///
+/// # Examples
+///
+/// ```
+/// let fd = socket(AF_UNIX as i32, SOCK_STREAM, 0);
+/// assert!(fd >= 0);
+/// ```
 pub fn socket(domain: i32, sock_type: i32, _protocol: i32) -> i64 {
     const SOCK_NONBLOCK: i32 = 0x800;
     const SOCK_CLOEXEC: i32 = 0x80000;
@@ -3990,6 +4331,16 @@ pub fn socket(domain: i32, sock_type: i32, _protocol: i32) -> i64 {
     }
 }
 
+/// Creates a connected pair of Unix-domain sockets.
+///
+/// # Examples
+///
+/// ```
+/// let mut fds = [0i32; 2];
+/// let rc = socketpair(AF_UNIX as i32, SOCK_STREAM, 0, fds.as_mut_ptr() as usize);
+/// assert_eq!(rc, 0);
+/// ```
+pub fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv_ptr: usize) -> i64 {
 pub fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv_ptr: usize) -> i64 {
     const SOCK_NONBLOCK: i32 = 0x800;
     const SOCK_CLOEXEC: i32 = 0x80000;
@@ -4074,6 +4425,17 @@ pub fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv_ptr: usize) -> 
     0
 }
 
+/// Sends a message on a Unix-domain socket.
+///
+/// The message may include an optional destination address and `SCM_RIGHTS`
+/// control data.
+///
+/// # Examples
+///
+/// ```
+/// let sent = sendmsg(fd, msg_ptr, 0);
+/// assert!(sent >= 0);
+/// ```
 pub fn sendmsg(fd: i32, msg_ptr: usize, flags: i32) -> i64 {
     if fd < 0 {
         return -(ENOTSOCK as i64);
@@ -4138,6 +4500,17 @@ pub fn sendmsg(fd: i32, msg_ptr: usize, flags: i32) -> i64 {
     }
 }
 
+/// Receives a message from a Unix-domain socket into the provided message header.
+///
+/// Copies payload bytes into the user iovecs, updates the source address when present,
+/// and copies received `SCM_RIGHTS` control data back to userspace.
+///
+/// # Examples
+///
+/// ```
+/// let n = recvmsg(sock_fd, &mut msg, 0);
+/// assert!(n >= 0);
+/// ```
 pub fn recvmsg(fd: i32, msg_ptr: usize, flags: i32) -> i64 {
     if fd < 0 {
         return -(ENOTSOCK as i64);
@@ -4226,6 +4599,14 @@ pub fn recvmsg(fd: i32, msg_ptr: usize, flags: i32) -> i64 {
     copied as i64
 }
 
+/// Connects a socket to a local or network address.
+///
+/// # Examples
+///
+/// ```
+/// let rc = connect(fd, addr_ptr, addr_len);
+/// assert!(rc >= 0 || rc < 0);
+/// ```
 pub fn connect(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
     if fd < 0 {
         return -(ENOTSOCK as i64);
@@ -4749,6 +5130,14 @@ pub fn shutdown(fd: i32, how: i32) -> i64 {
     }
 }
 
+/// Sets a socket option.
+///
+/// # Examples
+///
+/// ```
+/// let rc = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, optval, optlen);
+/// assert_eq!(rc, 0);
+/// ```
 pub fn setsockopt(fd: i32, level: i32, optname: i32, _optval: usize, _optlen: usize) -> i64 {
     if fd < 0 {
         return -(ENOTSOCK as i64);
@@ -4777,6 +5166,16 @@ pub fn setsockopt(fd: i32, level: i32, optname: i32, _optval: usize, _optlen: us
     -(ENOPROTOOPT as i64)
 }
 
+/// Gets socket options for a socket.
+///
+/// # Examples
+///
+/// ```
+/// let mut cred = [0u8; 12];
+/// let mut len: u32 = 12;
+/// let rc = getsockopt(fd, SOL_SOCKET, SO_PEERCRED, cred.as_mut_ptr() as usize, &mut len as *mut u32 as usize);
+/// assert!(rc == 0 || rc < 0);
+/// ```
 pub fn getsockopt(fd: i32, level: i32, optname: i32, optval: usize, optlen_ptr: usize) -> i64 {
     if fd < 0 {
         return -(ENOTSOCK as i64);

@@ -1896,6 +1896,15 @@ fn switch_by_index_guarded(
     true
 }
 
+/// Handles timer-driven preemption for the current interrupt frame.
+///
+/// # Examples
+///
+/// ```
+/// let frame = core::ptr::null_mut();
+/// let result = timer_preempt_common(frame, 1);
+/// assert_eq!(result, frame);
+/// ```
 fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
     // need_resched is already set by on_timer_tick() (called via pit_tick_isr
     // before this function). The logic below decides whether to act on it now.

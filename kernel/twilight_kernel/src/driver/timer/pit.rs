@@ -46,6 +46,13 @@ pub fn monotonic_ns_u64() -> u64 {
     core::cmp::min(monotonic_ns(), u64::MAX as u128) as u64
 }
 
+/// Sleeps until the specified number of nanoseconds has elapsed.
+///
+/// # Examples
+///
+/// ```
+/// sleep_ns(1_000_000);
+/// ```
 pub fn sleep_ns(nanoseconds: u64) {
     if nanoseconds == 0 {
         return;

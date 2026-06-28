@@ -54,6 +54,12 @@ typedef struct {
     Global xdg_wm_base;
 } Globals;
 
+/**
+ * Writes a 32-bit value to a buffer in little-endian order.
+ * @param buf Destination buffer.
+ * @param offset Current write offset; advanced by 4 bytes.
+ * @param value Value to write.
+ */
 static void put_u32(uint8_t *buf, size_t *offset, uint32_t value) {
     buf[(*offset)++] = (uint8_t)(value & 0xff);
     buf[(*offset)++] = (uint8_t)((value >> 8) & 0xff);
@@ -61,6 +67,12 @@ static void put_u32(uint8_t *buf, size_t *offset, uint32_t value) {
     buf[(*offset)++] = (uint8_t)((value >> 24) & 0xff);
 }
 
+/**
+ * Reads a 32-bit little-endian value from a byte buffer.
+ * @param buf Source buffer.
+ * @param offset Byte offset of the first value byte.
+ * @return The decoded 32-bit value.
+ */
 static uint32_t get_u32(const uint8_t *buf, size_t offset) {
     return (uint32_t)buf[offset] |
            ((uint32_t)buf[offset + 1] << 8) |
@@ -68,6 +80,12 @@ static uint32_t get_u32(const uint8_t *buf, size_t offset) {
            ((uint32_t)buf[offset + 3] << 24);
 }
 
+/**
+ * Writes a NUL-terminated string in Wayland wire format.
+ * @param buf Destination buffer.
+ * @param offset Byte offset updated after writing.
+ * @param value String to write.
+ */
 static void put_string(uint8_t *buf, size_t *offset, const char *value) {
     size_t len = strlen(value) + 1;
     put_u32(buf, offset, (uint32_t)len);
@@ -79,6 +97,13 @@ static void put_string(uint8_t *buf, size_t *offset, const char *value) {
     }
 }
 
+/**
+ * Reads an exact number of bytes from a file descriptor.
+ * @param fd File descriptor to read from.
+ * @param buf Destination buffer.
+ * @param len Number of bytes to read.
+ * @return 0 on success, -1 on error.
+ */
 static int read_exact(int fd, void *buf, size_t len) {
     uint8_t *out = buf;
     size_t done = 0;
@@ -97,6 +122,15 @@ static int read_exact(int fd, void *buf, size_t len) {
     return 0;
 }
 
+/**
+ * Sends a Wayland request or event message.
+ * @param fd Connected file descriptor.
+ * @param object_id Target object identifier.
+ * @param opcode Message opcode.
+ * @param payload Message payload bytes.
+ * @param payload_len Payload length in bytes.
+ * @returns 0 on success, -1 on failure.
+ */
 static int send_message(int fd, uint32_t object_id, uint16_t opcode,
                         const uint8_t *payload, size_t payload_len) {
     uint8_t message[256];
@@ -115,6 +149,12 @@ static int send_message(int fd, uint32_t object_id, uint16_t opcode,
     return write(fd, message, size) == (ssize_t)size ? 0 : -1;
 }
 
+/**
+ * Sends a Wayland request and passes a file descriptor with it.
+ * @param sock Connected socket used to send the message.
+ * @param pass_fd File descriptor to attach to the request.
+ * @return 0 on success, -1 on failure.
+ */
 static int send_message_with_fd(int sock, uint32_t object_id, uint16_t opcode,
                                 const uint8_t *payload, size_t payload_len,
                                 int pass_fd) {
@@ -152,6 +192,16 @@ static int send_message_with_fd(int sock, uint32_t object_id, uint16_t opcode,
     return sendmsg(sock, &msg, 0) == (ssize_t)size ? 0 : -1;
 }
 
+/**
+ * Receives a Wayland message and extracts its header and payload.
+ * @param fd File descriptor to read from.
+ * @param object_id Receives the message object ID.
+ * @param opcode Receives the message opcode.
+ * @param payload Buffer that receives the message payload.
+ * @param payload_cap Size of @p payload in bytes.
+ * @param payload_len Receives the payload length.
+ * @return 0 on success, or -1 on failure.
+ */
 static int recv_message(int fd, uint32_t *object_id, uint16_t *opcode,
                         uint8_t *payload, size_t payload_cap,
                         size_t *payload_len) {
@@ -171,6 +221,10 @@ static int recv_message(int fd, uint32_t *object_id, uint16_t *opcode,
     return read_exact(fd, payload, *payload_len);
 }
 
+/**
+ * Connects to the Wayland compositor socket.
+ * @return A connected socket file descriptor on success, or -1 on failure.
+ */
 static int connect_wayland(void) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -186,6 +240,12 @@ static int connect_wayland(void) {
     return fd;
 }
 
+/**
+ * Requests the Wayland registry and records the globals needed by the client.
+ * @param fd Connected Wayland socket.
+ * @param globals Storage for the discovered global interfaces.
+ * @returns 0 on success, -1 on failure.
+ */
 static int get_registry(int fd, Globals *globals) {
     uint8_t payload[8];
     size_t offset = 0;
@@ -240,6 +300,13 @@ static int get_registry(int fd, Globals *globals) {
     return 0;
 }
 
+/**
+ * Binds a registry global to a new object ID.
+ * @param global Registry global to bind.
+ * @param interface Interface name to bind.
+ * @param new_id Object ID to assign to the bound interface.
+ * @return 0 on success, -1 on failure.
+ */
 static int bind_global(int fd, const Global *global, const char *interface,
                        uint32_t new_id) {
     uint8_t payload[128];
@@ -251,6 +318,10 @@ static int bind_global(int fd, const Global *global, const char *interface,
     return send_message(fd, REGISTRY_ID, WL_REGISTRY_BIND, payload, offset);
 }
 
+/**
+ * Reads the supported shared-memory pixel formats.
+ * @returns `0` when both `WL_SHM_FORMAT_ARGB8888` and `WL_SHM_FORMAT_XRGB8888` are received, `-1` otherwise.
+ */
 static int read_shm_formats(int fd) {
     int argb = 0;
     int xrgb = 0;
@@ -279,6 +350,10 @@ static int read_shm_formats(int fd) {
     return 0;
 }
 
+/**
+ * Fills the pixel buffer with a fixed color pattern.
+ * @param pixels Destination buffer for the image pixels.
+ */
 static void fill_pattern(uint32_t *pixels) {
     for (int y = 0; y < HEIGHT; ++y) {
         for (int x = 0; x < WIDTH; ++x) {
@@ -294,6 +369,13 @@ static void fill_pattern(uint32_t *pixels) {
     }
 }
 
+/**
+ * Requests creation of a shared-memory pool.
+ * @param fd Wayland connection file descriptor.
+ * @param memfd File descriptor for the shared-memory backing store.
+ * @param size Pool size in bytes.
+ * @return 0 on success, or -1 on failure.
+ */
 static int create_pool(int fd, int memfd, size_t size) {
     uint8_t payload[16];
     size_t offset = 0;
@@ -302,6 +384,10 @@ static int create_pool(int fd, int memfd, size_t size) {
     return send_message_with_fd(fd, SHM_ID, WL_SHM_CREATE_POOL, payload, offset, memfd);
 }
 
+/**
+ * Requests a shared-memory buffer from the pool.
+ * @param fd Wayland connection file descriptor.
+ */
 static int create_buffer(int fd) {
     uint8_t payload[32];
     size_t offset = 0;
@@ -314,6 +400,11 @@ static int create_buffer(int fd) {
     return send_message(fd, POOL_ID, WL_SHM_POOL_CREATE_BUFFER, payload, offset);
 }
 
+/**
+ * Creates a compositor surface.
+ * @param fd Wayland connection socket.
+ * @returns 0 on success, -1 on failure.
+ */
 static int create_surface(int fd) {
     uint8_t payload[8];
     size_t offset = 0;
@@ -321,6 +412,10 @@ static int create_surface(int fd) {
     return send_message(fd, COMPOSITOR_ID, WL_COMPOSITOR_CREATE_SURFACE, payload, offset);
 }
 
+/**
+ * Attaches the shared buffer to the surface, damages the full frame, and commits it.
+ * @param fd Wayland connection socket.
+ */
 static int attach_damage_commit(int fd) {
     uint8_t payload[32];
     size_t offset = 0;
@@ -341,6 +436,10 @@ static int attach_damage_commit(int fd) {
     return send_message(fd, SURFACE_ID, WL_SURFACE_COMMIT, NULL, 0);
 }
 
+/**
+ * Waits for the buffer release event.
+ * @return 0 on success, -1 on error.
+ */
 static int wait_buffer_release(int fd) {
     uint32_t object = 0;
     uint16_t opcode = 0;
@@ -354,6 +453,10 @@ static int wait_buffer_release(int fd) {
     return 0;
 }
 
+/**
+ * Runs the Wayland SHM client demo.
+ * @returns Exit code indicating success or the stage at which initialization or rendering failed.
+ */
 int main(void) {
     int fd = connect_wayland();
     if (fd < 0) {

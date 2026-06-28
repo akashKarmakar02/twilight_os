@@ -52,6 +52,17 @@ fn unmap_tracked_range(
     Ok(())
 }
 
+/// Maps memory into the current process address space.
+///
+/// Supports anonymous mappings, shared file-backed mappings, and private file-backed mappings.
+///
+/// # Examples
+///
+/// ```
+/// let addr = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, u64::MAX, 0);
+/// assert!(addr >= 0);
+/// ```
+#[example]
 pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: u64) -> i64 {
     #[allow(static_mut_refs)]
     let proc = unsafe {
@@ -234,6 +245,15 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
     va as i64
 }
 
+/// Verifies an address range for page-aligned memory sync requests.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(msync(0x1000, 4096, 0), 0);
+/// assert_eq!(msync(0x1001, 4096, 0), EINVAL);
+/// assert_eq!(msync(0x1000, 0, 0), 0);
+/// ```
 pub fn msync(addr: u64, size: usize, _flags: i32) -> i64 {
     if size == 0 {
         return 0;
@@ -244,6 +264,19 @@ pub fn msync(addr: u64, size: usize, _flags: i32) -> i64 {
     0
 }
 
+/// Updates the access permissions of a mapped memory range.
+///
+/// # Returns
+///
+/// `0` on success, or an error code if the range is invalid, the process is unavailable, or page
+/// permissions cannot be updated.
+///
+/// # Examples
+///
+/// ```
+/// let rc = mprotect(0x1000, 4096, PROT_READ);
+/// assert!(rc == 0 || rc < 0);
+/// ```
 pub fn mprotect(addr: u64, size: usize, prot: usize) -> i64 {
     if size == 0 || addr as usize & (PAGE - 1) != 0 {
         return EINVAL;

@@ -7,6 +7,13 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+/**
+ * Sends a message and file descriptor over a Unix domain socket.
+ * @param sock Socket used to send the message.
+ * @param msg Message payload to send.
+ * @param fd File descriptor to pass with the message.
+ * @returns 0 on success, -1 on failure.
+ */
 static int send_fd(int sock, const char* msg, int fd) {
     struct iovec iov = {.iov_base = (void*)msg, .iov_len = strlen(msg)};
     char control[CMSG_SPACE(sizeof(int))];
@@ -24,6 +31,13 @@ static int send_fd(int sock, const char* msg, int fd) {
     return sendmsg(sock, &msgh, 0) >= 0 ? 0 : -1;
 }
 
+/**
+ * Receives a file descriptor and message from a Unix domain socket.
+ * @param sock Socket to read from.
+ * @param buf Buffer that receives the accompanying message.
+ * @param buf_size Size of buf, including space for the terminating null byte.
+ * @return Received file descriptor on success, or -1 on failure.
+ */
 static int recv_fd(int sock, char* buf, size_t buf_size) {
     struct iovec iov = {.iov_base = buf, .iov_len = buf_size - 1};
     char control[CMSG_SPACE(sizeof(int))];
@@ -47,6 +61,10 @@ static int recv_fd(int sock, char* buf, size_t buf_size) {
     return fd;
 }
 
+/**
+ * Starts the txpc echo service and processes forwarded client connections.
+ * @returns 0 on normal shutdown after the bootstrap connection ends, 1 on setup or registration failure.
+ */
 int main(void) {
     printf("txpc_echo_service: starting\n");
 

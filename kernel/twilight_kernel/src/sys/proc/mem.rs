@@ -170,6 +170,29 @@ impl ProcMM {
         Some(base)
     }
 
+    /// Records a mapped memory region.
+    
+    ///
+    
+    /// # Examples
+    
+    ///
+    
+    /// ```
+    
+    /// let mut mm = ProcMM::new(0x1000);
+    
+    /// mm.track_mmap(0x2000, 0x1000, MmapKind::Anonymous, VmPermissions {
+    
+    ///     read: true,
+    
+    ///     write: false,
+    
+    ///     execute: false,
+    
+    /// });
+    
+    /// ```
     pub fn track_mmap(
         &mut self,
         base: usize,
@@ -186,6 +209,15 @@ impl ProcMM {
         });
     }
 
+    /// Records a shared memory mapping backed by a memfd.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let memfd = Arc::new(Mutex::new(MemFd::default()));
+    /// proc_mm.track_memfd_mmap(0x1000, 0x2000, VmPermissions::from_prot(PROT_READ), memfd);
+    /// ```
+    ```
     pub fn track_memfd_mmap(
         &mut self,
         base: usize,
@@ -283,6 +315,18 @@ impl ProcMM {
         self.elf_regions = protect_elf_regions(&self.elf_regions, base, len, permissions);
     }
 
+    /// Removes mapped regions that overlap a range and returns the removed portions.
+    ///
+    /// Any overlapping region is split so that the remaining non-overlapping parts stay
+    /// tracked in `self.mmap_regions`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let removed = proc_mm.remove_mmap_range(0x1000, 0x2000);
+    /// assert!(removed.iter().all(|region| region.base >= 0x1000 && region.base < 0x3000));
+    /// ```
+    pub fn remove_mmap_range(&mut self, base: usize, len: usize) -> Vec<MmapRegion>
     pub fn remove_mmap_range(&mut self, base: usize, len: usize) -> Vec<MmapRegion> {
         let Some(end) = base.checked_add(len) else {
             return Vec::new();
@@ -372,6 +416,55 @@ impl ProcMM {
     }
 }
 
+/// Updates permissions for the portion of each mapping that overlaps a range.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// let regions = vec![MmapRegion {
+
+///     base: 0x1000,
+
+///     len: 0x3000,
+
+///     kind: MmapKind::Anonymous,
+
+///     permissions: VmPermissions { read: true, write: false, execute: false },
+
+///     memfd: None,
+
+/// }];
+
+///
+
+/// let updated = protect_mmap_regions(
+
+///     &regions,
+
+///     0x2000,
+
+///     0x1000,
+
+///     VmPermissions { read: true, write: true, execute: false },
+
+/// );
+
+///
+
+/// assert_eq!(updated.len(), 3);
+
+/// assert_eq!(updated[1].base, 0x2000);
+
+/// assert_eq!(updated[1].len, 0x1000);
+
+/// assert!(updated[1].permissions.write);
+
+/// ```
 fn protect_mmap_regions(
     regions: &[MmapRegion],
     base: usize,

@@ -55,6 +55,15 @@ pub struct ServiceState {
 }
 
 impl ServiceState {
+    /// Creates a new service runtime state for the given configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let state = ServiceState::new(config);
+    /// assert!(state.pid.is_none());
+    /// assert!(matches!(state.status, RuntimeStatus::Stopped));
+    /// ```
     pub fn new(config: ServiceConfig) -> Self {
         Self {
             config,
@@ -76,6 +85,15 @@ impl ServiceState {
 // Process spawning
 // ---------------------------------------------------------------------------
 
+/// Starts a service process and updates its runtime state.
+///
+/// If the service is disabled or already running, this does nothing.
+///
+/// # Examples
+///
+/// ```ignore
+/// start_service(&mut service);
+/// ```
 pub fn start_service(service: &mut ServiceState) {
     if service.disabled || service.pid.is_some() {
         return;
@@ -207,6 +225,19 @@ fn redirect_output(mode: OutputMode, target_fd: i32, log_writer: Option<&File>) 
 // Supervision loop
 // ---------------------------------------------------------------------------
 
+/// Runs the service supervision loop.
+///
+/// The loop reaps exited children, processes control and bootstrap clients, drains service logs,
+/// and pauses briefly between iterations.
+///
+/// # Examples
+///
+/// ```ignore
+/// let mut services: Vec<ServiceState> = Vec::new();
+/// let mut control: ControlServer = todo!();
+/// let mut bootstrap: BootstrapServer = todo!();
+/// supervise(&mut services, &mut control, &mut bootstrap);
+/// ```
 pub fn supervise(
     services: &mut [ServiceState],
     control: &mut ControlServer,
@@ -320,6 +351,19 @@ pub fn forward_service_log(service_name: &str, level: &str, line: &str) {
 // Child exit handling
 // ---------------------------------------------------------------------------
 
+/// Updates a service after a child process exits and applies restart policy.
+///
+/// Clears the running process association, drains any remaining log output, updates the
+/// recorded runtime status from the wait status, and restarts the service when its
+/// policy allows it. If repeated exits exceed the restart limit within the restart
+/// window, the service is disabled.
+///
+/// # Examples
+///
+/// ```
+/// # use std::time::Instant;
+/// # fn handle_child_exit(_: &mut [ServiceState], _: i32, _: i32) {}
+/// ```
 fn handle_child_exit(services: &mut [ServiceState], pid: i32, wait_status: i32) {
     let Some(service) = services.iter_mut().find(|service| service.pid == Some(pid)) else {
         println!("twinit: reaped unknown child pid={pid} status={wait_status:#x}");

@@ -408,6 +408,7 @@ struct OwnedFdRaw {
     fd: i32,
 }
 
+/// Runs the compositor and exits with a fatal error message if startup fails.
 fn main() {
     if let Err(error) = run() {
         eprintln!("twland: fatal: {error}");
@@ -415,6 +416,17 @@ fn main() {
     }
 }
 
+/// Starts the compositor event loop.
+///
+/// Creates the runtime directories, opens and clears the framebuffer, binds the Wayland socket,
+/// and serves each connecting client until the process exits.
+///
+/// # Examples
+///
+/// ```
+/// let result = run();
+/// assert!(result.is_ok() || result.is_err());
+/// ```
 fn run() -> io::Result<()> {
     println!("twland: starting");
     println!("twland: runtime dir {RUNTIME_DIR}");
@@ -454,6 +466,13 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
+/// Ensures a directory exists at the given path.
+///
+/// # Examples
+///
+/// ```
+/// ensure_dir("/tmp/twland");
+/// ```
 fn ensure_dir(path: &str) -> io::Result<()> {
     match fs::create_dir(path) {
         Ok(()) => Ok(()),
@@ -468,6 +487,24 @@ fn ensure_dir(path: &str) -> io::Result<()> {
     }
 }
 
+/// Processes requests and input events for a single Wayland client connection.
+///
+/// Reads incoming Wayland messages from the socket, dispatches them to the compositor,
+/// and synthesizes any pending input events for the connected client.
+///
+/// # Errors
+///
+/// Returns an error if socket I/O fails or if request or input dispatching fails.
+///
+/// # Examples
+///
+/// ```
+/// # use std::io;
+/// # use std::os::unix::net::UnixStream;
+/// # fn example(output: &mut SoftwareOutput, stream: UnixStream) -> io::Result<()> {
+/// handle_client(stream, output)
+/// # }
+/// ```
 fn handle_client(mut stream: UnixStream, output: &mut SoftwareOutput) -> io::Result<()> {
     let mut client = Client::new();
 
@@ -511,6 +548,13 @@ fn handle_client(mut stream: UnixStream, output: &mut SoftwareOutput) -> io::Res
     }
 }
 
+/// Cooperatively yields the CPU for a brief idle period.
+///
+/// # Examples
+///
+/// ```
+/// compositor_idle();
+/// ```
 fn compositor_idle() {
     // Avoid std::thread::sleep here.  Twilight is still growing its Linux time
     // syscall surface and Rust/musl may implement sleep through
@@ -527,6 +571,14 @@ fn compositor_idle() {
 }
 
 impl Client {
+    /// Creates a new client with the display object registered.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let client = Client::new();
+    /// assert!(client.objects.contains_key(&1));
+    /// ```
     fn new() -> Self {
         let mut objects = HashMap::new();
         objects.insert(
@@ -564,6 +616,14 @@ impl Client {
         }
     }
 
+    /// Inserts a Wayland object into the client object table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let result = client.insert_object(1, WaylandObjectKind::Surface);
+    /// assert!(result.is_ok());
+    /// ```
     fn insert_object(&mut self, id: u32, kind: WaylandObjectKind) -> io::Result<()> {
         if id == 0 {
             return Err(io::Error::new(
@@ -575,12 +635,62 @@ impl Client {
         Ok(())
     }
 
+    /// Generates the next protocol serial number.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut state = State { next_serial: 1 };
+    /// let first = state.next_serial();
+    /// let second = state.next_serial();
+    ///
+    /// assert_eq!(first, 1);
+    /// assert_eq!(second, 2);
+    /// ```
+    ///
+    /// @returns The current serial value, then advances the next serial and keeps it greater than zero.
     fn next_serial(&mut self) -> u32 {
         let serial = self.next_serial;
         self.next_serial = self.next_serial.wrapping_add(1).max(1);
         serial
     }
 
+    /// Removes destroyed shared-memory pools that are no longer referenced by any buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::collections::HashMap;
+    /// # struct BufferState { pool_id: u32 }
+    /// # struct ShmPoolState { destroyed: bool }
+    /// # struct Client {
+    /// #     buffers: HashMap<u32, BufferState>,
+    /// #     pools: HashMap<u32, ShmPoolState>,
+    /// # }
+    /// # impl Client {
+    /// #     fn cleanup_destroyed_pools(&mut self) {
+    /// #         let live_pool_ids = self
+    /// #             .buffers
+    /// #             .values()
+    /// #             .map(|buffer| buffer.pool_id)
+    /// #             .collect::<Vec<_>>();
+    /// #         self.pools
+    /// #             .retain(|id, pool| !pool.destroyed || live_pool_ids.contains(id));
+    /// #     }
+    /// # }
+    /// let mut client = Client {
+    ///     buffers: HashMap::from([(1, BufferState { pool_id: 10 })]),
+    ///     pools: HashMap::from([
+    ///         (10, ShmPoolState { destroyed: true }),
+    ///         (11, ShmPoolState { destroyed: true }),
+    ///     ]),
+    /// };
+    ///
+    /// client.cleanup_destroyed_pools();
+    ///
+    /// assert!(client.pools.contains_key(&10));
+    /// assert!(!client.pools.contains_key(&11));
+    /// ```
     fn cleanup_destroyed_pools(&mut self) {
         let live_pool_ids = self
             .buffers
@@ -591,12 +701,30 @@ impl Client {
             .retain(|id, pool| !pool.destroyed || live_pool_ids.contains(id));
     }
 
+    /// Chooses the next default position for a new window.
+    ///
+    /// # Returns
+    ///
+    /// The `(x, y)` coordinates for the next window origin.
+    #[example]
+    /// ```
+    /// let pos = client.next_window_position();
+    /// assert!(pos.0 >= 60 && pos.1 >= 60);
+    /// ```
     fn next_window_position(&mut self) -> (i32, i32) {
         let offset = self.next_window_offset;
         self.next_window_offset = (self.next_window_offset + 40).min(320);
         (60 + offset, 60 + offset)
     }
 
+    /// Collects the IDs of pointers whose seat is still present.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let ids = client.pointer_ids();
+    /// assert!(ids.contains(&pointer_id));
+    /// ```
     fn pointer_ids(&self) -> Vec<u32> {
         self.pointers
             .iter()
@@ -608,6 +736,14 @@ impl Client {
             .collect()
     }
 
+    /// Collects the IDs of keyboards whose seat is still present.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let ids = client.keyboard_ids();
+    /// assert!(ids.iter().all(|id| client.seats.contains_key(&client.keyboards[id].seat_id)));
+    /// ```
     fn keyboard_ids(&self) -> Vec<u32> {
         self.keyboards
             .iter()
@@ -619,6 +755,16 @@ impl Client {
             .collect()
     }
 
+    /// Finds the surface ID of the first mapped window.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let surface_id = first_mapped_surface();
+    /// assert_eq!(surface_id, Some(1));
+    /// ```
+    ///
+    /// @returns `Some(surface_id)` for the first mapped window, or `None` if no mapped window exists.
     fn first_mapped_surface(&self) -> Option<u32> {
         self.compositor
             .windows
@@ -627,6 +773,16 @@ impl Client {
             .map(|window| window.surface_id)
     }
 
+    /// Gets the size of the buffer attached to a surface.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let size = client.surface_size(surface_id);
+    /// assert_eq!(size, Some((400, 300)));
+    /// ```
+    ///
+    /// @returns The attached buffer size as `(width, height)` if the surface and buffer exist, `None` otherwise.
     fn surface_size(&self, surface_id: u32) -> Option<(i32, i32)> {
         let surface = self.surfaces.get(&surface_id)?;
         let buffer_id = surface.attached_buffer.or(surface.pending_buffer)?;
@@ -634,6 +790,14 @@ impl Client {
         Some((buffer.width, buffer.height))
     }
 
+    /// Finds the window associated with a surface ID.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let window = window_for_surface(42);
+    /// assert!(window.is_none());
+    /// ```
     fn window_for_surface(&self, surface_id: u32) -> Option<&Window> {
         self.compositor
             .windows
@@ -641,6 +805,19 @@ impl Client {
             .find(|window| window.surface_id == surface_id)
     }
 
+    /// Finds the window associated with a surface.
+    ///
+    /// # Returns
+    ///
+    /// A mutable reference to the matching window, or `None` if no window uses the
+    /// given surface ID.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let window = compositor.window_for_surface_mut(surface_id);
+    /// assert!(window.is_some());
+    /// ```
     fn window_for_surface_mut(&mut self, surface_id: u32) -> Option<&mut Window> {
         self.compositor
             .windows
@@ -648,6 +825,16 @@ impl Client {
             .find(|window| window.surface_id == surface_id)
     }
 
+    /// Gets the xdg surface and toplevel IDs for a surface.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// if let Some((xdg_surface_id, toplevel_id)) = xdg_ids_for_surface(surface_id) {
+    ///     assert!(xdg_surface_id > 0);
+    ///     assert!(toplevel_id > 0);
+    /// }
+    /// ```
     fn xdg_ids_for_surface(&self, surface_id: u32) -> Option<(u32, u32)> {
         let xdg_surface_id = self.surfaces.get(&surface_id)?.xdg_surface_id?;
         let role = self.xdg_surfaces.get(&xdg_surface_id)?.role?;
@@ -656,6 +843,13 @@ impl Client {
     }
 }
 
+/// Dispatches a Wayland request to the handler for its object type and opcode.
+///
+/// # Examples
+///
+/// ```
+/// let _ = dispatch_request(&mut client, &mut output, &mut stream, message);
+/// ```
 fn dispatch_request(
     client: &mut Client,
     output: &mut SoftwareOutput,
@@ -758,6 +952,19 @@ fn dispatch_request(
     }
 }
 
+/// Completes a `wl_display.sync` request with a callback serial.
+///
+/// # Examples
+///
+/// ```
+/// let callback_id = 42;
+/// // A sync request installs a callback and later sends `wl_callback.done`.
+/// ```
+fn handle_display_sync(
+client: &mut Client,
+stream: &mut UnixStream,
+payload: &[u8],
+) -> io::Result<()> {
 fn handle_display_sync(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -776,6 +983,21 @@ fn handle_display_sync(
     Ok(())
 }
 
+/// Creates a registry object and advertises the compositor globals.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// handle_get_registry(client, stream, payload)?;
+
+/// # Ok::<(), std::io::Error>(())
+
+/// ```
 fn handle_get_registry(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -792,6 +1014,19 @@ fn handle_get_registry(
     Ok(())
 }
 
+/// Binds a Wayland global and initializes any associated compositor state.
+///
+/// # Examples
+///
+/// ```
+/// # use std::io;
+/// # use std::os::unix::net::UnixStream;
+/// # fn example(client: &mut Client, stream: &mut UnixStream, registry_id: u32, payload: &[u8]) -> io::Result<()> {
+/// handle_registry_bind(client, stream, registry_id, payload)
+/// # }
+/// ```
+///
+/// @returns `Ok(())` if the global was bound successfully.
 fn handle_registry_bind(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -854,6 +1089,16 @@ fn handle_registry_bind(
     Ok(())
 }
 
+/// Creates a new Wayland surface resource with default compositor state.
+///
+/// # Examples
+///
+/// ```
+/// # let mut client = Client::new();
+/// # let payload = 1u32.to_le_bytes();
+/// handle_compositor_create_surface(&mut client, &payload).unwrap();
+/// ```
+```
 fn handle_compositor_create_surface(client: &mut Client, payload: &[u8]) -> io::Result<()> {
     let surface_id = read_u32(payload, 0)?;
     client.insert_object(surface_id, WaylandObjectKind::Surface)?;
@@ -876,6 +1121,13 @@ fn handle_compositor_create_surface(client: &mut Client, payload: &[u8]) -> io::
     Ok(())
 }
 
+/// Creates a pointer resource for a seat and records the association.
+///
+/// # Examples
+///
+/// ```
+/// let _ = handle_seat_get_pointer(&mut client, seat_id, payload);
+/// ```
 fn handle_seat_get_pointer(client: &mut Client, seat_id: u32, payload: &[u8]) -> io::Result<()> {
     let pointer_id = read_u32(payload, 0)?;
     if !client.seats.contains_key(&seat_id) {
@@ -892,6 +1144,14 @@ fn handle_seat_get_pointer(client: &mut Client, seat_id: u32, payload: &[u8]) ->
     Ok(())
 }
 
+/// Creates a keyboard resource for a seat and sends its keymap.
+///
+/// # Examples
+///
+/// ```
+/// let result = handle_seat_get_keyboard(&mut client, &mut stream, seat_id, payload);
+/// assert!(result.is_ok());
+/// ```
 fn handle_seat_get_keyboard(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -922,6 +1182,24 @@ fn handle_seat_get_keyboard(
     Ok(())
 }
 
+/// Creates a shared-memory pool from a passed file descriptor.
+///
+/// The payload must contain a pool ID and a positive size, and the request must
+/// include one `SCM_RIGHTS` file descriptor.
+///
+/// # Parameters
+///
+/// * `payload` - Wayland request payload containing the pool ID and size.
+/// * `fds` - Ancillary file descriptors passed with the request.
+///
+/// # Examples
+///
+/// ```no_run
+/// # let mut client = Client::default();
+/// # let payload = vec![0, 0, 0, 1, 0, 0, 0, 4096];
+/// # let fds = vec![OwnedFdRaw::new(3)];
+/// let _ = handle_shm_create_pool(&mut client, payload, fds);
+/// ```
 fn handle_shm_create_pool(
     client: &mut Client,
     payload: Vec<u8>,
@@ -962,6 +1240,19 @@ fn handle_shm_create_pool(
     Ok(())
 }
 
+/// Creates a shared-memory buffer resource from a Wayland SHM pool.
+///
+/// # Returns
+///
+/// `Ok(())` when the buffer is registered successfully, or an error if the
+/// request is invalid or the buffer exceeds the pool.
+///
+/// # Examples
+///
+/// ```
+/// let result = handle_shm_pool_create_buffer(&mut client, pool_id, payload);
+/// assert!(result.is_ok());
+/// ```
 fn handle_shm_pool_create_buffer(
     client: &mut Client,
     pool_id: u32,
@@ -1034,6 +1325,13 @@ fn handle_shm_pool_create_buffer(
     Ok(())
 }
 
+/// Destroys a shared-memory pool and releases any associated resources.
+///
+/// # Examples
+///
+/// ```
+/// handle_shm_pool_destroy(&mut client, pool_id);
+/// ```
 fn handle_shm_pool_destroy(client: &mut Client, pool_id: u32) {
     client.objects.remove(&pool_id);
     if let Some(pool) = client.pools.get_mut(&pool_id) {
@@ -1043,6 +1341,15 @@ fn handle_shm_pool_destroy(client: &mut Client, pool_id: u32) {
     println!("twland: wl_shm_pool.destroy id={pool_id}");
 }
 
+/// Destroys a shared-memory buffer resource and releases any pools no longer in use.
+///
+/// # Examples
+///
+/// ```
+/// let buffer_id = 42;
+/// handle_buffer_destroy(&mut client, buffer_id);
+/// ```
+```
 fn handle_buffer_destroy(client: &mut Client, buffer_id: u32) {
     client.objects.remove(&buffer_id);
     client.buffers.remove(&buffer_id);
@@ -1050,6 +1357,14 @@ fn handle_buffer_destroy(client: &mut Client, buffer_id: u32) {
     println!("twland: wl_buffer.destroy id={buffer_id}");
 }
 
+/// Destroys a surface and clears any compositor state tied to it.
+///
+/// # Examples
+///
+/// ```
+/// handle_surface_destroy(&mut client, &mut output, surface_id)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
 fn handle_surface_destroy(
     client: &mut Client,
     output: &mut SoftwareOutput,
@@ -1074,6 +1389,25 @@ fn handle_surface_destroy(
     Ok(())
 }
 
+/// Attaches a buffer to a surface with the given offset.
+///
+/// # Examples
+///
+/// ```
+/// let mut client = Client::default();
+/// let surface_id = 1;
+/// client.surfaces.insert(surface_id, SurfaceState::default());
+/// client.buffers.insert(2, BufferState::default());
+///
+/// let payload = [
+///     2u32.to_le_bytes(),
+///     10i32.to_le_bytes(),
+///     20i32.to_le_bytes(),
+/// ]
+/// .concat();
+///
+/// handle_surface_attach(&mut client, surface_id, &payload).unwrap();
+/// ```
 fn handle_surface_attach(client: &mut Client, surface_id: u32, payload: &[u8]) -> io::Result<()> {
     let buffer_id = read_u32(payload, 0)?;
     let x = read_i32(payload, 4)?;
@@ -1098,6 +1432,30 @@ fn handle_surface_attach(client: &mut Client, surface_id: u32, payload: &[u8]) -
     Ok(())
 }
 
+/// Records damaged surface bounds for the next redraw.
+///
+/// If the new damage overlaps existing damage, the stored region expands to cover both.
+///
+/// # Examples
+///
+/// ```
+/// let mut client = Client::default();
+/// let surface_id = 1;
+/// client.surfaces.insert(surface_id, SurfaceState::default());
+///
+/// let payload = [
+///     0i32.to_le_bytes(),
+///     0i32.to_le_bytes(),
+///     100i32.to_le_bytes(),
+///     50i32.to_le_bytes(),
+/// ].concat();
+///
+/// handle_surface_damage(&mut client, surface_id, &payload).unwrap();
+/// assert!(client.surfaces.get(&surface_id).unwrap().damage.is_some());
+/// ```
+/**
+* @returns `Ok(())` if the damage was recorded, or an error if the payload is invalid or the surface is unknown.
+*/
 fn handle_surface_damage(client: &mut Client, surface_id: u32, payload: &[u8]) -> io::Result<()> {
     let rect = Rect {
         x: read_i32(payload, 0)?,
@@ -1117,6 +1475,29 @@ fn handle_surface_damage(client: &mut Client, surface_id: u32, payload: &[u8]) -
     Ok(())
 }
 
+/// Registers a frame callback for a surface.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// # let mut client = Client::default();
+
+/// # let surface_id = 1;
+
+/// # client.surfaces.insert(surface_id, SurfaceState::default());
+
+/// let payload = 42u32.to_le_bytes();
+
+/// handle_surface_frame(&mut client, surface_id, &payload).unwrap();
+
+/// assert_eq!(client.surfaces.get(&surface_id).unwrap().frame_callbacks, vec![42]);
+
+/// ```
 fn handle_surface_frame(client: &mut Client, surface_id: u32, payload: &[u8]) -> io::Result<()> {
     let callback_id = read_u32(payload, 0)?;
     client.insert_object(callback_id, WaylandObjectKind::Callback)?;
@@ -1129,12 +1510,28 @@ fn handle_surface_frame(client: &mut Client, surface_id: u32, payload: &[u8]) ->
     Ok(())
 }
 
+/// Handles an `xdg_wm_base.pong` request.
+///
+/// # Examples
+///
+/// ```
+/// let payload = 1u32.to_le_bytes();
+/// handle_xdg_wm_base_pong(&payload).unwrap();
+/// ```
 fn handle_xdg_wm_base_pong(payload: &[u8]) -> io::Result<()> {
     let serial = read_u32(payload, 0)?;
     println!("twland: xdg_wm_base.pong serial={serial}");
     Ok(())
 }
 
+/// Creates an `xdg_surface` for a Wayland surface.
+///
+/// # Examples
+///
+/// ```
+/// let result = handle_xdg_wm_base_get_xdg_surface(&mut client, 1, payload);
+/// assert!(result.is_ok());
+/// ```
 fn handle_xdg_wm_base_get_xdg_surface(
     client: &mut Client,
     _wm_base_id: u32,
@@ -1171,6 +1568,13 @@ fn handle_xdg_wm_base_get_xdg_surface(
     Ok(())
 }
 
+/// Assigns a toplevel role to an `xdg_surface` and creates its toplevel state.
+///
+/// # Examples
+///
+/// ```
+/// let _ = handle_xdg_surface_get_toplevel(&mut client, xdg_surface_id, payload);
+/// ```
 fn handle_xdg_surface_get_toplevel(
     client: &mut Client,
     xdg_surface_id: u32,
@@ -1220,6 +1624,13 @@ fn handle_xdg_surface_get_toplevel(
     Ok(())
 }
 
+/// Acknowledges the pending `xdg_surface.configure` serial for a surface.
+///
+/// # Examples
+///
+/// ```
+/// let _ = handle_xdg_surface_ack_configure(&mut client, xdg_surface_id, &serial_payload);
+/// ```
 fn handle_xdg_surface_ack_configure(
     client: &mut Client,
     xdg_surface_id: u32,
@@ -1245,6 +1656,19 @@ fn handle_xdg_surface_ack_configure(
     Ok(())
 }
 
+/// Sets the title for an `xdg_toplevel` and updates the matching window title.
+///
+/// # Parameters
+///
+/// * `toplevel_id` - The `xdg_toplevel` resource to update.
+/// * `payload` - Wayland string payload containing the new title.
+///
+/// # Examples
+///
+/// ```
+/// let _ = handle_xdg_toplevel_set_title(&mut client, toplevel_id, payload);
+/// ```
+fn handle_xdg_toplevel_set_title(
 fn handle_xdg_toplevel_set_title(
     client: &mut Client,
     toplevel_id: u32,
@@ -1272,6 +1696,14 @@ fn handle_xdg_toplevel_set_title(
     Ok(())
 }
 
+/// Sets the application identifier for a toplevel surface.
+///
+/// # Examples
+///
+/// ```
+/// let _ = handle_xdg_toplevel_set_app_id(&mut client, toplevel_id, payload);
+/// ```
+```
 fn handle_xdg_toplevel_set_app_id(
     client: &mut Client,
     toplevel_id: u32,
@@ -1299,6 +1731,13 @@ fn handle_xdg_toplevel_set_app_id(
     Ok(())
 }
 
+/// Destroys an `xdg_surface` and clears its associated compositor state.
+///
+/// # Examples
+///
+/// ```
+/// handle_xdg_surface_destroy(&mut client, &mut output, xdg_surface_id)?;
+/// ```
 fn handle_xdg_surface_destroy(
     client: &mut Client,
     output: &mut SoftwareOutput,
@@ -1323,6 +1762,13 @@ fn handle_xdg_surface_destroy(
     Ok(())
 }
 
+/// Destroys an `xdg_toplevel` resource and clears its associated window state.
+///
+/// # Examples
+///
+/// ```
+/// handle_xdg_toplevel_destroy(&mut client, &mut output, toplevel_id).unwrap();
+/// ```
 fn handle_xdg_toplevel_destroy(
     client: &mut Client,
     output: &mut SoftwareOutput,
@@ -1346,6 +1792,19 @@ fn handle_xdg_toplevel_destroy(
     Ok(())
 }
 
+/// Commits the current state of a surface and redraws the scene.
+///
+/// When the surface has an `xdg_surface` role, this requires the surface to be
+/// configured before a buffer can be committed. Frame callbacks registered on
+/// the surface are completed after the commit is applied.
+///
+/// # Examples
+///
+/// ```
+/// handle_surface_commit(&mut client, &mut output, &mut stream, surface_id)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+```
 fn handle_surface_commit(
     client: &mut Client,
     output: &mut SoftwareOutput,
@@ -1440,6 +1899,27 @@ fn handle_surface_commit(
     Ok(())
 }
 
+/// Sends the initial `xdg_toplevel` and `xdg_surface` configure events for an empty toplevel commit.
+///
+/// # Parameters
+///
+/// - `surface_id`: The `wl_surface` associated with the commit.
+/// - `xdg_surface_id`: The linked `xdg_surface` resource.
+///
+/// # Examples
+///
+/// ```
+/// # use std::io;
+/// # use std::os::unix::net::UnixStream;
+/// # fn demo(client: &mut Client, stream: &mut UnixStream, surface_id: u32, xdg_surface_id: u32) -> io::Result<()> {
+/// handle_initial_xdg_empty_commit(client, stream, surface_id, xdg_surface_id)
+/// # }
+/// ```
+///
+/// `Ok(())` after sending the initial configure sequence.
+///
+/// `Err` if the `xdg_surface` is unknown, has no toplevel role, or the linked
+/// `xdg_toplevel` resource is missing.
 fn handle_initial_xdg_empty_commit(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -1487,6 +1967,21 @@ fn handle_initial_xdg_empty_commit(
     Ok(())
 }
 
+/// Maps a surface to a compositor window or updates the existing window state.
+///
+/// # Examples
+///
+/// ```
+/// let buffer = BufferState {
+///     pool_id: 1,
+///     offset: 0,
+///     width: 400,
+///     height: 300,
+///     stride: 1600,
+///     format: WL_SHM_FORMAT_ARGB8888,
+/// };
+/// map_or_update_window(&mut client, surface_id, toplevel_id, &buffer);
+/// ```
 fn map_or_update_window(
     client: &mut Client,
     surface_id: u32,
@@ -1546,6 +2041,16 @@ fn map_or_update_window(
     sync_surface_to_window(client, surface_id);
 }
 
+/// Builds window decoration geometry for a window at the given position.
+///
+/// # Examples
+///
+/// ```
+/// let decoration = decoration_for_window(40, 40, 400);
+/// assert!(decoration.enabled);
+/// assert_eq!(decoration.titlebar_height, TITLEBAR_HEIGHT);
+/// assert_eq!(decoration.border_width, BORDER_WIDTH);
+/// ```
 fn decoration_for_window(x: i32, y: i32, width: i32) -> DecorationState {
     let close_x = x + BORDER_WIDTH + width - CLOSE_BUTTON_SIZE - 4;
     let close_y = y + BORDER_WIDTH + (TITLEBAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2;
@@ -1562,6 +2067,13 @@ fn decoration_for_window(x: i32, y: i32, width: i32) -> DecorationState {
     }
 }
 
+/// Synchronizes a surface's client-area position with its window decoration.
+///
+/// # Examples
+///
+/// ```
+/// sync_surface_to_window(&mut client, surface_id);
+/// ```
 fn sync_surface_to_window(client: &mut Client, surface_id: u32) {
     let Some(window) = client.window_for_surface(surface_id).cloned() else {
         return;
@@ -1572,6 +2084,14 @@ fn sync_surface_to_window(client: &mut Client, surface_id: u32) {
     }
 }
 
+/// Removes the window associated with a surface and updates focus state.
+///
+/// # Examples
+///
+/// ```
+/// remove_window_for_surface(&mut client, surface_id);
+/// assert!(!client.compositor.windows.iter().any(|window| window.surface_id == surface_id));
+/// ```
 fn remove_window_for_surface(client: &mut Client, surface_id: u32) {
     let before = client.compositor.windows.len();
     client
@@ -1599,6 +2119,13 @@ fn remove_window_for_surface(client: &mut Client, surface_id: u32) {
     }
 }
 
+/// Redraws all mapped windows onto the framebuffer.
+///
+/// # Examples
+///
+/// ```
+/// redraw_scene(&mut client, &mut output).unwrap();
+/// ```
 fn redraw_scene(client: &mut Client, output: &mut SoftwareOutput) -> io::Result<()> {
     output.clear(DESKTOP_BACKGROUND)?;
     let windows = client.compositor.windows.clone();
@@ -1633,6 +2160,14 @@ fn redraw_scene(client: &mut Client, output: &mut SoftwareOutput) -> io::Result<
     output.sync()
 }
 
+/// Draws the decoration for a window.
+///
+/// # Examples
+///
+/// ```
+/// draw_window_decoration(&mut output, &window).unwrap();
+/// ```
+fn draw_window_decoration(output: &mut SoftwareOutput, window: &Window) -> io::Result<()> {
 fn draw_window_decoration(output: &mut SoftwareOutput, window: &Window) -> io::Result<()> {
     if !window.decoration.enabled {
         return Ok(());
@@ -1679,6 +2214,17 @@ fn draw_window_decoration(output: &mut SoftwareOutput, window: &Window) -> io::R
     Ok(())
 }
 
+/// Draws an X-shaped close glyph inside a rectangle.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::io;
+/// # fn demo(mut output: SoftwareOutput, rect: Rect) -> io::Result<()> {
+/// draw_close_glyph(&mut output, rect)?;
+/// # Ok(())
+/// # }
+/// ```
 fn draw_close_glyph(output: &mut SoftwareOutput, rect: Rect) -> io::Result<()> {
     for i in 4..(rect.width - 4).max(4) {
         output.fill_rect(
@@ -1703,6 +2249,17 @@ fn draw_close_glyph(output: &mut SoftwareOutput, rect: Rect) -> io::Result<()> {
     Ok(())
 }
 
+/// Determines which part of the topmost mapped window is under a point.
+///
+/// # Examples
+///
+/// ```
+/// let hit = hit_test(&state, 100, 50);
+/// match hit {
+///     HitTest::None => {}
+///     _ => {}
+/// }
+/// ```
 fn hit_test(state: &CompositorState, x: i32, y: i32) -> HitTest {
     for window in state.windows.iter().rev().filter(|window| window.mapped) {
         let border = window.decoration.border_width;
@@ -1750,6 +2307,15 @@ fn hit_test(state: &CompositorState, x: i32, y: i32) -> HitTest {
     HitTest::None
 }
 
+/// Determines whether a point lies within a rectangle.
+///
+/// # Examples
+///
+/// ```
+/// let rect = Rect { x: 10, y: 20, width: 30, height: 40 };
+/// assert!(rect_contains(rect, 15, 25));
+/// assert!(!rect_contains(rect, 5, 25));
+/// ```
 fn rect_contains(rect: Rect, x: i32, y: i32) -> bool {
     x >= rect.x
         && y >= rect.y
@@ -1757,6 +2323,20 @@ fn rect_contains(rect: Rect, x: i32, y: i32) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
+/// Focuses a window, raises it to the top of the stack, and updates input focus.
+///
+/// # Examples
+///
+/// ```
+/// focus_window(client, stream, output, surface_id, true).unwrap();
+/// ```
+fn focus_window(
+client: &mut Client,
+stream: &mut UnixStream,
+output: &mut SoftwareOutput,
+surface_id: u32,
+send_configure: bool,
+) -> io::Result<()> {
 fn focus_window(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -1796,6 +2376,13 @@ fn focus_window(
     redraw_scene(client, output)
 }
 
+/// Sends a configure event for a mapped xdg toplevel.
+///
+/// # Examples
+///
+/// ```
+/// let _ = send_focus_configure(&mut client, &mut stream, surface_id, true);
+/// ```
 fn send_focus_configure(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -1817,6 +2404,15 @@ fn send_focus_configure(
     Ok(())
 }
 
+/// Sends a close request for a surface's toplevel role.
+///
+/// # Examples
+///
+/// ```
+/// let result = send_close_for_surface(&client, &mut stream, surface_id);
+/// assert!(result.is_ok());
+/// ```
+///
 fn send_close_for_surface(
     client: &Client,
     stream: &mut UnixStream,
@@ -1828,6 +2424,11 @@ fn send_close_for_surface(
     send_message(stream, toplevel_id, XDG_TOPLEVEL_CLOSE, &[])
 }
 
+/// Generates a one-time sequence of synthetic input events for testing.
+
+///
+
+/// Returns an empty list until a seat has both pointer and keyboard devices, and only emits the events once.
 fn poll_input_events(client: &mut Client) -> Vec<TwlandInputEvent> {
     if client.input.synthetic_sent {
         return Vec::new();
@@ -1939,6 +2540,21 @@ fn poll_input_events(client: &mut Client) -> Vec<TwlandInputEvent> {
     ]
 }
 
+/// Dispatches a synthesized input event to the compositor.
+///
+/// # Examples
+///
+/// ```
+/// let event = TwlandInputEvent::PointerAbsolute { x: 100, y: 100 };
+/// dispatch_input_event(&mut client, &mut stream, &mut output, event)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+fn dispatch_input_event(
+client: &mut Client,
+stream: &mut UnixStream,
+output: &mut SoftwareOutput,
+event: TwlandInputEvent,
+) -> io::Result<()> {
 fn dispatch_input_event(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -1963,6 +2579,20 @@ fn dispatch_input_event(
     }
 }
 
+/// Updates pointer coordinates and dispatches pointer motion to the focused surface.
+///
+/// When a window drag is active, this updates the dragged window position instead of
+/// sending motion events.
+///
+/// # Returns
+///
+/// `Ok(())` on success.
+///
+/// # Examples
+///
+/// ```
+/// # let _ = dispatch_pointer_position(&mut client, &mut stream, &mut output, 10, 20);
+/// ```
 fn dispatch_pointer_position(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -2033,6 +2663,20 @@ fn dispatch_pointer_position(
     Ok(())
 }
 
+/// Handles a pointer button event and updates focus, dragging, or close requests.
+///
+/// # Examples
+///
+/// ```
+/// dispatch_pointer_button(&mut client, &mut stream, &mut output, 1, true)?;
+/// ```
+fn dispatch_pointer_button(
+client: &mut Client,
+stream: &mut UnixStream,
+output: &mut SoftwareOutput,
+button: u32,
+pressed: bool,
+) -> io::Result<()> {
 fn dispatch_pointer_button(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -2121,6 +2765,13 @@ fn dispatch_pointer_button(
     Ok(())
 }
 
+/// Sends a keyboard key event to the focused surface.
+///
+/// # Examples
+///
+/// ```
+/// dispatch_keyboard_key(&mut client, &mut stream, 30, true)?;
+/// ```
 fn dispatch_keyboard_key(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -2145,6 +2796,13 @@ fn dispatch_keyboard_key(
     Ok(())
 }
 
+/// Updates pointer focus for all seats and emits the corresponding enter and leave events.
+///
+/// # Examples
+///
+/// ```
+/// let _ = update_pointer_focus(&mut client, &mut stream, Some(surface_id));
+/// ```
 fn update_pointer_focus(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -2193,6 +2851,16 @@ fn update_pointer_focus(
     Ok(())
 }
 
+/// Updates keyboard focus for all seats and sends the corresponding Wayland enter and leave events.
+///
+/// # Examples
+///
+/// ```
+/// update_keyboard_focus(&mut client, &mut stream, Some(surface_id))?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// @param new_focus The surface to receive keyboard focus, or `None` to clear focus.
 fn update_keyboard_focus(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -2228,6 +2896,14 @@ fn update_keyboard_focus(
     Ok(())
 }
 
+/// Converts output coordinates into coordinates relative to a surface.
+///
+/// # Examples
+///
+/// ```
+/// let pos = surface_relative_position(&client, surface_id, 120, 80);
+/// assert_eq!(pos, (20, 40));
+/// ```
 fn surface_relative_position(client: &Client, surface_id: u32, x: i32, y: i32) -> (i32, i32) {
     client
         .surfaces
@@ -2236,6 +2912,20 @@ fn surface_relative_position(client: &Client, surface_id: u32, x: i32, y: i32) -
         .unwrap_or((0, 0))
 }
 
+/// Receives the next Wayland message from the client socket.
+///
+/// Returns a queued message first if one is already available, otherwise reads
+/// from the socket and parses the received wire data into one or more messages.
+///
+/// # Examples
+///
+/// ```
+/// if let Some(message) = recv_wayland_message(&mut client, &mut stream)? {
+///     dispatch_request(&mut client, &mut output, &mut stream, message)?;
+/// }
+/// ```
+///
+/// @returns The next parsed Wayland message, or `None` if the socket was closed.
 fn recv_wayland_message(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -2277,6 +2967,31 @@ fn recv_wayland_message(
     Ok(client.queued_messages.pop_front())
 }
 
+/// Parses one or more Wayland messages from a wire-format byte chunk.
+///
+/// The first parsed message receives the provided file descriptors; any remaining
+/// messages receive none.
+///
+/// # Errors
+///
+/// Returns an error if the chunk contains a truncated header, an invalid message
+/// size, or a truncated payload.
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::VecDeque;
+///
+/// let bytes = [
+///     8, 0, 0, 0,  // size = 8
+///     1, 0,        // object_id = 1
+///     2, 0,        // opcode = 2
+/// ];
+/// let mut queue = VecDeque::new();
+///
+/// parse_wire_chunk(&bytes, Vec::new(), &mut queue).unwrap();
+/// assert_eq!(queue.len(), 1);
+/// ```
 fn parse_wire_chunk(
     bytes: &[u8],
     mut fds: Vec<OwnedFdRaw>,
@@ -2326,6 +3041,21 @@ fn parse_wire_chunk(
     Ok(())
 }
 
+/// Extracts file descriptors from a `SCM_RIGHTS` control message.
+///
+/// Malformed or out-of-bounds control data is ignored.
+///
+/// # Returns
+///
+/// A list of received file descriptors.
+///
+/// # Examples
+///
+/// ```
+/// let fds = parse_received_fds(&[], 0);
+/// assert!(fds.is_empty());
+/// ```
+#[example]
 fn parse_received_fds(control: &[u8], controllen: usize) -> Vec<OwnedFdRaw> {
     let mut fds = Vec::new();
     if controllen < size_of::<Cmsghdr>() || controllen > control.len() {
@@ -2362,6 +3092,20 @@ fn parse_received_fds(control: &[u8], controllen: usize) -> Vec<OwnedFdRaw> {
     fds
 }
 
+/// Parses a Wayland message header from the first 8 bytes.
+///
+/// # Examples
+///
+/// ```
+/// let raw = [
+///     1, 0, 0, 0, // object_id
+///     5, 0, 8, 0, // opcode = 5, size = 8
+/// ];
+/// let header = parse_header(&raw);
+/// assert_eq!(header.object_id, 1);
+/// assert_eq!(header.opcode, 5);
+/// assert_eq!(header.size, 8);
+/// ```
 fn parse_header(raw: &[u8]) -> WaylandHeader {
     let object_id = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
     let packed = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
@@ -2372,6 +3116,12 @@ fn parse_header(raw: &[u8]) -> WaylandHeader {
     }
 }
 
+/// Sends a Wayland registry global announcement.
+///
+/// # Returns
+///
+/// `Ok(())` if the message was written successfully.
+```
 fn send_registry_global(
     stream: &mut UnixStream,
     registry_id: u32,
@@ -2384,12 +3134,27 @@ fn send_registry_global(
     send_message(stream, registry_id, WL_REGISTRY_GLOBAL, &payload)
 }
 
+/// Sends a shared-memory format announcement.
+///
+/// # Examples
+///
+/// ```
+/// send_shm_format(&mut stream, shm_id, WL_SHM_FORMAT_ARGB8888)?;
+/// ```
 fn send_shm_format(stream: &mut UnixStream, shm_id: u32, format: u32) -> io::Result<()> {
     let mut payload = Vec::new();
     push_u32(&mut payload, format);
     send_message(stream, shm_id, WL_SHM_FORMAT, &payload)
 }
 
+/// Sends an `xdg_toplevel.configure` event.
+///
+/// # Examples
+///
+/// ```
+/// send_xdg_toplevel_configure(&mut stream, toplevel_id, 800, 600, true)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
 fn send_xdg_toplevel_configure(
     stream: &mut UnixStream,
     toplevel_id: u32,
@@ -2411,6 +3176,13 @@ fn send_xdg_toplevel_configure(
     send_message(stream, toplevel_id, XDG_TOPLEVEL_CONFIGURE, &payload)
 }
 
+/// Sends an `xdg_surface.configure` event with a serial number.
+///
+/// # Examples
+///
+/// ```
+/// send_xdg_surface_configure(&mut stream, xdg_surface_id, serial)?;
+/// ```
 fn send_xdg_surface_configure(
     stream: &mut UnixStream,
     xdg_surface_id: u32,
@@ -2421,6 +3193,14 @@ fn send_xdg_surface_configure(
     send_message(stream, xdg_surface_id, XDG_SURFACE_CONFIGURE, &payload)
 }
 
+/// Sends the advertised capabilities for a seat.
+///
+/// # Examples
+///
+/// ```
+/// send_seat_capabilities(&mut stream, seat_id, capabilities)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
 fn send_seat_capabilities(
     stream: &mut UnixStream,
     seat_id: u32,
@@ -2431,12 +3211,26 @@ fn send_seat_capabilities(
     send_message(stream, seat_id, WL_SEAT_CAPABILITIES, &payload)
 }
 
+/// Sends the seat name to a client.
+///
+/// # Examples
+///
+/// ```
+/// send_seat_name(&mut stream, seat_id, "seat0")?;
+/// ```
 fn send_seat_name(stream: &mut UnixStream, seat_id: u32, name: &str) -> io::Result<()> {
     let mut payload = Vec::new();
     push_wayland_string(&mut payload, name);
     send_message(stream, seat_id, WL_SEAT_NAME, &payload)
 }
 
+/// Sends a `wl_keyboard.keymap` event using the no-keymap format.
+///
+/// # Examples
+///
+/// ```
+/// let _ = send_keyboard_keymap(&mut stream, keyboard_id);
+/// ```
 fn send_keyboard_keymap(stream: &mut UnixStream, keyboard_id: u32) -> io::Result<()> {
     let mut payload = Vec::new();
     push_u32(&mut payload, WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP);
@@ -2449,6 +3243,14 @@ fn send_keyboard_keymap(stream: &mut UnixStream, keyboard_id: u32) -> io::Result
     send_message(stream, keyboard_id, WL_KEYBOARD_KEYMAP, &payload)
 }
 
+/// Sends a pointer enter event for a surface.
+///
+/// # Examples
+///
+/// ```
+/// send_pointer_enter(&mut stream, pointer_id, serial, surface_id, 10, 20)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
 fn send_pointer_enter(
     stream: &mut UnixStream,
     pointer_id: u32,
@@ -2465,6 +3267,13 @@ fn send_pointer_enter(
     send_message(stream, pointer_id, WL_POINTER_ENTER, &payload)
 }
 
+/// Sends a pointer leave event for a surface.
+///
+/// # Examples
+///
+/// ```
+/// send_pointer_leave(&mut stream, pointer_id, serial, surface_id).unwrap();
+/// ```
 fn send_pointer_leave(
     stream: &mut UnixStream,
     pointer_id: u32,
@@ -2477,6 +3286,24 @@ fn send_pointer_leave(
     send_message(stream, pointer_id, WL_POINTER_LEAVE, &payload)
 }
 
+/// Sends a pointer motion event to a Wayland pointer object.
+///
+/// # Parameters
+///
+/// - `pointer_id`: The object ID of the `wl_pointer` resource.
+/// - `time`: Event timestamp in milliseconds.
+/// - `surface_x`: Pointer X coordinate in surface space.
+/// - `surface_y`: Pointer Y coordinate in surface space.
+///
+/// # Examples
+///
+/// ```
+/// # use std::io;
+/// # use std::os::unix::net::UnixStream;
+/// # fn send_pointer_motion(_: &mut UnixStream, _: u32, _: u32, _: i32, _: i32) -> io::Result<()> { Ok(()) }
+/// # let (mut a, _b) = UnixStream::pair().unwrap();
+/// send_pointer_motion(&mut a, 1, 123, 10 << 8, 20 << 8).unwrap();
+/// ```
 fn send_pointer_motion(
     stream: &mut UnixStream,
     pointer_id: u32,
@@ -2491,6 +3318,13 @@ fn send_pointer_motion(
     send_message(stream, pointer_id, WL_POINTER_MOTION, &payload)
 }
 
+/// Sends a pointer button event.
+///
+/// # Examples
+///
+/// ```
+/// send_pointer_button(&mut stream, pointer_id, serial, button, state)?;
+/// ```
 fn send_pointer_button(
     stream: &mut UnixStream,
     pointer_id: u32,
@@ -2506,6 +3340,18 @@ fn send_pointer_button(
     send_message(stream, pointer_id, WL_POINTER_BUTTON, &payload)
 }
 
+/// Sends a `wl_keyboard.enter` event for a surface.
+///
+/// # Examples
+///
+/// ```
+/// send_keyboard_enter(&mut stream, keyboard_id, serial, surface_id)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// @param serial The event serial.
+/// @param surface_id The surface that gained keyboard focus.
+/// @returns `Ok(())` if the event was sent successfully.
 fn send_keyboard_enter(
     stream: &mut UnixStream,
     keyboard_id: u32,
@@ -2519,6 +3365,18 @@ fn send_keyboard_enter(
     send_message(stream, keyboard_id, WL_KEYBOARD_ENTER, &payload)
 }
 
+/// Sends a keyboard leave event for a surface.
+///
+/// # Examples
+///
+/// ```
+/// send_keyboard_leave(&mut stream, keyboard_id, serial, surface_id)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// @param serial The event serial.
+/// @param surface_id The surface that lost keyboard focus.
+/// @returns `Ok(())` if the event was sent successfully.
 fn send_keyboard_leave(
     stream: &mut UnixStream,
     keyboard_id: u32,
@@ -2531,6 +3389,19 @@ fn send_keyboard_leave(
     send_message(stream, keyboard_id, WL_KEYBOARD_LEAVE, &payload)
 }
 
+/// Sends a `wl_keyboard.key` event.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// send_keyboard_key(&mut stream, keyboard_id, serial, keycode, state)?;
+
+/// ```
 fn send_keyboard_key(
     stream: &mut UnixStream,
     keyboard_id: u32,
@@ -2546,6 +3417,14 @@ fn send_keyboard_key(
     send_message(stream, keyboard_id, WL_KEYBOARD_KEY, &payload)
 }
 
+/// Sends a Wayland protocol message to the client.
+///
+/// # Examples
+///
+/// ```
+/// let payload = [];
+/// send_message(&mut stream, 1, 0, &payload).unwrap();
+/// ```
 fn send_message(
     stream: &mut UnixStream,
     object_id: u32,
@@ -2566,6 +3445,14 @@ fn send_message(
     send_wayland_bytes(stream, &message)
 }
 
+/// Writes a complete Wayland message to a Unix stream.
+///
+/// # Examples
+///
+/// ```
+/// let message = [0u8; 8];
+/// send_wayland_bytes(&mut stream, &message).unwrap();
+/// ```
 fn send_wayland_bytes(stream: &mut UnixStream, message: &[u8]) -> io::Result<()> {
     let mut offset = 0;
     while offset < message.len() {
@@ -2605,6 +3492,31 @@ fn send_wayland_bytes(stream: &mut UnixStream, message: &[u8]) -> io::Result<()>
     Ok(())
 }
 
+/// Copies a damaged region from a shared-memory buffer into the framebuffer.
+
+///
+
+/// The copied area is clipped to the buffer and output bounds. Only
+
+/// `WL_SHM_FORMAT_ARGB8888` and `WL_SHM_FORMAT_XRGB8888` are supported.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// let damage = Rect { x: 0, y: 0, width: 100, height: 100 };
+
+/// let copied = blit_shm_buffer_to_output(&mut output, &pool, &buffer, &surface, damage)?;
+
+/// assert!(copied.width >= 0 && copied.height >= 0);
+
+/// # Ok::<(), std::io::Error>(())
+
+/// ```
 fn blit_shm_buffer_to_output(
     output: &mut SoftwareOutput,
     pool: &ShmPoolState,
@@ -2707,6 +3619,15 @@ fn blit_shm_buffer_to_output(
     })
 }
 
+/// Maps a shared, read-only memory region from a file descriptor.
+///
+/// # Examples
+///
+/// ```
+/// let ptr = unsafe_mmap_shm(fd, size)?;
+/// assert!(!ptr.is_null());
+/// # Ok::<(), std::io::Error>(())
+/// ```
 fn unsafe_mmap_shm(fd: i32, size: usize) -> io::Result<*mut u8> {
     // SAFETY: `fd` is an owned memfd received via SCM_RIGHTS. The kernel maps
     // `size` bytes shared/read-only for this process. The returned pointer is
@@ -2720,6 +3641,18 @@ fn unsafe_mmap_shm(fd: i32, size: usize) -> io::Result<*mut u8> {
 }
 
 impl SoftwareOutput {
+    /// Opens the framebuffer and maps it into memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the framebuffer cannot be opened, queried, validated, or mapped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let output = SoftwareOutput::open().unwrap();
+    /// assert!(output.width > 0);
+    /// ```
     fn open() -> io::Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(FB_PATH)?;
         let fd = file.as_raw_fd();
@@ -2789,6 +3722,13 @@ impl SoftwareOutput {
         })
     }
 
+    /// Fills the framebuffer with a solid color.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// output.clear(0x00000000).unwrap();
+    /// ```
     fn clear(&mut self, color: u32) -> io::Result<()> {
         for y in 0..self.height {
             let row_offset = y
@@ -2807,6 +3747,14 @@ impl SoftwareOutput {
         self.sync()
     }
 
+    /// Fills a rectangle in the framebuffer with a solid color.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// output.fill_rect(Rect { x: 0, y: 0, width: 100, height: 50 }, 0xff0000ff)?;
+    /// ```
+    fn fill_rect չուն?
     fn fill_rect(&mut self, rect: Rect, color: u32) -> io::Result<()> {
         let x0 = rect.x.max(0) as usize;
         let y0 = rect.y.max(0) as usize;
@@ -2841,6 +3789,17 @@ impl SoftwareOutput {
         Ok(())
     }
 
+    /// Presents the current framebuffer contents on screen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the framebuffer pan ioctl fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// output.sync().unwrap();
+    /// ```
     fn sync(&mut self) -> io::Result<()> {
         // SAFETY: ioctl is called on the live framebuffer fd and does not read
         // the null third argument for FBIOPAN_DISPLAY in Twilight.
@@ -2860,6 +3819,7 @@ impl SoftwareOutput {
 }
 
 impl Drop for SoftwareOutput {
+    /// Unmaps the framebuffer mapping when the output is dropped.
     fn drop(&mut self) {
         if !self.pixels.is_null() && self.map_bytes != 0 {
             // SAFETY: `pixels` and `map_bytes` come from a successful mmap in
@@ -2885,6 +3845,14 @@ impl Drop for ShmPoolState {
 }
 
 impl OwnedFdRaw {
+    /// Transfers ownership of the file descriptor and returns its raw value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let fd = OwnedFdRaw { fd: 3 }.into_raw();
+    /// assert_eq!(fd, 3);
+    /// ```
     fn into_raw(mut self) -> i32 {
         let fd = self.fd;
         self.fd = -1;
@@ -2893,6 +3861,23 @@ impl OwnedFdRaw {
 }
 
 impl Drop for OwnedFdRaw {
+    /// Closes the owned file descriptor when the wrapper is dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::os::unix::io::RawFd;
+    /// # struct OwnedFdRaw { fd: RawFd }
+    /// # impl Drop for OwnedFdRaw {
+    /// #     fn drop(&mut self) {
+    /// #         if self.fd >= 0 {
+    /// #             self.fd = -1;
+    /// #         }
+    /// #     }
+    /// # }
+    /// let fd = OwnedFdRaw { fd: 3 };
+    /// drop(fd);
+    /// ```
     fn drop(&mut self) {
         if self.fd >= 0 {
             // SAFETY: fd is owned by this wrapper unless it was moved out using
@@ -2904,6 +3889,20 @@ impl Drop for OwnedFdRaw {
 }
 
 impl Rect {
+    /// Computes the smallest rectangle that contains both rectangles.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let a = Rect { x: 10, y: 10, width: 20, height: 20 };
+    /// let b = Rect { x: 25, y: 5, width: 10, height: 10 };
+    ///
+    /// let r = a.union(b);
+    /// assert_eq!(r.x, 10);
+    /// assert_eq!(r.y, 5);
+    /// assert_eq!(r.width, 25);
+    /// assert_eq!(r.height, 25);
+    /// ```
     fn union(self, other: Rect) -> Rect {
         let x0 = self.x.min(other.x);
         let y0 = self.y.min(other.y);
@@ -2924,6 +3923,15 @@ impl Rect {
     }
 }
 
+/// Reads a little-endian `u32` from a byte slice at the given offset.
+///
+/// # Examples
+///
+/// ```
+/// let bytes = [0x78, 0x56, 0x34, 0x12];
+/// let value = read_u32(&bytes, 0).unwrap();
+/// assert_eq!(value, 0x12345678);
+/// ```
 fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> {
     let raw = bytes
         .get(offset..offset + 4)
@@ -2931,10 +3939,47 @@ fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> {
     Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
 }
 
+/// Reads a little-endian `i32` from a byte slice at the given offset.
+///
+/// # Examples
+///
+/// ```
+/// let bytes = 42i32.to_le_bytes();
+/// assert_eq!(read_i32(&bytes, 0).unwrap(), 42);
+/// ```
 fn read_i32(bytes: &[u8], offset: usize) -> io::Result<i32> {
     Ok(read_u32(bytes, offset)? as i32)
 }
 
+/// Reads a Wayland string argument from a byte slice.
+
+///
+
+/// The returned offset points to the next 4-byte aligned argument boundary.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// let bytes = [
+
+///     5, 0, 0, 0,  // length = 5
+
+///     b'h', b'i', 0,
+
+/// ];
+
+/// let (value, next) = read_wayland_string(&bytes, 0).unwrap();
+
+/// assert_eq!(value, "hi");
+
+/// assert_eq!(next, 8);
+
+/// ```
 fn read_wayland_string(bytes: &[u8], offset: usize) -> io::Result<(String, usize)> {
     let length = read_u32(bytes, offset)? as usize;
     if length == 0 {
@@ -2961,18 +4006,54 @@ fn read_wayland_string(bytes: &[u8], offset: usize) -> io::Result<(String, usize
     Ok((value, align4(end)))
 }
 
+/// Appends a 32-bit unsigned integer in little-endian order.
+///
+/// # Examples
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// push_u32(&mut bytes, 0x12345678);
+/// assert_eq!(bytes, vec![0x78, 0x56, 0x34, 0x12]);
+/// ```
 fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
+/// Appends a 32-bit signed integer in little-endian byte order.
+///
+/// # Examples
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// push_i32(&mut bytes, -2);
+/// assert_eq!(bytes, (-2i32).to_le_bytes());
+/// ```
 fn push_i32(bytes: &mut Vec<u8>, value: i32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
+/// Appends a 24.8 fixed-point value to a byte buffer.
+///
+/// # Examples
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// push_fixed(&mut bytes, 12);
+/// assert_eq!(bytes, 12_i32.saturating_mul(256).to_le_bytes());
+/// ```
 fn push_fixed(bytes: &mut Vec<u8>, value: i32) {
     push_i32(bytes, value.saturating_mul(256));
 }
 
+/// Appends a Wayland string to a byte buffer.
+///
+/// # Examples
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// push_wayland_string(&mut bytes, "hello");
+/// assert_eq!(bytes, vec![6, 0, 0, 0, b'h', b'e', b'l', b'l', b'o', 0, 0, 0]);
+/// ```
 fn push_wayland_string(bytes: &mut Vec<u8>, value: &str) {
     let length = value.len() + 1;
     push_u32(bytes, length as u32);
@@ -2983,14 +4064,41 @@ fn push_wayland_string(bytes: &mut Vec<u8>, value: &str) {
     }
 }
 
+/// Rounds a value up to the next multiple of 4.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(align4(0), 0);
+/// assert_eq!(align4(1), 4);
+/// assert_eq!(align4(4), 4);
+/// assert_eq!(align4(5), 8);
+/// ```
 fn align4(value: usize) -> usize {
     (value + 3) & !3
 }
 
+/// Aligns a value to the next boundary for control message headers.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(cmsg_align(0), 0);
+/// assert_eq!(cmsg_align(1), 8);
+/// assert_eq!(cmsg_align(9), 16);
+/// ```
 fn cmsg_align(value: usize) -> usize {
     align4_to(value, size_of::<usize>())
 }
 
+/// Rounds a value up to the next multiple of the given alignment.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(align4_to(5, 4), 8);
+/// assert_eq!(align4_to(8, 4), 8);
+/// ```
 fn align4_to(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
 }

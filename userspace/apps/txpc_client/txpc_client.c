@@ -7,6 +7,13 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+/**
+ * Receives a message and a file descriptor from a UNIX domain socket.
+ * @param sock Socket to read from.
+ * @param buf Buffer for the received message text.
+ * @param buf_size Size of buf in bytes.
+ * @returns The received file descriptor, or -1 on failure.
+ */
 static int recv_fd(int sock, char* buf, size_t buf_size) {
     struct iovec iov = {.iov_base = buf, .iov_len = buf_size - 1};
     char control[CMSG_SPACE(sizeof(int))];
@@ -30,6 +37,10 @@ static int recv_fd(int sock, char* buf, size_t buf_size) {
     return fd;
 }
 
+/**
+ * Connects to the bootstrap socket and exchanges a request with the target service.
+ * @returns 0 on success, 1 if connection setup, request sending, or service communication fails.
+ */
 int main(void) {
     printf("txpc_client: starting\n");
 

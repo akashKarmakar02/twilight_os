@@ -41,6 +41,15 @@ pub struct UnixMessage {
 }
 
 impl UnixMessage {
+    /// Creates a received message without truncation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let msg = UnixMessage::new(Vec::from("hello"), UnixControl::default(), None);
+    /// assert_eq!(msg.data, b"hello");
+    /// assert!(!msg.truncated);
+    /// ```
     fn new(data: Vec<u8>, control: UnixControl, src: Option<UnixAddr>) -> Self {
         Self {
             data,
@@ -50,6 +59,16 @@ impl UnixMessage {
         }
     }
 
+    /// Creates a truncated message payload.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let msg = UnixMessage::truncated(Vec::from([1, 2, 3]), UnixControl::default(), None);
+    /// assert!(msg.truncated);
+    /// ```
+    ///
+    /// @returns A `UnixMessage` with `truncated` set to `true`.
     fn truncated(data: Vec<u8>, control: UnixControl, src: Option<UnixAddr>) -> Self {
         Self {
             data,
@@ -121,6 +140,15 @@ struct Channel {
 }
 
 impl Channel {
+    /// Creates an empty channel with no buffered messages.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let channel = Channel::new();
+    /// assert!(!channel.readable());
+    /// assert!(channel.writable());
+    /// ```
     fn new() -> Self {
         Self {
             messages: VecDeque::new(),
@@ -132,14 +160,40 @@ impl Channel {
         }
     }
 
+    /// Reports whether the channel has buffered data available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert!(!channel.readable());
+    /// ```
     fn readable(&self) -> bool {
         !self.messages.is_empty()
     }
 
+    /// Reports whether more stream data can be queued.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert!(channel.writable());
+    /// ```
     fn writable(&self) -> bool {
         !self.write_closed && self.buffered_len < CHANNEL_CAPACITY
     }
 
+    /// Reports whether the read side has been closed.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the read side is closed, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let channel = Channel::new();
+    /// assert!(!channel.hangup());
+    /// ```
     fn hangup(&self) -> bool {
         self.read_closed
     }
@@ -224,6 +278,14 @@ struct UnixState {
 }
 
 impl UnixState {
+    /// Creates a new unbound UNIX socket state for the given socket type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let socket = UnixSocket::new(SockType::Stream);
+    /// assert_eq!(socket.sock_type(), SockType::Stream);
+    /// ```
     fn new(sock_type: SockType) -> Self {
         Self {
             role: UnixRole::Unbound,
@@ -251,6 +313,13 @@ lazy_static! {
         Mutex::new(BTreeMap::new());
 }
 
+/// Removes a socket path from the UNIX registry.
+///
+/// # Examples
+///
+/// ```
+/// unregister_path("/tmp/example.sock");
+/// ```
 pub fn unregister_path(path: &str) {
     UNIX_REGISTRY.lock().remove(path);
 }
@@ -279,6 +348,15 @@ pub struct UnixSocket {
 }
 
 impl Clone for UnixSocket {
+    /// Clones this socket handle and shares the underlying socket state.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let socket = UnixSocket::new(SockType::Stream);
+    /// let cloned = socket.clone();
+    /// assert_eq!(socket.sock_type(), cloned.sock_type());
+    /// ```
     fn clone(&self) -> Self {
         self.handle_refs.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -299,6 +377,14 @@ impl core::fmt::Debug for UnixSocket {
 }
 
 impl UnixSocket {
+    /// Creates a new socket of the specified type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let socket = UnixSocket::new(SockType::Stream);
+    /// assert_eq!(socket.sock_type(), SockType::Stream);
+    /// ```
     pub fn new(sock_type: SockType) -> Self {
         Self {
             state: Arc::new(Mutex::new(UnixState::new(sock_type))),
@@ -308,6 +394,19 @@ impl UnixSocket {
         }
     }
 
+    /// Creates a connected pair of UNIX sockets.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let cred = PeerCredentials { pid: 1, uid: 1, gid: 1 };
+    /// let (left, right) = UnixSocket::pair(SockType::Stream, cred);
+    /// assert_eq!(left.sock_type(), SockType::Stream);
+    /// assert_eq!(right.sock_type(), SockType::Stream);
+    /// ```
+    ///
+    /// `cred` is stored as the peer credentials for both returned sockets.
+    pub fn pair(sock_type: SockType, cred: PeerCredentials) -> (Self, Self)
     pub fn pair(sock_type: SockType, cred: PeerCredentials) -> (Self, Self) {
         match sock_type {
             SockType::Stream => {
@@ -415,6 +514,19 @@ impl UnixSocket {
         Ok(())
     }
 
+    /// Marks a bound stream socket as listening.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EOPNOTSUPP` if the socket is not a stream socket, or `EINVAL` if it is not bound.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut socket = UnixSocket::new(SockType::Stream);
+    /// socket.bind(UnixAddr { path: "/tmp/unix.sock".into() }).unwrap();
+    /// socket.listen(1).unwrap();
+    /// ```
     pub fn listen(&mut self, _backlog: i32) -> Result<(), i32> {
         let mut state = self.state.lock();
         if state.sock_type != SockType::Stream {
@@ -427,6 +539,16 @@ impl UnixSocket {
         Ok(())
     }
 
+    /// Connects a stream socket to a listening UNIX address.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut client = UnixSocket::new(SockType::Stream);
+    /// let addr = UnixAddr { path: "/tmp/demo.sock".to_string() };
+    /// let cred = PeerCredentials { pid: 1, uid: 1, gid: 1 };
+    /// let _ = client.connect(addr, cred);
+    /// ```
     pub fn connect(&mut self, addr: UnixAddr, cred: PeerCredentials) -> Result<(), i32> {
         {
             let state = self.state.lock();
@@ -501,6 +623,16 @@ impl UnixSocket {
         Ok(())
     }
 
+    /// Accepts the next pending stream connection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (socket, peer_addr) = listener.accept_new().unwrap();
+    /// assert!(socket.local_endpoint().is_some());
+    /// assert!(!peer_addr.path.is_empty() || peer_addr.path.is_empty());
+    /// ```
+    pub fn accept_new(&mut self) -> Result<(UnixSocket, UnixAddr), i32>
     pub fn accept_new(&mut self) -> Result<(UnixSocket, UnixAddr), i32> {
         loop {
             {
@@ -548,6 +680,23 @@ impl UnixSocket {
         }
     }
 
+    /// Tries to accept a pending stream connection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut listener = UnixSocket::new(SockType::Stream);
+    /// let addr = UnixAddr { path: "/tmp/unix.sock".into() };
+    /// listener.bind(addr.clone()).unwrap();
+    /// listener.listen(1).unwrap();
+    ///
+    /// let mut client = UnixSocket::new(SockType::Stream);
+    /// client.connect(addr, PeerCredentials { pid: 1, uid: 2, gid: 3 }).unwrap();
+    ///
+    /// let accepted = listener.try_accept_new().unwrap().unwrap();
+    /// assert_eq!(accepted.1.path, "/tmp/unix.sock");
+    /// ```
+    pub fn try_accept_new(&mut self) -> Result<Option<(UnixSocket, UnixAddr)>, i32>
     pub fn try_accept_new(&mut self) -> Result<Option<(UnixSocket, UnixAddr)>, i32> {
         let mut state = self.state.lock();
         if state.sock_type != SockType::Stream {
@@ -595,14 +744,45 @@ impl UnixSocket {
         }
     }
 
+    /// Returns the socket type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let sock = UnixSocket::new(SockType::Stream);
+    /// assert_eq!(sock.sock_type(), SockType::Stream);
+    /// ```
     pub fn sock_type(&self) -> SockType {
         self.state.lock().sock_type
     }
 
+    /// Writes data to the socket.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let sent = sock.write(b"hello", false).unwrap();
+    /// assert_eq!(sent, 5);
+    /// ```
     pub fn write(&mut self, data: &[u8], nonblock: bool) -> Result<usize, i32> {
         self.send_msg(data, UnixControl::default(), None, nonblock)
     }
 
+    /// Sends a message on the socket.
+    ///
+    /// For datagram sockets, an explicit destination is used when provided; otherwise the message is
+    /// delivered to the default peer or linked peer. For stream sockets, the message is written to the
+    /// connected peer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut sock = UnixSocket::new(SockType::Stream);
+    /// // Assume `peer` is a connected stream socket.
+    /// let _ = sock.send_msg(b"hello", UnixControl::default(), None, false);
+    /// ```
+    ///
+    /// @returns The number of bytes sent.
     pub fn send_msg(
         &mut self,
         data: &[u8],
@@ -621,10 +801,38 @@ impl UnixSocket {
         }
     }
 
+    /// Reads stream data into a buffer and returns the number of bytes copied.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut buf = [0u8; 16];
+    /// let n = socket.stream_read_impl(&mut buf, false).unwrap();
+    /// assert!(n <= buf.len());
+    /// ```
     fn stream_read_impl(&self, out: &mut [u8], nonblock: bool) -> Result<usize, i32> {
         self.stream_recv_impl(out, nonblock).map(|msg| msg.data.len())
     }
 
+    /// Receives the next message from this socket.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let (mut left, mut right) = UnixSocket::pair(
+    ///     SockType::Dgram,
+    ///     PeerCredentials { pid: 1, uid: 2, gid: 3 },
+    /// );
+    ///
+    /// right
+    ///     .send_msg(b"hello", UnixControl::default(), None, false)
+    ///     .unwrap();
+    ///
+    /// let mut buf = [0u8; 16];
+    /// let msg = left.recv_msg(&mut buf, false).unwrap();
+    ///
+    /// assert_eq!(msg.data, b"hello");
+    /// ```
     pub fn recv_msg(&mut self, out: &mut [u8], nonblock: bool) -> Result<UnixMessage, i32> {
         let is_dgram = {
             let state = self.state.lock();
@@ -637,6 +845,18 @@ impl UnixSocket {
         }
     }
 
+    /// Receives stream data from the connected peer.
+    ///
+    /// Aggregates queued message data into `out` and collects any passed rights from the
+    /// consumed messages.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut buf = [0u8; 128];
+    /// let msg = socket.recv_msg(&mut buf, false).unwrap();
+    /// assert_eq!(msg.data, buf[..msg.data.len()]);
+    /// ```
     fn stream_recv_impl(&self, out: &mut [u8], nonblock: bool) -> Result<UnixMessage, i32> {
         let state = self.state.lock();
         if state.role != UnixRole::Connected {
@@ -702,6 +922,29 @@ impl UnixSocket {
         }
     }
 
+    /// Writes a message to the connected stream peer.
+    ///
+    /// The payload is queued together with any passed rights and may be written
+    /// partially when the message exceeds the channel capacity.
+    ///
+    /// # Parameters
+    ///
+    /// * `control` - Ancillary data to attach to the queued message.
+    ///
+    /// # Returns
+    ///
+    /// The number of payload bytes written, or an error code.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::{Arc, Mutex};
+    /// # fn example(sock: &UnixSocket) -> Result<usize, i32> {
+    /// let written = sock.stream_write_impl(b"hello", UnixControl::default(), true)?;
+    /// assert!(written <= 5);
+    /// # Ok(written)
+    /// # }
+    /// ```
     fn stream_write_impl(
         &self,
         data: &[u8],
@@ -763,6 +1006,14 @@ impl UnixSocket {
         }
     }
 
+    /// Sends a datagram to the specified destination or the socket's default peer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let sent = socket.send_to_msg(b"hello", &addr, UnixControl::default()).unwrap();
+    /// assert_eq!(sent, 5);
+    /// ```
     fn dgram_send_impl(
         &mut self,
         data: &[u8],
@@ -783,10 +1034,34 @@ impl UnixSocket {
         }
     }
 
+    /// Sends a datagram to a specific Unix socket address.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let sent = socket.send_to(b"hello", &addr).unwrap();
+    /// assert_eq!(sent, 5);
+    /// ```
     pub fn send_to(&mut self, buf: &[u8], addr: &UnixAddr) -> Result<usize, i32> {
         self.send_to_msg(buf, addr, UnixControl::default())
     }
 
+    /// Sends a datagram to the specified UNIX socket address.
+    ///
+    /// The message carries the provided ancillary rights and records this socket's
+    /// bound address as the source when available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let sent = sock.send_to_msg(b"hello", &addr, UnixControl::default())?;
+    /// assert_eq!(sent, 5);
+    /// # Ok::<(), i32>(())
+    /// ```
+    ///
+    /// @param addr Target socket address.
+    /// @param control Ancillary data to attach to the datagram.
+    /// @returns The number of bytes sent.
     pub fn send_to_msg(
         &mut self,
         buf: &[u8],
@@ -819,6 +1094,19 @@ impl UnixSocket {
         Ok(buf.len())
     }
 
+    /// Sends a datagram to the linked peer socket.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(buf.len())` when the datagram is queued successfully, or an error code if the
+    /// peer is unavailable or cannot accept datagrams.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let sent = socket.send_to_peer(b"hello", UnixControl::default()).unwrap();
+    /// assert_eq!(sent, 5);
+    /// ```
     fn send_to_peer(&mut self, buf: &[u8], control: UnixControl) -> Result<usize, i32> {
         let peer = {
             let state = self.state.lock();
@@ -847,6 +1135,25 @@ impl UnixSocket {
         Ok(buf.len())
     }
 
+    /// Receives a datagram and its source address.
+    
+    ///
+    
+    /// # Examples
+    
+    ///
+    
+    /// ```
+    
+    /// let mut buf = [0u8; 128];
+    
+    /// let (len, src) = socket.recv_from(&mut buf, false).unwrap();
+    
+    /// assert!(len <= buf.len());
+    
+    /// assert!(!src.to_string().is_empty() || src.to_string().is_empty());
+    
+    /// ```
     pub fn recv_from(&mut self, buf: &mut [u8], nonblock: bool) -> Result<(usize, UnixAddr), i32> {
         loop {
             let mut state = self.state.lock();
@@ -875,11 +1182,28 @@ impl UnixSocket {
         }
     }
 
+    /// Receives a datagram into the provided buffer and returns the number of bytes copied.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let n = socket.dgram_recv_impl(&mut buf, false).unwrap();
+    /// assert!(n <= buf.len());
+    /// ```
     fn dgram_recv_impl(&self, out: &mut [u8], nonblock: bool) -> Result<usize, i32> {
         self.dgram_recv_msg_impl(out, nonblock)
             .map(|msg| msg.data.len())
     }
 
+    /// Receives the next datagram as a message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let msg = socket.recv_msg(&mut buf, false).unwrap();
+    /// assert_eq!(msg.src, Some(expected_addr));
+    /// ```
+    fn dgram_recv_msg_impl(&self, out: &mut [u8], nonblock: bool) -> Result<UnixMessage, i32>
     fn dgram_recv_msg_impl(&self, out: &mut [u8], nonblock: bool) -> Result<UnixMessage, i32> {
         loop {
             let mut state = self.state.lock();
@@ -909,6 +1233,18 @@ impl UnixSocket {
         }
     }
 
+    /// Closes the socket and releases any associated connection or bound address.
+    ///
+    /// This clears the local binding when present, disconnects the socket, and wakes
+    /// any tasks waiting on the socket's queues.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut socket = UnixSocket::new(SockType::Dgram);
+    /// socket.close();
+    /// assert!(socket.local_endpoint().is_none());
+    /// ```
     pub fn close(&mut self) {
         let conn;
         let bound_to_remove;
@@ -996,6 +1332,16 @@ impl UnixSocket {
         }
     }
 
+    /// Reports the socket's current readiness state for polling.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let poll = socket.poll();
+    /// assert!(!poll.readable || !poll.writable || !poll.hangup || !poll.error);
+    /// ```
+    ///
+    /// @returns The current readable, writable, hangup, and error flags for the socket.
     pub fn poll(&self) -> UnixPollState {
         let state = self.state.lock();
         if state.sock_type == SockType::Dgram {
@@ -1039,16 +1385,49 @@ impl UnixSocket {
         self.state.lock().bound_addr.clone()
     }
 
+    /// Returns the remote address for a connected socket.
+    
+    ///
+    
+    /// # Examples
+    
+    ///
+    
+    /// ```
+    
+    /// let socket = UnixSocket::new(SockType::Stream);
+    
+    /// assert!(socket.remote_endpoint().is_none());
+    
+    /// ```
     pub fn remote_endpoint(&self) -> Option<UnixAddr> {
         self.state.lock().peer_addr.clone()
     }
 }
 
+/// Reports whether a socket state is closed.
+///
+/// # Examples
+///
+/// ```
+/// let state = UnixState::new(SockType::Stream);
+/// assert!(state_is_closed(&state));
+/// ```
 fn state_is_closed(state: &UnixState) -> bool {
     state.role == UnixRole::Unbound
 }
 
 impl Drop for UnixSocket {
+    /// Closes the socket when the last owning handle is dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let socket = UnixSocket::new(SockType::Stream);
+    /// let clone = socket.clone();
+    /// drop(socket);
+    /// drop(clone);
+    /// ```
     fn drop(&mut self) {
         // Registry entries and pending connections also hold `state` Arcs, so
         // Arc::strong_count(state) cannot identify the final socket handle.

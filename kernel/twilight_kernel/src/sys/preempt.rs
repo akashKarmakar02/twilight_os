@@ -408,14 +408,17 @@ pub fn can_preempt_kernel() -> bool {
     true
 }
 
-/// Log serial warnings if `schedule_now()` is called from an unsafe context.
+/// Logs serial warnings when `schedule_now()` is called from an unsafe context.
 ///
-/// These are diagnostic only — they do not block scheduling. The hard safety
-/// gate for kernel-mode preemption is [`can_preempt_kernel()`]. The
-/// [`SchedulerGuard`] already prevents reentrant scheduling and scheduling
-/// with `preempt_count > 0`. These warnings catch the remaining cases (locks
-/// held via non-`PreemptGuard` spinlocks, or raw context counters non-zero)
-/// that indicate a bug.
+/// These warnings are diagnostic only and do not block scheduling. They report
+/// calls made while interrupts are active, locks are held, or scheduler-critical
+/// context counters are set.
+///
+/// # Examples
+///
+/// ```
+/// warn_if_schedule_unsafe();
+/// ```
 pub fn warn_if_schedule_unsafe() {
     if irq_depth() != 0 {
         crate::serial_println!(

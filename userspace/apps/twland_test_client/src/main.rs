@@ -35,6 +35,19 @@ fn main() {
     }
 }
 
+/// Verifies that the Wayland compositor exposes the required globals and shared-memory formats.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// run().unwrap();
+
+/// ```
 fn run() -> io::Result<()> {
     let mut stream = UnixStream::connect(WAYLAND_SOCKET)?;
     println!("twland_test_client: connected");
@@ -80,12 +93,33 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
+/// Requests the registry from the Wayland display.
+///
+/// # Examples
+///
+/// ```
+/// # use std::io;
+/// # use std::os::unix::net::UnixStream;
+/// # fn demo(stream: &mut UnixStream) -> io::Result<()> {
+/// send_get_registry(stream)?;
+/// # Ok(())
+/// # }
+/// ```
+fn send_get_registry(stream: &mut UnixStream) -> io::Result<()> {
 fn send_get_registry(stream: &mut UnixStream) -> io::Result<()> {
     let mut payload = Vec::new();
     push_u32(&mut payload, REGISTRY_ID);
     send_message(stream, 1, WL_DISPLAY_GET_REGISTRY, &payload)
 }
 
+/// Reads the advertised Wayland globals from the registry.
+///
+/// # Examples
+///
+/// ```
+/// let globals = read_registry_globals(&mut stream).unwrap();
+/// assert!(globals.contains_key("wl_shm"));
+/// ```
 fn read_registry_globals(stream: &mut UnixStream) -> io::Result<BTreeMap<String, Global>> {
     let mut globals = BTreeMap::new();
 
@@ -111,6 +145,13 @@ fn read_registry_globals(stream: &mut UnixStream) -> io::Result<BTreeMap<String,
     Ok(globals)
 }
 
+/// Sends a `wl_registry.bind` request for a global.
+///
+/// # Examples
+///
+/// ```
+/// send_registry_bind(&mut stream, &global, "wl_shm", 3).unwrap();
+/// ```
 fn send_registry_bind(
     stream: &mut UnixStream,
     global: &Global,
@@ -125,6 +166,18 @@ fn send_registry_bind(
     send_message(stream, REGISTRY_ID, WL_REGISTRY_BIND, &payload)
 }
 
+/// Reads the `wl_shm` formats advertised by the compositor.
+///
+/// # Returns
+///
+/// The raw `wl_shm.format` values reported by the server.
+///
+/// # Examples
+///
+/// ```
+/// let formats = read_shm_formats(&mut stream).unwrap();
+/// assert_eq!(formats.len(), 2);
+/// ```
 fn read_shm_formats(stream: &mut UnixStream) -> io::Result<Vec<u32>> {
     let mut formats = Vec::new();
 
@@ -152,6 +205,17 @@ fn read_shm_formats(stream: &mut UnixStream) -> io::Result<Vec<u32>> {
     Ok(formats)
 }
 
+/// Reads a Wayland message header and payload from a stream.
+///
+/// The returned header includes the object ID, opcode, and total message size.
+///
+/// # Examples
+///
+/// ```
+/// let (header, payload) = read_message(&mut stream).unwrap();
+/// assert!(header.size >= 8);
+/// assert_eq!(payload.len(), usize::from(header.size - 8));
+/// ```
 fn read_message(stream: &mut UnixStream) -> io::Result<(WaylandHeader, Vec<u8>)> {
     let mut raw = [0_u8; 8];
     stream.read_exact(&mut raw)?;
@@ -175,6 +239,33 @@ fn read_message(stream: &mut UnixStream) -> io::Result<(WaylandHeader, Vec<u8>)>
     Ok((header, payload))
 }
 
+/// Writes a Wayland message to the stream.
+
+///
+
+/// The message header includes the object ID, opcode, and total message size.
+
+///
+
+/// # Examples
+
+///
+
+/// ```
+
+/// # use std::io;
+
+/// # use std::os::unix::net::UnixStream;
+
+/// # fn demo(mut stream: &mut UnixStream) -> io::Result<()> {
+
+/// send_message(&mut stream, 1, 2, &[3, 4])?;
+
+/// # Ok(())
+
+/// # }
+
+/// ```
 fn send_message(
     stream: &mut UnixStream,
     object_id: u32,
@@ -195,6 +286,15 @@ fn send_message(
     stream.write_all(&message)
 }
 
+/// Reads a little-endian `u32` from a byte slice at the given offset.
+///
+/// # Examples
+///
+/// ```
+/// let bytes = [0x78, 0x56, 0x34, 0x12];
+/// let value = read_u32(&bytes, 0).unwrap();
+/// assert_eq!(value, 0x12345678);
+/// ```
 fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> {
     let raw = bytes
         .get(offset..offset + 4)
@@ -202,6 +302,18 @@ fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> {
     Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
 }
 
+/// Reads a Wayland string argument from a byte slice.
+///
+/// # Examples
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// push_wayland_string(&mut bytes, "wl_shm");
+///
+/// let (value, next) = read_wayland_string(&bytes, 0).unwrap();
+/// assert_eq!(value, "wl_shm");
+/// assert_eq!(next, bytes.len());
+/// ```
 fn read_wayland_string(bytes: &[u8], offset: usize) -> io::Result<(String, usize)> {
     let length = read_u32(bytes, offset)? as usize;
     if length == 0 {
@@ -228,10 +340,28 @@ fn read_wayland_string(bytes: &[u8], offset: usize) -> io::Result<(String, usize
     Ok((value, align4(end)))
 }
 
+/// Appends a little-endian `u32` to a byte buffer.
+///
+/// # Examples
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// push_u32(&mut bytes, 0x12345678);
+/// assert_eq!(bytes, vec![0x78, 0x56, 0x34, 0x12]);
+/// ```
 fn push_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
+/// Appends a NUL-terminated Wayland string to a buffer.
+///
+/// # Examples
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// push_wayland_string(&mut bytes, "shm");
+/// assert_eq!(bytes.len() % 4, 0);
+/// ```
 fn push_wayland_string(bytes: &mut Vec<u8>, value: &str) {
     let length = value.len() + 1;
     push_u32(bytes, length as u32);
@@ -242,6 +372,16 @@ fn push_wayland_string(bytes: &mut Vec<u8>, value: &str) {
     }
 }
 
+/// Rounds a value up to the next multiple of 4.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(align4(0), 0);
+/// assert_eq!(align4(1), 4);
+/// assert_eq!(align4(4), 4);
+/// assert_eq!(align4(5), 8);
+/// ```
 fn align4(value: usize) -> usize {
     (value + 3) & !3
 }
