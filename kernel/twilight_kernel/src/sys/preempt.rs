@@ -430,7 +430,7 @@ pub fn warn_if_schedule_unsafe() {
         );
     }
     if in_fault_context() {
-        crate::serial_println!("[sched] WARNING: schedule_now inside fault context");
+        // crate::serial_println!("[sched] WARNING: schedule_now inside fault context");
     }
     if in_allocator_context() {
         crate::serial_println!("[sched] WARNING: schedule_now inside allocator context");

@@ -8,3 +8,7 @@
 # Workflow
 - User provides detailed markdown implementation plans as specifications; implement directly from these plans. Confidence: 0.80
 - User may request investigation without code changes ("no code update / only find"); honor this by analyzing and reporting without modifying code. Confidence: 0.80
+- Use `make twilight-os.iso` from the root GNUmakefile to build the project, not cargo build directly in subdirectories. Confidence: 0.65
+
+# Kernel
+- Match Linux behavior exactly as the reference implementation for syscalls, error codes, and OS semantics. When in doubt, follow what Linux does. Confidence: 1.00

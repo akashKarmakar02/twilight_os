@@ -78,6 +78,7 @@ pub extern "sysv64" fn syscall_handler(
             arg5,
             arg6,
         ),
+        SYS_MSYNC => memory::msync(arg1, arg2 as usize, arg3 as i32),
         SYS_MPROTECT => memory::mprotect(arg1, arg2 as usize, arg3 as usize),
         SYS_MUNMAP => memory::munmap(arg1, arg2 as usize),
         SYS_BRK => memory::brk(arg1 as usize),
@@ -89,7 +90,7 @@ pub extern "sysv64" fn syscall_handler(
             // 0
         }
         SYS_FCNTL => service::fcntl(arg1 as i32, arg2 as i32, arg3),
-        SYS_FTRUNCATE => service::ftruncate(arg1 as i32, arg2 as u64),
+        SYS_FTRUNCATE => service::ftruncate(arg1 as i32, arg2 as i64),
         SYS_READV => service::readv(arg1 as usize, arg2, arg3),
         SYS_WRITEV => service::writev(arg1 as i32, arg2, arg3 as i32),
         SYS_PREADV => service::preadv(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as u64),
@@ -130,6 +131,11 @@ pub extern "sysv64" fn syscall_handler(
             arg5 as usize,
             arg6 as usize,
         ),
+        SYS_SENDMSG => service::sendmsg(arg1 as i32, arg2 as usize, arg3 as i32),
+        SYS_RECVMSG => service::recvmsg(arg1 as i32, arg2 as usize, arg3 as i32),
+        SYS_SOCKETPAIR => {
+            service::socketpair(arg1 as i32, arg2 as i32, arg3 as i32, arg4 as usize)
+        }
         SYS_SHUTDOWN => service::shutdown(arg1 as i32, arg2 as i32),
         SYS_SETSOCKOPT => service::setsockopt(
             arg1 as i32,
@@ -248,6 +254,77 @@ pub extern "sysv64" fn syscall_handler(
             let timespec_ptr = arg2 as *mut Timespec;
             crate::driver::timer::pit::sys_clock_gettime(arg1 as i32, timespec_ptr)
         }
+        SYS_CLOCK_NANOSLEEP => {
+            const TIMER_ABSTIME: i32 = 1;
+            const NSEC_PER_SEC: i64 = 1_000_000_000;
+
+            let clockid = arg1 as i32;
+            let flags = arg2 as i32;
+            let req_ptr = arg3 as *const Timespec;
+            let rem_ptr = arg4 as *mut Timespec;
+
+            if req_ptr.is_null() {
+                -(EFAULT as i64)
+            } else if flags & !TIMER_ABSTIME != 0 {
+                -(EINVAL as i64)
+            } else {
+                // SAFETY: req_ptr was checked non-null above. read_unaligned
+                // avoids creating a reference to the packed userspace timespec.
+                let req = unsafe { core::ptr::read_unaligned(req_ptr) };
+                if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= NSEC_PER_SEC {
+                    -(EINVAL as i64)
+                } else {
+                    if !rem_ptr.is_null() {
+                        // SAFETY: rem_ptr is caller-provided writable memory by
+                        // Linux ABI contract when non-null. Twilight does not
+                        // interrupt sleeps yet, so remaining time is zero.
+                        unsafe {
+                            core::ptr::write_unaligned(
+                                rem_ptr,
+                                Timespec {
+                                    tv_sec: 0,
+                                    tv_nsec: 0,
+                                },
+                            );
+                        }
+                    }
+
+                    if flags & TIMER_ABSTIME == 0 {
+                        match crate::driver::timer::pit::sleep_timespec(&req) {
+                            Ok(()) => 0,
+                            Err(errno) => errno,
+                        }
+                    } else {
+                        let mut now = Timespec::default();
+                        let now_res = crate::driver::timer::pit::sys_clock_gettime(
+                            clockid,
+                            &mut now as *mut Timespec,
+                        );
+                        if now_res < 0 {
+                            now_res
+                        } else {
+                            let req_ns = (req.tv_sec as i128)
+                                .saturating_mul(NSEC_PER_SEC as i128)
+                                .saturating_add(req.tv_nsec as i128);
+                            let now_ns = (now.tv_sec as i128)
+                                .saturating_mul(NSEC_PER_SEC as i128)
+                                .saturating_add(now.tv_nsec as i128);
+                            if req_ns <= now_ns {
+                                0
+                            } else {
+                                crate::driver::timer::pit::sleep_ns(
+                                    core::cmp::min(
+                                        (req_ns - now_ns) as u128,
+                                        u64::MAX as u128,
+                                    ) as u64,
+                                );
+                                0
+                            }
+                        }
+                    }
+                }
+            }
+        }
         SYS_EXIT_GROUP => service::exit_group(arg1 as i32),
         SYS_WAIT4 => service::wait4(arg1 as i32, arg2 as usize, arg3 as i32, arg4 as usize),
         SYS_FUTEX => service::futex(
@@ -305,6 +382,7 @@ pub extern "sysv64" fn syscall_handler(
         }
         SYS_SET_ROBUST_LIST => service::set_robust_list(arg1 as usize, arg2 as usize),
         SYS_GETRANDOM => service::getrandom(arg1 as usize, arg2 as usize, arg3 as u32),
+        SYS_MEMFD_CREATE => service::memfd_create(arg1 as usize, arg2 as u32),
         SYS_RSEQ => service::rseq(arg1 as usize, arg2 as u32, arg3 as u32, arg4 as u32),
         SYS_REBOOT => {
             // Linux reboot magic numbers
@@ -357,14 +435,14 @@ pub extern "sysv64" fn syscall_handler(
     };
 
     if syscall_number != 271 {
-        serial_println!(
-            "[syscall] pid={} nr={} res={} rip={:#x} rsp={:#x}",
-            crate::sys::proc::id(),
-            syscall_number,
-            res,
-            _stack_frame.instruction_pointer.as_u64(),
-            _stack_frame.stack_pointer.as_u64(),
-        );
+        // serial_println!(
+        //     "[syscall] pid={} nr={} res={} rip={:#x} rsp={:#x}",
+        //     crate::sys::proc::id(),
+        //     syscall_number,
+        //     res,
+        //     _stack_frame.instruction_pointer.as_u64(),
+        //     _stack_frame.stack_pointer.as_u64(),
+        // );
     }
 
     if !restored_from_signal {
@@ -377,12 +455,12 @@ pub extern "sysv64" fn syscall_handler(
     crate::sys::preempt::cond_resched();
 
     if syscall_number == SYS_FORK || syscall_number == SYS_WAIT4 || syscall_number == SYS_EXECVE {
-        serial_println!(
-            "[syscall] pid={} nr={} return rax={:#x}",
-            crate::sys::proc::id(),
-            syscall_number,
-            regs.rax,
-        );
+        // serial_println!(
+        //     "[syscall] pid={} nr={} return rax={:#x}",
+        //     crate::sys::proc::id(),
+        //     syscall_number,
+        //     regs.rax,
+        // );
     }
 }
 

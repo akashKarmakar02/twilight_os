@@ -4,8 +4,10 @@
 //! children, and listens for read-only control queries from `twinitctl`
 //! over a Unix-domain socket.
 
+mod bootstrap;
 mod config;
 mod control;
+mod ipc;
 mod os;
 mod protocol;
 mod service;
@@ -15,12 +17,14 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use bootstrap::BootstrapServer;
 use config::{DEFAULT_RUNLEVEL, SERVICE_DIR, fallback_shell, load_service_configs};
 use control::ControlServer;
 use service::{ServiceState, start_service, supervise};
 
 const TWINIT_RUNTIME_DIR: &str = "/run/twinit";
 const TWINIT_CONTROL_SOCK: &str = "/run/twinit/control.sock";
+const TWINIT_BOOTSTRAP_SOCK: &str = "/run/twinit/bootstrap.sock";
 
 fn main() {
     let pid = std::process::id();
@@ -66,11 +70,23 @@ fn main() {
         configs.into_iter().map(ServiceState::new).collect()
     };
 
+    let mut bootstrap = BootstrapServer::new();
+    bootstrap.bind(TWINIT_BOOTSTRAP_SOCK);
+
     for service in &mut services {
-        start_service(service);
+        // On-demand TXPC services are not started at boot — the bootstrap
+        // broker will launch them when the first CONNECT arrives.
+        let is_on_demand = service
+            .config
+            .txpc
+            .as_ref()
+            .is_some_and(|txpc| txpc.on_demand);
+        if !is_on_demand {
+            start_service(service);
+        }
     }
 
-    supervise(&mut services, &mut control);
+    supervise(&mut services, &mut control, &mut bootstrap);
 }
 
 fn ensure_runtime_directory() {

@@ -1,8 +1,9 @@
 use crate::sys::proc;
+use crate::sys::proc::OpenFile;
 use crate::utils::sync::{Mutex, WaitQueue};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -14,6 +15,50 @@ use twilight_common::syscall::types::{
 
 const UNIX_PATH_MAX: usize = 108;
 const CHANNEL_CAPACITY: usize = 4096;
+
+pub type PassedFile = Arc<Mutex<OpenFile>>;
+
+#[derive(Clone, Default)]
+pub struct UnixControl {
+    pub rights: Vec<PassedFile>,
+}
+
+/// Kernel-verified credentials of the process on the other end of a
+/// connected AF_UNIX socket.  Layout matches Linux `struct ucred`
+/// (12 bytes: pid i32, uid u32, gid u32).
+#[derive(Clone, Copy, Debug)]
+pub struct PeerCredentials {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+pub struct UnixMessage {
+    pub data: Vec<u8>,
+    pub control: UnixControl,
+    pub src: Option<UnixAddr>,
+    pub truncated: bool,
+}
+
+impl UnixMessage {
+    fn new(data: Vec<u8>, control: UnixControl, src: Option<UnixAddr>) -> Self {
+        Self {
+            data,
+            control,
+            src,
+            truncated: false,
+        }
+    }
+
+    fn truncated(data: Vec<u8>, control: UnixControl, src: Option<UnixAddr>) -> Self {
+        Self {
+            data,
+            control,
+            src,
+            truncated: true,
+        }
+    }
+}
 
 // ---- UnixAddr ----
 
@@ -67,7 +112,8 @@ pub enum SockType {
 // ---- Channel (unidirectional byte pipe) ----
 
 struct Channel {
-    buffer: VecDeque<u8>,
+    messages: VecDeque<UnixMessage>,
+    buffered_len: usize,
     readers: WaitQueue,
     writers: WaitQueue,
     read_closed: bool,
@@ -77,7 +123,8 @@ struct Channel {
 impl Channel {
     fn new() -> Self {
         Self {
-            buffer: VecDeque::with_capacity(CHANNEL_CAPACITY),
+            messages: VecDeque::new(),
+            buffered_len: 0,
             readers: WaitQueue::new(),
             writers: WaitQueue::new(),
             read_closed: false,
@@ -86,11 +133,11 @@ impl Channel {
     }
 
     fn readable(&self) -> bool {
-        !self.buffer.is_empty()
+        !self.messages.is_empty()
     }
 
     fn writable(&self) -> bool {
-        !self.write_closed && self.buffer.len() < CHANNEL_CAPACITY
+        !self.write_closed && self.buffered_len < CHANNEL_CAPACITY
     }
 
     fn hangup(&self) -> bool {
@@ -140,6 +187,8 @@ enum UnixRole {
 
 struct PendingAccept {
     state: Arc<Mutex<UnixState>>,
+    /// Credentials of the connecting process, captured at connect() time.
+    connector_cred: PeerCredentials,
 }
 
 // ---- DgramMessage ----
@@ -147,6 +196,7 @@ struct PendingAccept {
 struct DgramMessage {
     data: Vec<u8>,
     src: UnixAddr,
+    control: UnixControl,
 }
 
 // ---- UnixState ----
@@ -170,6 +220,7 @@ struct UnixState {
     dgram_queue: VecDeque<DgramMessage>,
     dgram_readers: WaitQueue,
     default_peer: Option<UnixAddr>,
+    dgram_peer: Option<Weak<Mutex<UnixState>>>,
 }
 
 impl UnixState {
@@ -188,6 +239,7 @@ impl UnixState {
             dgram_queue: VecDeque::new(),
             dgram_readers: WaitQueue::new(),
             default_peer: None,
+            dgram_peer: None,
         }
     }
 }
@@ -197,6 +249,10 @@ impl UnixState {
 lazy_static! {
     static ref UNIX_REGISTRY: Mutex<BTreeMap<String, Arc<Mutex<UnixState>>>> =
         Mutex::new(BTreeMap::new());
+}
+
+pub fn unregister_path(path: &str) {
+    UNIX_REGISTRY.lock().remove(path);
 }
 
 // ---- PollState ----
@@ -218,6 +274,8 @@ pub struct UnixSocket {
     /// alive until their operation finishes.
     handle_refs: Arc<AtomicUsize>,
     pub addr_len: u32,
+    /// Credentials of the peer process, filled at accept()/socketpair() time.
+    pub peer_cred: Option<PeerCredentials>,
 }
 
 impl Clone for UnixSocket {
@@ -227,6 +285,7 @@ impl Clone for UnixSocket {
             state: self.state.clone(),
             handle_refs: self.handle_refs.clone(),
             addr_len: self.addr_len,
+            peer_cred: self.peer_cred,
         }
     }
 }
@@ -245,6 +304,89 @@ impl UnixSocket {
             state: Arc::new(Mutex::new(UnixState::new(sock_type))),
             handle_refs: Arc::new(AtomicUsize::new(1)),
             addr_len: 0,
+            peer_cred: None,
+        }
+    }
+
+    pub fn pair(sock_type: SockType, cred: PeerCredentials) -> (Self, Self) {
+        match sock_type {
+            SockType::Stream => {
+                let conn = UnixConnection::new();
+                let left = Arc::new(Mutex::new(UnixState {
+                    role: UnixRole::Connected,
+                    sock_type,
+                    bound_addr: None,
+                    owns_binding: false,
+                    conn: Some(conn.clone()),
+                    reader_half: 1,
+                    writer_half: 0,
+                    peer_addr: None,
+                    backlog: VecDeque::new(),
+                    accept_waiters: WaitQueue::new(),
+                    dgram_queue: VecDeque::new(),
+                    dgram_readers: WaitQueue::new(),
+                    default_peer: None,
+                    dgram_peer: None,
+                }));
+                let right = Arc::new(Mutex::new(UnixState {
+                    role: UnixRole::Connected,
+                    sock_type,
+                    bound_addr: None,
+                    owns_binding: false,
+                    conn: Some(conn),
+                    reader_half: 0,
+                    writer_half: 1,
+                    peer_addr: None,
+                    backlog: VecDeque::new(),
+                    accept_waiters: WaitQueue::new(),
+                    dgram_queue: VecDeque::new(),
+                    dgram_readers: WaitQueue::new(),
+                    default_peer: None,
+                    dgram_peer: None,
+                }));
+                (
+                    Self {
+                        state: left,
+                        handle_refs: Arc::new(AtomicUsize::new(1)),
+                        addr_len: 0,
+                        peer_cred: Some(cred),
+                    },
+                    Self {
+                        state: right,
+                        handle_refs: Arc::new(AtomicUsize::new(1)),
+                        addr_len: 0,
+                        peer_cred: Some(cred),
+                    },
+                )
+            }
+            SockType::Dgram => {
+                let left = Arc::new(Mutex::new(UnixState::new(sock_type)));
+                let right = Arc::new(Mutex::new(UnixState::new(sock_type)));
+                {
+                    let mut l = left.lock();
+                    l.role = UnixRole::Connected;
+                    l.dgram_peer = Some(Arc::downgrade(&right));
+                }
+                {
+                    let mut r = right.lock();
+                    r.role = UnixRole::Connected;
+                    r.dgram_peer = Some(Arc::downgrade(&left));
+                }
+                (
+                    Self {
+                        state: left,
+                        handle_refs: Arc::new(AtomicUsize::new(1)),
+                        addr_len: 0,
+                        peer_cred: Some(cred),
+                    },
+                    Self {
+                        state: right,
+                        handle_refs: Arc::new(AtomicUsize::new(1)),
+                        addr_len: 0,
+                        peer_cred: Some(cred),
+                    },
+                )
+            }
         }
     }
 
@@ -285,7 +427,7 @@ impl UnixSocket {
         Ok(())
     }
 
-    pub fn connect(&mut self, addr: UnixAddr) -> Result<(), i32> {
+    pub fn connect(&mut self, addr: UnixAddr, cred: PeerCredentials) -> Result<(), i32> {
         {
             let state = self.state.lock();
             if state.sock_type != SockType::Stream {
@@ -333,16 +475,20 @@ impl UnixSocket {
                 dgram_queue: VecDeque::new(),
                 dgram_readers: WaitQueue::new(),
                 default_peer: None,
+                dgram_peer: None,
             }));
 
             listener.backlog.push_back(PendingAccept {
                 state: client_state,
+                connector_cred: cred,
             });
             listener.accept_waiters.notify_all();
         }
 
         // Connecter uses the other half of the same connection
         self.addr_len = addr.addr_len();
+        // Both sides get the connector's credentials (matching Linux behaviour).
+        self.peer_cred = Some(cred);
         {
             let mut state = self.state.lock();
             state.conn = Some(conn);
@@ -383,6 +529,7 @@ impl UnixSocket {
                             state: pending.state.clone(),
                             handle_refs: Arc::new(AtomicUsize::new(1)),
                             addr_len,
+                            peer_cred: Some(pending.connector_cred),
                         },
                         peer,
                     ));
@@ -427,6 +574,7 @@ impl UnixSocket {
                     state: pending.state.clone(),
                     handle_refs: Arc::new(AtomicUsize::new(1)),
                     addr_len,
+                    peer_cred: Some(pending.connector_cred),
                 },
                 peer,
             )))
@@ -452,18 +600,44 @@ impl UnixSocket {
     }
 
     pub fn write(&mut self, data: &[u8], nonblock: bool) -> Result<usize, i32> {
+        self.send_msg(data, UnixControl::default(), None, nonblock)
+    }
+
+    pub fn send_msg(
+        &mut self,
+        data: &[u8],
+        control: UnixControl,
+        dest: Option<&UnixAddr>,
+        nonblock: bool,
+    ) -> Result<usize, i32> {
         let is_dgram = {
             let state = self.state.lock();
             state.sock_type == SockType::Dgram
         };
         if is_dgram {
-            self.dgram_send_impl(data, nonblock)
+            self.dgram_send_impl(data, control, dest, nonblock)
         } else {
-            self.stream_write_impl(data, nonblock)
+            self.stream_write_impl(data, control, nonblock)
         }
     }
 
     fn stream_read_impl(&self, out: &mut [u8], nonblock: bool) -> Result<usize, i32> {
+        self.stream_recv_impl(out, nonblock).map(|msg| msg.data.len())
+    }
+
+    pub fn recv_msg(&mut self, out: &mut [u8], nonblock: bool) -> Result<UnixMessage, i32> {
+        let is_dgram = {
+            let state = self.state.lock();
+            state.sock_type == SockType::Dgram
+        };
+        if is_dgram {
+            self.dgram_recv_msg_impl(out, nonblock)
+        } else {
+            self.stream_recv_impl(out, nonblock)
+        }
+    }
+
+    fn stream_recv_impl(&self, out: &mut [u8], nonblock: bool) -> Result<UnixMessage, i32> {
         let state = self.state.lock();
         if state.role != UnixRole::Connected {
             return Err(ENOTCONN);
@@ -474,17 +648,43 @@ impl UnixSocket {
 
         loop {
             let mut channel = conn.channels[reader_idx].lock();
-            if !channel.buffer.is_empty() {
-                let count = out.len().min(channel.buffer.len());
-                for slot in &mut out[..count] {
-                    *slot = channel.buffer.pop_front().unwrap();
+            if !channel.messages.is_empty() {
+                let mut copied = 0usize;
+                let mut rights = Vec::new();
+                while copied < out.len() {
+                    let Some((take, remove_front)) = ({
+                        let Some(front) = channel.messages.front_mut() else {
+                            break;
+                        };
+                        if !front.control.rights.is_empty() {
+                            rights.append(&mut front.control.rights);
+                        }
+                        let take = (out.len() - copied).min(front.data.len());
+                        out[copied..copied + take].copy_from_slice(&front.data[..take]);
+                        let remove_front = take == front.data.len();
+                        if !remove_front {
+                            front.data.drain(..take);
+                        }
+                        Some((take, remove_front))
+                    }) else {
+                        break;
+                    };
+                    copied += take;
+                    channel.buffered_len = channel.buffered_len.saturating_sub(take);
+                    if remove_front {
+                        channel.messages.pop_front();
+                    }
                 }
                 channel.writers.notify_all();
                 proc::poll_wait_queue().notify_all();
-                return Ok(count);
+                return Ok(UnixMessage::new(
+                    out[..copied].to_vec(),
+                    UnixControl { rights },
+                    None,
+                ));
             }
             if channel.read_closed {
-                return Ok(0);
+                return Ok(UnixMessage::new(Vec::new(), UnixControl::default(), None));
             }
             if nonblock {
                 return Err(EAGAIN);
@@ -502,8 +702,13 @@ impl UnixSocket {
         }
     }
 
-    fn stream_write_impl(&self, data: &[u8], nonblock: bool) -> Result<usize, i32> {
-        if data.is_empty() {
+    fn stream_write_impl(
+        &self,
+        data: &[u8],
+        control: UnixControl,
+        nonblock: bool,
+    ) -> Result<usize, i32> {
+        if data.is_empty() && control.rights.is_empty() {
             return Ok(0);
         }
         let state = self.state.lock();
@@ -519,7 +724,7 @@ impl UnixSocket {
             if channel.write_closed {
                 return Err(EPIPE);
             }
-            let available = CHANNEL_CAPACITY.saturating_sub(channel.buffer.len());
+            let available = CHANNEL_CAPACITY.saturating_sub(channel.buffered_len);
             let atomic_write = data.len() <= CHANNEL_CAPACITY;
             let can_write = if atomic_write {
                 available >= data.len()
@@ -532,7 +737,12 @@ impl UnixSocket {
                 } else {
                     available.min(data.len())
                 };
-                channel.buffer.extend(data[..count].iter().copied());
+                channel.messages.push_back(UnixMessage::new(
+                    data[..count].to_vec(),
+                    control,
+                    None,
+                ));
+                channel.buffered_len += count;
                 channel.readers.notify_all();
                 proc::poll_wait_queue().notify_all();
                 return Ok(count);
@@ -553,18 +763,36 @@ impl UnixSocket {
         }
     }
 
-    fn dgram_send_impl(&mut self, data: &[u8], _nonblock: bool) -> Result<usize, i32> {
+    fn dgram_send_impl(
+        &mut self,
+        data: &[u8],
+        control: UnixControl,
+        dest: Option<&UnixAddr>,
+        _nonblock: bool,
+    ) -> Result<usize, i32> {
+        if let Some(addr) = dest {
+            return self.send_to_msg(data, addr, control);
+        }
         let dest = {
             let state = self.state.lock();
             state.default_peer.clone()
         };
         match dest {
-            Some(addr) => self.send_to(data, &addr),
-            None => Err(EDESTADDRREQ),
+            Some(addr) => self.send_to_msg(data, &addr, control),
+            None => self.send_to_peer(data, control),
         }
     }
 
     pub fn send_to(&mut self, buf: &[u8], addr: &UnixAddr) -> Result<usize, i32> {
+        self.send_to_msg(buf, addr, UnixControl::default())
+    }
+
+    pub fn send_to_msg(
+        &mut self,
+        buf: &[u8],
+        addr: &UnixAddr,
+        control: UnixControl,
+    ) -> Result<usize, i32> {
         let target_state = {
             let reg = UNIX_REGISTRY.lock();
             reg.get(&addr.to_string()).cloned()
@@ -584,6 +812,35 @@ impl UnixSocket {
         target.dgram_queue.push_back(DgramMessage {
             data: buf.to_vec(),
             src,
+            control,
+        });
+        target.dgram_readers.notify_all();
+        proc::poll_wait_queue().notify_all();
+        Ok(buf.len())
+    }
+
+    fn send_to_peer(&mut self, buf: &[u8], control: UnixControl) -> Result<usize, i32> {
+        let peer = {
+            let state = self.state.lock();
+            state.dgram_peer.as_ref().and_then(Weak::upgrade)
+        };
+        let Some(peer) = peer else {
+            return Err(EDESTADDRREQ);
+        };
+        let src = {
+            let state = self.state.lock();
+            state.bound_addr.clone().unwrap_or(UnixAddr {
+                path: String::new(),
+            })
+        };
+        let mut target = peer.lock();
+        if target.sock_type != SockType::Dgram || state_is_closed(&target) {
+            return Err(ECONNREFUSED);
+        }
+        target.dgram_queue.push_back(DgramMessage {
+            data: buf.to_vec(),
+            src,
+            control,
         });
         target.dgram_readers.notify_all();
         proc::poll_wait_queue().notify_all();
@@ -619,12 +876,22 @@ impl UnixSocket {
     }
 
     fn dgram_recv_impl(&self, out: &mut [u8], nonblock: bool) -> Result<usize, i32> {
+        self.dgram_recv_msg_impl(out, nonblock)
+            .map(|msg| msg.data.len())
+    }
+
+    fn dgram_recv_msg_impl(&self, out: &mut [u8], nonblock: bool) -> Result<UnixMessage, i32> {
         loop {
             let mut state = self.state.lock();
             if let Some(msg) = state.dgram_queue.pop_front() {
                 let count = out.len().min(msg.data.len());
                 out[..count].copy_from_slice(&msg.data[..count]);
-                return Ok(count);
+                let data = out[..count].to_vec();
+                return Ok(if count < msg.data.len() {
+                    UnixMessage::truncated(data, msg.control, Some(msg.src))
+                } else {
+                    UnixMessage::new(data, msg.control, Some(msg.src))
+                });
             }
             if nonblock {
                 return Err(EAGAIN);
@@ -661,6 +928,9 @@ impl UnixSocket {
 
             state.accept_waiters.notify_all();
             state.dgram_readers.notify_all();
+            if let Some(peer) = state.dgram_peer.as_ref().and_then(Weak::upgrade) {
+                peer.lock().dgram_readers.notify_all();
+            }
         }
 
         if let Some(bound) = bound_to_remove {
@@ -730,9 +1000,17 @@ impl UnixSocket {
         let state = self.state.lock();
         if state.sock_type == SockType::Dgram {
             let readable = !state.dgram_queue.is_empty();
+            let peer_alive = state
+                .dgram_peer
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|peer| !state_is_closed(&peer.lock()));
             UnixPollState {
                 readable,
-                writable: true,
+                // Unconnected datagram sockets are writable on Linux: sendto()
+                // can provide the destination address for each message.
+                writable: state.role != UnixRole::Unbound || state.dgram_peer.is_none(),
+                hangup: state.role == UnixRole::Unbound || (state.dgram_peer.is_some() && !peer_alive),
                 ..UnixPollState::default()
             }
         } else if state.role == UnixRole::Listening {
@@ -764,6 +1042,10 @@ impl UnixSocket {
     pub fn remote_endpoint(&self) -> Option<UnixAddr> {
         self.state.lock().peer_addr.clone()
     }
+}
+
+fn state_is_closed(state: &UnixState) -> bool {
+    state.role == UnixRole::Unbound
 }
 
 impl Drop for UnixSocket {

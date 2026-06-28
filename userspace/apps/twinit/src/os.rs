@@ -7,32 +7,85 @@
 use std::fs::File;
 use std::io;
 use std::os::fd::FromRawFd;
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_void};
 use std::time::Duration;
 
 pub const WNOHANG: c_int = 1;
-const EINTR: i32 = 4;
-const O_NONBLOCK: c_int = 0x800;
-const O_CLOEXEC: c_int = 0x80000;
-const F_GETFL: c_int = 3;
-const F_SETFL: c_int = 4;
+pub const EINTR: i32 = 4;
+pub const O_NONBLOCK: c_int = 0x800;
+pub const O_CLOEXEC: c_int = 0x80000;
+pub const F_GETFL: c_int = 3;
+pub const F_SETFL: c_int = 4;
+
+pub const AF_UNIX: c_int = 1;
+pub const SOCK_STREAM: c_int = 1;
+pub const SOL_SOCKET: c_int = 1;
+pub const SCM_RIGHTS: c_int = 1;
+pub const SO_PEERCRED: c_int = 17;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Timespec {
-    tv_sec: i64,
-    tv_nsec: i64,
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+#[repr(C)]
+pub struct Iovec {
+    pub iov_base: *mut c_void,
+    pub iov_len: usize,
+}
+
+#[repr(C)]
+pub struct Msghdr {
+    pub msg_name: *mut c_void,
+    pub msg_namelen: u32,
+    pub msg_iov: *mut Iovec,
+    pub msg_iovlen: i32,
+    pub __pad_iovlen: i32,
+    pub msg_control: *mut c_void,
+    pub msg_controllen: u32,
+    pub __pad_controllen: u32,
+    pub msg_flags: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Cmsghdr {
+    pub cmsg_len: u32,
+    pub __pad_len: i32,
+    pub cmsg_level: i32,
+    pub cmsg_type: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Ucred {
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 unsafe extern "C" {
-    fn fork() -> c_int;
-    fn setsid() -> c_int;
-    fn dup2(oldfd: c_int, newfd: c_int) -> c_int;
-    fn pipe2(pipefd: *mut c_int, flags: c_int) -> c_int;
-    fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
-    fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
-    fn nanosleep(request: *const Timespec, remainder: *mut Timespec) -> c_int;
-    fn _exit(status: c_int) -> !;
+    pub fn fork() -> c_int;
+    pub fn setsid() -> c_int;
+    pub fn dup2(oldfd: c_int, newfd: c_int) -> c_int;
+    pub fn pipe2(pipefd: *mut c_int, flags: c_int) -> c_int;
+    pub fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
+    pub fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+    pub fn nanosleep(request: *const Timespec, remainder: *mut Timespec) -> c_int;
+    pub fn _exit(status: c_int) -> !;
+    pub fn socketpair(domain: c_int, type_: c_int, protocol: c_int, sv: *mut c_int) -> c_int;
+    pub fn getsockopt(
+        sockfd: c_int,
+        level: c_int,
+        optname: c_int,
+        optval: *mut c_void,
+        optlen: *mut u32,
+    ) -> c_int;
+    pub fn sendmsg(sockfd: c_int, msg: *const Msghdr, flags: c_int) -> isize;
+    pub fn recvmsg(sockfd: c_int, msg: *mut Msghdr, flags: c_int) -> isize;
+    pub fn close(fd: c_int) -> c_int;
 }
 
 /// Create a pipe whose read end is nonblocking and whose inherited helper

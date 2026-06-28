@@ -11,6 +11,7 @@ use crate::kernel_utils::exec::jump_to_user;
 use crate::println;
 use crate::sys::console::init_console;
 use crate::sys::console::tty::TtyDev;
+use crate::sys::fs::memfd::MemFd;
 use crate::sys::fs::pipe::PipeEnd;
 use crate::sys::fs::vfs::{Metadata, VfsNode, VfsNodeOps, VFS};
 use crate::sys::memory::bitmap::with_frame_allocator;
@@ -349,6 +350,7 @@ pub enum OpenFileKind {
     Vfs(Arc<Mutex<VfsNode>>),
     Pipe(Arc<PipeEnd>),
     Socket(crate::sys::net::socket::SocketFile),
+    MemFd(Arc<Mutex<MemFd>>),
 }
 
 #[derive(Clone)]
@@ -1911,12 +1913,12 @@ fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut Preemp
         if crate::sys::preempt::can_preempt_kernel() {
             let rip = unsafe { (*frame).rip };
             let rsp = unsafe { (*frame).rsp };
-            crate::serial_println!(
-                "[kpreempt] allow: pid={} rip={:#x} rsp={:#x}",
-                id(),
-                rip,
-                rsp,
-            );
+            // crate::serial_println!(
+            //     "[kpreempt] allow: pid={} rip={:#x} rsp={:#x}",
+            //     id(),
+            //     rip,
+            //     rsp,
+            // );
             schedule_now();
         }
         // When can_preempt_kernel() returns false it has already logged the

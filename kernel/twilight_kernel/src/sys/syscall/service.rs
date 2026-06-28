@@ -1,6 +1,7 @@
 use crate::arch::x86_64::io::{IA32_FS_BASE, rdmsr, wrmsr};
 use crate::driver::disk::ata::IO;
 use crate::driver::timer::pit::uptime;
+use crate::sys::fs::memfd::MemFd;
 use crate::sys::fs::pipe::make_pipe_ends;
 use crate::sys::fs::vfs::{FileType, VFS};
 use crate::sys::kmsg::IOCTL_KMSG_GET_HEAD;
@@ -9,7 +10,7 @@ use crate::sys::net::socket::{
     SocketFile,
     tcp::TcpSocket,
     udp::UdpSocket,
-    unix::{SockType, UnixAddr, UnixSocket},
+    unix::{PassedFile, PeerCredentials, SockType, UnixAddr, UnixControl, UnixSocket},
 };
 use crate::sys::proc::{
     FdEntry, OpenFile, OpenFileKind, PROCESS_TABLE, Process, SIGCHLD, SIGKILL, SIGPIPE, SIGSTOP,
@@ -25,6 +26,7 @@ use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::arch::asm;
 use core::mem::size_of;
+use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 use crate::utils::sync::Mutex;
@@ -270,6 +272,269 @@ fn write_sockaddr_un(
     Ok(())
 }
 
+fn write_sockaddr_un_msg_name(
+    addr_ptr: usize,
+    addr_len_in: u32,
+    addr: &UnixAddr,
+    addr_len: u32,
+) -> Result<u32, i64> {
+    if addr_ptr == 0 {
+        return Ok(0);
+    }
+
+    let need = addr_len.min(size_of::<SockAddrUn>() as u32);
+    if addr_len_in < need {
+        return Ok(need);
+    }
+
+    // SAFETY: The caller supplied a non-null msg_name pointer with at least
+    // msg_namelen bytes. This follows the same raw userspace ABI convention as
+    // the existing sockaddr copyout helpers in this file.
+    let out = unsafe { &mut *(addr_ptr as *mut SockAddrUn) };
+    out.sun_family = AF_UNIX;
+    let bytes = addr.as_bytes();
+    let n = bytes.len().min(108);
+    out.sun_path[..n].copy_from_slice(&bytes[..n]);
+    Ok(need)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct UserMsghdr {
+    msg_name: usize,
+    msg_namelen: u32,
+    __pad_name: u32,
+    msg_iov: usize,
+    msg_iovlen: i32,
+    __pad_iovlen: i32,
+    msg_control: usize,
+    msg_controllen: u32,
+    __pad_controllen: u32,
+    msg_flags: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct UserIovec {
+    iov_base: usize,
+    iov_len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct UserCmsghdr {
+    cmsg_len: u32,
+    __pad_len: i32,
+    cmsg_level: i32,
+    cmsg_type: i32,
+}
+
+const CMSG_ALIGN_BYTES: usize = size_of::<usize>();
+const CMSG_HDR_LEN: usize = size_of::<UserCmsghdr>();
+const MAX_MSG_IOV: usize = 1024;
+const MAX_MSG_BYTES: usize = 1024 * 1024;
+
+fn cmsg_align(len: usize) -> usize {
+    (len + CMSG_ALIGN_BYTES - 1) & !(CMSG_ALIGN_BYTES - 1)
+}
+
+fn cmsg_len(payload_len: usize) -> usize {
+    cmsg_align(CMSG_HDR_LEN) + payload_len
+}
+
+fn read_user_msghdr(msg_ptr: usize) -> Result<UserMsghdr, i64> {
+    if msg_ptr == 0 {
+        return Err(-(EFAULT as i64));
+    }
+    // SAFETY: Raw syscall ABI pointer. The kernel currently trusts mapped
+    // userspace pointers similarly throughout this syscall layer; null is
+    // checked above and invalid mappings trap according to existing behavior.
+    Ok(unsafe { ptr::read(msg_ptr as *const UserMsghdr) })
+}
+
+fn write_user_msghdr(msg_ptr: usize, hdr: &UserMsghdr) -> Result<(), i64> {
+    if msg_ptr == 0 {
+        return Err(-(EFAULT as i64));
+    }
+    // SAFETY: Raw syscall ABI copyout to the same msghdr pointer supplied by
+    // userspace. Layout is #[repr(C)] and matches the bundled musl x86_64 ABI.
+    unsafe {
+        ptr::write(msg_ptr as *mut UserMsghdr, *hdr);
+    }
+    Ok(())
+}
+
+fn read_user_iovecs(hdr: &UserMsghdr) -> Result<Vec<UserIovec>, i64> {
+    if hdr.msg_iovlen < 0 {
+        return Err(-(EINVAL as i64));
+    }
+    let iovlen = hdr.msg_iovlen as usize;
+    if iovlen > MAX_MSG_IOV {
+        return Err(-(EINVAL as i64));
+    }
+    if iovlen != 0 && hdr.msg_iov == 0 {
+        return Err(-(EFAULT as i64));
+    }
+
+    let mut iovecs = Vec::with_capacity(iovlen);
+    for index in 0..iovlen {
+        // SAFETY: msg_iov points to an array of iovec entries provided by
+        // userspace. Bounds are limited by msg_iovlen above.
+        let iov = unsafe {
+            ptr::read((hdr.msg_iov as *const UserIovec).add(index))
+        };
+        if iov.iov_base == 0 && iov.iov_len != 0 {
+            return Err(-(EFAULT as i64));
+        }
+        iovecs.push(iov);
+    }
+    Ok(iovecs)
+}
+
+fn gather_iovec_payload(iovecs: &[UserIovec]) -> Result<Vec<u8>, i64> {
+    let total = iovecs.iter().try_fold(0usize, |sum, iov| {
+        sum.checked_add(iov.iov_len).ok_or(-(EMSGSIZE as i64))
+    })?;
+    if total > MAX_MSG_BYTES {
+        return Err(-(EMSGSIZE as i64));
+    }
+
+    let mut out = Vec::with_capacity(total);
+    for iov in iovecs {
+        if iov.iov_len == 0 {
+            continue;
+        }
+        // SAFETY: Userspace supplied a non-null base for this non-empty iovec.
+        // The syscall layer follows raw pointer copyin conventions already used
+        // by read/write/readv/writev in this file.
+        let bytes = unsafe { core::slice::from_raw_parts(iov.iov_base as *const u8, iov.iov_len) };
+        out.extend_from_slice(bytes);
+    }
+    Ok(out)
+}
+
+fn scatter_iovec_payload(iovecs: &[UserIovec], data: &[u8]) -> Result<usize, i64> {
+    let mut copied = 0usize;
+    for iov in iovecs {
+        if copied >= data.len() {
+            break;
+        }
+        if iov.iov_len == 0 {
+            continue;
+        }
+        let count = (data.len() - copied).min(iov.iov_len);
+        // SAFETY: Userspace supplied a non-null base for this non-empty iovec.
+        // Copy length is bounded by the iovec length and remaining payload.
+        let dst = unsafe { core::slice::from_raw_parts_mut(iov.iov_base as *mut u8, count) };
+        dst.copy_from_slice(&data[copied..copied + count]);
+        copied += count;
+    }
+    Ok(copied)
+}
+
+fn parse_scm_rights(process: &Process, hdr: &UserMsghdr) -> Result<UnixControl, i64> {
+    let mut control = UnixControl::default();
+    let total = hdr.msg_controllen as usize;
+    if hdr.msg_control == 0 || total < CMSG_HDR_LEN {
+        return Ok(control);
+    }
+
+    let mut offset = 0usize;
+    while offset + CMSG_HDR_LEN <= total {
+        // SAFETY: offset is checked to leave enough bytes for cmsghdr. Use
+        // read_unaligned because user control buffers are ABI byte buffers.
+        let cmsg = unsafe {
+            ptr::read_unaligned((hdr.msg_control + offset) as *const UserCmsghdr)
+        };
+        let cmsg_len_usize = cmsg.cmsg_len as usize;
+        if cmsg_len_usize < CMSG_HDR_LEN || offset + cmsg_len_usize > total {
+            return Err(-(EINVAL as i64));
+        }
+
+        if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
+            let data_len = cmsg_len_usize - CMSG_HDR_LEN;
+            if data_len % size_of::<i32>() != 0 {
+                return Err(-(EINVAL as i64));
+            }
+            let fd_count = data_len / size_of::<i32>();
+            for fd_index in 0..fd_count {
+                let fd_ptr =
+                    (hdr.msg_control + offset + CMSG_HDR_LEN + fd_index * size_of::<i32>())
+                        as *const i32;
+                // SAFETY: fd_ptr is within the validated cmsghdr payload.
+                let fd = unsafe { ptr::read_unaligned(fd_ptr) };
+                let file = clone_open_file(process, fd).map_err(|code| code as i64)?;
+                control.rights.push(file);
+            }
+        }
+
+        let next = offset + cmsg_align(cmsg_len_usize);
+        if next <= offset {
+            return Err(-(EINVAL as i64));
+        }
+        offset = next;
+    }
+
+    Ok(control)
+}
+
+fn copyout_scm_rights(
+    process: &mut Process,
+    hdr: &mut UserMsghdr,
+    rights: Vec<PassedFile>,
+    flags: i32,
+) -> Result<(), i64> {
+    hdr.msg_flags &= !MSG_CTRUNC;
+    if rights.is_empty() {
+        hdr.msg_controllen = 0;
+        return Ok(());
+    }
+
+    let payload_len = rights.len() * size_of::<i32>();
+    let need_len = cmsg_len(payload_len);
+    if hdr.msg_control == 0 || (hdr.msg_controllen as usize) < need_len {
+        hdr.msg_flags |= MSG_CTRUNC;
+        hdr.msg_controllen = 0;
+        return Ok(());
+    }
+
+    let fd_flags = if flags & MSG_CMSG_CLOEXEC != 0 {
+        FD_CLOEXEC
+    } else {
+        0
+    };
+    let mut installed = Vec::with_capacity(rights.len());
+    for file in rights {
+        match install_fd_entry(process, FdEntry { file, fd_flags }, 0) {
+            Ok(fd) => installed.push(fd),
+            Err(errno) => {
+                for fd in installed {
+                    let _ = process.close_fd(fd);
+                }
+                return Err(-(errno as i64));
+            }
+        }
+    }
+
+    let cmsg = UserCmsghdr {
+        cmsg_len: need_len as u32,
+        __pad_len: 0,
+        cmsg_level: SOL_SOCKET,
+        cmsg_type: SCM_RIGHTS,
+    };
+    // SAFETY: msg_control was supplied with at least need_len bytes. cmsghdr is
+    // #[repr(C)] for the bundled musl x86_64 layout.
+    unsafe {
+        ptr::write_unaligned(hdr.msg_control as *mut UserCmsghdr, cmsg);
+        let data_ptr = (hdr.msg_control + CMSG_HDR_LEN) as *mut i32;
+        for (index, fd) in installed.iter().enumerate() {
+            ptr::write_unaligned(data_ptr.add(index), *fd);
+        }
+    }
+    hdr.msg_controllen = need_len as u32;
+    Ok(())
+}
+
 fn status_flags_from_open(flags: i32) -> i32 {
     let mut status = flags & O_ACCMODE;
     status |= flags & (O_APPEND | O_NONBLOCK | O_DIRECTORY | O_PATH);
@@ -315,6 +580,7 @@ fn base_for_dirfd(process: &mut Process, dirfd: i32) -> Result<String, i32> {
         }
         OpenFileKind::Pipe(_) => return Err(-ENOTDIR),
         OpenFileKind::Socket(_) => return Err(-ENOTDIR),
+        OpenFileKind::MemFd(_) => return Err(-ENOTDIR),
     }
 
     Ok(file.path.clone())
@@ -411,6 +677,17 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
                 Err(_) => (-(EIO as i64), None),
             }
         }
+        OpenFileKind::MemFd(memfd) => {
+            let start = if status_flags & O_APPEND != 0 {
+                memfd.lock().len()
+            } else {
+                seek
+            };
+            match memfd.lock().write_at(start, buf) {
+                Ok(written) => (written as i64, Some(start.saturating_add(written))),
+                Err(errno) => (-(errno as i64), None),
+            }
+        }
         OpenFileKind::Pipe(_) => unreachable!(),
         OpenFileKind::Socket(sock) => {
             // Handle Unix sockets with proper errno
@@ -465,11 +742,11 @@ pub fn close(fd: i32) -> i64 {
     }
 }
 
-pub fn ftruncate(fd: i32, length: u64) -> i64 {
+pub fn ftruncate(fd: i32, length: i64) -> i64 {
     if fd < 0 {
         return -(EBADF as i64);
     }
-    if length > (usize::MAX as u64) {
+    if length < 0 || length as u64 > (usize::MAX as u64) {
         return -(EINVAL as i64);
     }
     let new_len = length as usize;
@@ -505,6 +782,7 @@ pub fn ftruncate(fd: i32, length: u64) -> i64 {
                     }
                     OpenFileKind::Pipe(_) => return -(EINVAL as i64),
                     OpenFileKind::Socket(_) => return -(EINVAL as i64),
+                    OpenFileKind::MemFd(memfd) => memfd.lock().truncate(new_len),
                 }
             };
 
@@ -519,6 +797,52 @@ pub fn ftruncate(fd: i32, length: u64) -> i64 {
             }
         }
         Err(code) => code as i64,
+    }
+}
+
+pub fn memfd_create(name_ptr: usize, flags: u32) -> i64 {
+    const MFD_CLOEXEC: u32 = 0x0001;
+    const MFD_ALLOW_SEALING: u32 = 0x0002;
+    let allowed = MFD_CLOEXEC | MFD_ALLOW_SEALING;
+    if flags & !allowed != 0 {
+        return -(EINVAL as i64);
+    }
+    if name_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+    let name = match copy_cstr_from_user(UserPtr(name_ptr as *const u8), 256) {
+        Ok(name) => name,
+        Err(_) => return -(EFAULT as i64),
+    };
+    let debug_name = if name.is_empty() {
+        "memfd:".to_string()
+    } else {
+        format!("memfd:{}", name)
+    };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let entry = FdEntry {
+        file: Arc::new(Mutex::new(OpenFile {
+            kind: OpenFileKind::MemFd(Arc::new(Mutex::new(MemFd::new(debug_name.clone())))),
+            seek: 0,
+            path: debug_name,
+            status_flags: O_RDWR,
+        })),
+        fd_flags: if flags & MFD_CLOEXEC != 0 { FD_CLOEXEC } else { 0 },
+    };
+    match install_fd_entry(process, entry, 0) {
+        Ok(fd) => fd as i64,
+        Err(errno) => -(errno as i64),
     }
 }
 
@@ -788,6 +1112,10 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
                     },
                 }
             }
+            OpenFileKind::MemFd(memfd) => match memfd.lock().read_at(seek, buf) {
+                Ok(n) => (n as i64, Some(n)),
+                Err(errno) => (-(errno as i64), None),
+            },
             OpenFileKind::Pipe(_) => unreachable!(),
             OpenFileKind::Socket(sock) => {
                 let nonblock = (status_flags & O_NONBLOCK) != 0;
@@ -1350,12 +1678,12 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
     if options & !(WNOHANG | WUNTRACED | WCONTINUED) != 0 {
         return -(EINVAL as i64);
     }
-    crate::serial_println!(
-        "[wait4] pid={} target={} options={:#x}",
-        current_pid,
-        pid,
-        options,
-    );
+    // crate::serial_println!(
+    //     "[wait4] pid={} target={} options={:#x}",
+    //     current_pid,
+    //     pid,
+    //     options,
+    // );
 
     loop {
         let mut reaped_pid = None;
@@ -1555,6 +1883,10 @@ pub fn pread64(fd: i32, buf_ptr: usize, count: usize, offset: u64) -> i64 {
         }
         OpenFileKind::Pipe(_) => -(ESPIPE as i64),
         OpenFileKind::Socket(_) => -(ESPIPE as i64),
+        OpenFileKind::MemFd(memfd) => match memfd.lock().read_at(offset as usize, buf) {
+            Ok(n) => n as i64,
+            Err(errno) => -(errno as i64),
+        },
     }
 }
 
@@ -1943,6 +2275,7 @@ pub fn getdent64(fd: i32, user_buf: *mut u8, buf_len: usize) -> i64 {
         }
         OpenFileKind::Pipe(_) => return -(ENOTDIR as i64),
         OpenFileKind::Socket(_) => return -(ENOTDIR as i64),
+        OpenFileKind::MemFd(_) => return -(ENOTDIR as i64),
     }
     if let Err(e) = check_encrypted_home_access(&file.path) {
         return e;
@@ -2321,6 +2654,26 @@ pub fn fstat(fd: usize, fstat_ptr: usize) -> i64 {
                 user_stat.st_mtim = ts;
                 user_stat.st_ctim = ts;
             }
+            OpenFileKind::MemFd(memfd) => {
+                let now = uptime() as i64;
+                let len = memfd.lock().len();
+                user_stat.st_mode = 0o100777; // S_IFREG | rwxrwxrwx
+                user_stat.st_uid = 0;
+                user_stat.st_gid = 0;
+                user_stat.st_ino = fd as u64;
+                user_stat.st_nlink = 1;
+                user_stat.st_size = len as i64;
+                user_stat.st_rdev = 0;
+                user_stat.st_blksize = 4096;
+                user_stat.st_blocks = ((len as u64 + 511) / 512) as i64;
+                let ts = Timespec {
+                    tv_sec: now,
+                    tv_nsec: 0,
+                };
+                user_stat.st_atim = ts;
+                user_stat.st_mtim = ts;
+                user_stat.st_ctim = ts;
+            }
         }
     }
 
@@ -2593,8 +2946,16 @@ pub fn unlink(path_ptr: usize) -> i64 {
     let fs = unsafe { VFS.get_mut() };
 
     if let Ok(mut inode) = fs.open(full_path.as_str()) {
-        inode.unlink().unwrap() as i64
+        let result = inode.unlink().unwrap() as i64;
+        if result == 0 {
+            crate::sys::net::socket::unix::unregister_path(full_path.as_str());
+        }
+        result
     } else {
+        // Keep AF_UNIX pathname state in sync with Linux-style unlink
+        // semantics: unlinking a socket pathname removes the name even if
+        // existing connected/listening socket objects continue to live by fd.
+        crate::sys::net::socket::unix::unregister_path(full_path.as_str());
         0
     }
 }
@@ -2621,7 +2982,7 @@ pub fn lseek(fd: usize, offset: u64, whence: u8) -> i64 {
             return -(ESPIPE as i64);
         }
         OpenFileKind::Pipe(_) | OpenFileKind::Socket(_) => return -(ESPIPE as i64),
-        OpenFileKind::Vfs(_) => {}
+        OpenFileKind::Vfs(_) | OpenFileKind::MemFd(_) => {}
     }
 
     match whence {
@@ -2633,6 +2994,11 @@ pub fn lseek(fd: usize, offset: u64, whence: u8) -> i64 {
         2 => match &file.kind {
             OpenFileKind::Vfs(node_ref) => {
                 let size = node_ref.lock().metadata.size;
+                file.seek = size;
+                file.seek as i64
+            }
+            OpenFileKind::MemFd(memfd) => {
+                let size = memfd.lock().len();
                 file.seek = size;
                 file.seek as i64
             }
@@ -2755,6 +3121,30 @@ pub fn preadv(fd: i32, iov_ptr: usize, iov_count: usize, offset: u64) -> i64 {
         }
         OpenFileKind::Pipe(_) => -(ESPIPE as i64),
         OpenFileKind::Socket(_) => -(ESPIPE as i64),
+        OpenFileKind::MemFd(memfd) => {
+            let mut total: usize = 0;
+            let memfd = memfd.lock();
+            for iv in iov {
+                if iv.iov_len == 0 {
+                    continue;
+                }
+                if iv.iov_base.is_null() {
+                    return -(EFAULT as i64);
+                }
+                let buf =
+                    unsafe { core::slice::from_raw_parts_mut(iv.iov_base as *mut u8, iv.iov_len) };
+                match memfd.read_at((offset as usize).saturating_add(total), buf) {
+                    Ok(n) => {
+                        total = total.saturating_add(n);
+                        if n < iv.iov_len {
+                            break;
+                        }
+                    }
+                    Err(errno) => return -(errno as i64),
+                }
+            }
+            total as i64
+        }
     }
 }
 
@@ -2827,6 +3217,25 @@ pub fn pwritev(fd: i32, iov_ptr: usize, iov_count: usize, offset: u64) -> i64 {
         }
         OpenFileKind::Pipe(_) => -(ESPIPE as i64),
         OpenFileKind::Socket(_) => -(ESPIPE as i64),
+        OpenFileKind::MemFd(memfd) => {
+            let mut total: usize = 0;
+            let mut memfd = memfd.lock();
+            for iv in iov {
+                if iv.iov_len == 0 {
+                    continue;
+                }
+                if iv.iov_base.is_null() {
+                    return -(EFAULT as i64);
+                }
+                let buf =
+                    unsafe { core::slice::from_raw_parts(iv.iov_base as *const u8, iv.iov_len) };
+                match memfd.write_at((offset as usize).saturating_add(total), buf) {
+                    Ok(n) => total = total.saturating_add(n),
+                    Err(errno) => return -(errno as i64),
+                }
+            }
+            total as i64
+        }
     }
 }
 
@@ -2871,6 +3280,7 @@ pub fn ioctl(fd: usize, cmd: usize, arg: usize) -> i64 {
             .unwrap_or(-(ENOTTY as i64)),
         OpenFileKind::Pipe(_) => -(ENOTTY as i64),
         OpenFileKind::Socket(_) => -(ENOTTY as i64),
+        OpenFileKind::MemFd(_) => -(ENOTTY as i64),
     }
 }
 
@@ -3119,6 +3529,14 @@ fn poll_fd_set(fds: &mut [PollFd], process: &mut Process) -> Result<usize, i64> 
                     }
                 }
             },
+            OpenFileKind::MemFd(_) => {
+                if want_in {
+                    revents |= POLLIN;
+                }
+                if want_out && file.status_flags & O_ACCMODE != O_RDONLY {
+                    revents |= POLLOUT;
+                }
+            }
         }
 
         if revents != 0 {
@@ -3572,6 +3990,242 @@ pub fn socket(domain: i32, sock_type: i32, _protocol: i32) -> i64 {
     }
 }
 
+pub fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv_ptr: usize) -> i64 {
+    const SOCK_NONBLOCK: i32 = 0x800;
+    const SOCK_CLOEXEC: i32 = 0x80000;
+
+    if sv_ptr == 0 {
+        return -(EFAULT as i64);
+    }
+    if domain as u16 != AF_UNIX {
+        return -(EAFNOSUPPORT as i64);
+    }
+    if protocol != 0 {
+        return -(EPROTONOSUPPORT as i64);
+    }
+
+    let nonblock = (sock_type & SOCK_NONBLOCK) != 0;
+    let cloexec = (sock_type & SOCK_CLOEXEC) != 0;
+    let base_type = sock_type & 0xF;
+    let sock_type = match base_type {
+        SOCK_STREAM => SockType::Stream,
+        SOCK_DGRAM => SockType::Dgram,
+        _ => return -(EPROTONOSUPPORT as i64),
+    };
+
+    let cred = PeerCredentials {
+        pid: crate::sys::proc::id() as u32,
+        uid: 0,
+        gid: 0,
+    };
+    let (left, right) = UnixSocket::pair(sock_type, cred);
+    let status_flags = O_RDWR | if nonblock { O_NONBLOCK } else { 0 };
+    let fd_flags = if cloexec { FD_CLOEXEC } else { 0 };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let left_entry = FdEntry {
+        file: Arc::new(Mutex::new(OpenFile {
+            kind: OpenFileKind::Socket(SocketFile::Unix(left)),
+            seek: 0,
+            path: "socketpair".to_string(),
+            status_flags,
+        })),
+        fd_flags,
+    };
+    let right_entry = FdEntry {
+        file: Arc::new(Mutex::new(OpenFile {
+            kind: OpenFileKind::Socket(SocketFile::Unix(right)),
+            seek: 0,
+            path: "socketpair".to_string(),
+            status_flags,
+        })),
+        fd_flags,
+    };
+
+    let left_fd = match install_fd_entry(process, left_entry, 0) {
+        Ok(fd) => fd,
+        Err(errno) => return -(errno as i64),
+    };
+    let right_fd = match install_fd_entry(process, right_entry, 0) {
+        Ok(fd) => fd,
+        Err(errno) => {
+            let _ = process.close_fd(left_fd);
+            return -(errno as i64);
+        }
+    };
+
+    // SAFETY: sv_ptr is a non-null userspace pointer to two ints, as required
+    // by the Linux socketpair ABI.
+    unsafe {
+        let out = sv_ptr as *mut i32;
+        out.add(0).write(left_fd);
+        out.add(1).write(right_fd);
+    }
+    0
+}
+
+pub fn sendmsg(fd: i32, msg_ptr: usize, flags: i32) -> i64 {
+    if fd < 0 {
+        return -(ENOTSOCK as i64);
+    }
+
+    let hdr = match read_user_msghdr(msg_ptr) {
+        Ok(hdr) => hdr,
+        Err(errno) => return errno,
+    };
+    let iovecs = match read_user_iovecs(&hdr) {
+        Ok(iovecs) => iovecs,
+        Err(errno) => return errno,
+    };
+    let payload = match gather_iovec_payload(&iovecs) {
+        Ok(payload) => payload,
+        Err(errno) => return errno,
+    };
+    let dest = if hdr.msg_name != 0 && hdr.msg_namelen != 0 {
+        match parse_sockaddr_un(hdr.msg_name, hdr.msg_namelen as usize) {
+            Ok(addr) => Some(addr),
+            Err(errno) => return -(errno as i64),
+        }
+    } else {
+        None
+    };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let control = match parse_scm_rights(process, &hdr) {
+        Ok(control) => control,
+        Err(errno) => return errno,
+    };
+
+    let file_ref = match clone_open_file(process, fd) {
+        Ok(file) => file,
+        Err(code) => return code as i64,
+    };
+    let mut file = file_ref.lock();
+    let nonblock = (file.status_flags & O_NONBLOCK) != 0 || (flags & MSG_DONTWAIT) != 0;
+    let OpenFileKind::Socket(SocketFile::Unix(socket)) = &mut file.kind else {
+        return -(ENOTSOCK as i64);
+    };
+    let mut socket = socket.clone();
+    drop(file);
+
+    match socket.send_msg(&payload, control, dest.as_ref(), nonblock) {
+        Ok(written) => written as i64,
+        Err(EPIPE) => {
+            crate::sys::proc::queue_signal(crate::sys::proc::id(), SIGPIPE);
+            -(EPIPE as i64)
+        }
+        Err(errno) => -(errno as i64),
+    }
+}
+
+pub fn recvmsg(fd: i32, msg_ptr: usize, flags: i32) -> i64 {
+    if fd < 0 {
+        return -(ENOTSOCK as i64);
+    }
+
+    let mut hdr = match read_user_msghdr(msg_ptr) {
+        Ok(hdr) => hdr,
+        Err(errno) => return errno,
+    };
+    let iovecs = match read_user_iovecs(&hdr) {
+        Ok(iovecs) => iovecs,
+        Err(errno) => return errno,
+    };
+    let capacity = match iovecs.iter().try_fold(0usize, |sum, iov| {
+        sum.checked_add(iov.iov_len).ok_or(-(EMSGSIZE as i64))
+    }) {
+        Ok(capacity) => capacity.min(MAX_MSG_BYTES),
+        Err(errno) => return errno,
+    };
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+
+    let file_ref = match clone_open_file(process, fd) {
+        Ok(file) => file,
+        Err(code) => return code as i64,
+    };
+    let mut file = file_ref.lock();
+    let nonblock = (file.status_flags & O_NONBLOCK) != 0 || (flags & MSG_DONTWAIT) != 0;
+    let OpenFileKind::Socket(SocketFile::Unix(socket)) = &mut file.kind else {
+        return -(ENOTSOCK as i64);
+    };
+    let mut socket = socket.clone();
+    drop(file);
+
+    let mut kernel_buf = alloc::vec![0u8; capacity];
+    let msg = match socket.recv_msg(&mut kernel_buf, nonblock) {
+        Ok(msg) => msg,
+        Err(errno) => return -(errno as i64),
+    };
+
+    let copied = match scatter_iovec_payload(&iovecs, &msg.data) {
+        Ok(copied) => copied,
+        Err(errno) => return errno,
+    };
+    hdr.msg_flags = 0;
+    if msg.truncated {
+        hdr.msg_flags |= MSG_TRUNC;
+    }
+
+    if let Some(src) = msg.src.as_ref() {
+        let addr_len = src.addr_len();
+        match write_sockaddr_un_msg_name(hdr.msg_name, hdr.msg_namelen, src, addr_len) {
+            Ok(new_len) => hdr.msg_namelen = new_len,
+            Err(errno) => return errno,
+        }
+    } else {
+        hdr.msg_namelen = 0;
+    }
+
+    #[allow(static_mut_refs)]
+    let proc_opt = unsafe {
+        PROCESS_TABLE
+            .get_mut()
+            .unwrap()
+            .get_process(crate::sys::proc::id())
+    };
+    let Some(process) = proc_opt else {
+        return -(ESRCH as i64);
+    };
+    if let Err(errno) = copyout_scm_rights(process, &mut hdr, msg.control.rights, flags) {
+        return errno;
+    }
+    if let Err(errno) = write_user_msghdr(msg_ptr, &hdr) {
+        return errno;
+    }
+
+    copied as i64
+}
+
 pub fn connect(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
     if fd < 0 {
         return -(ENOTSOCK as i64);
@@ -3611,7 +4265,12 @@ pub fn connect(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
             Ok(a) => a,
             Err(e) => return -(e as i64),
         };
-        match sock.connect_unix(addr) {
+        let cred = PeerCredentials {
+            pid: crate::sys::proc::id() as u32,
+            uid: 0,
+            gid: 0,
+        };
+        match sock.connect_unix(addr, cred) {
             Ok(()) => 0,
             Err(e) => -(e as i64),
         }
@@ -4118,7 +4777,7 @@ pub fn setsockopt(fd: i32, level: i32, optname: i32, _optval: usize, _optlen: us
     -(ENOPROTOOPT as i64)
 }
 
-pub fn getsockopt(fd: i32, _level: i32, _optname: i32, _optval: usize, _optlen_ptr: usize) -> i64 {
+pub fn getsockopt(fd: i32, level: i32, optname: i32, optval: usize, optlen_ptr: usize) -> i64 {
     if fd < 0 {
         return -(ENOTSOCK as i64);
     }
@@ -4137,9 +4796,39 @@ pub fn getsockopt(fd: i32, _level: i32, _optname: i32, _optval: usize, _optlen_p
         Err(code) => return code as i64,
     };
     let file = file_ref.lock();
-    if !matches!(&file.kind, OpenFileKind::Socket(_)) {
+    let OpenFileKind::Socket(sock) = &file.kind else {
         return -(ENOTSOCK as i64);
+    };
+
+    if level == SOL_SOCKET && optname == SO_PEERCRED {
+        let cred = match sock.peer_cred_unix() {
+            Some(c) => c,
+            None => return -(ENOTCONN as i64),
+        };
+        if optval == 0 || optlen_ptr == 0 {
+            return -(EFAULT as i64);
+        }
+        // Write the 12-byte Linux `struct ucred` to userspace.
+        // Layout: pid (i32), uid (u32), gid (u32) — total 12 bytes.
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Ucred {
+            pid: i32,
+            uid: u32,
+            gid: u32,
+        }
+        let ucred = Ucred {
+            pid: cred.pid as i32,
+            uid: cred.uid,
+            gid: cred.gid,
+        };
+        unsafe {
+            *(optval as *mut Ucred) = ucred;
+            *(optlen_ptr as *mut u32) = 12;
+        }
+        return 0;
     }
+
     -(ENOPROTOOPT as i64)
 }
 

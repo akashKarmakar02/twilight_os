@@ -94,8 +94,13 @@ pub const SOCK_DGRAM: i32 = 2;
 
 pub const SOL_SOCKET: i32 = 1;
 pub const SO_REUSEADDR: i32 = 2;
+pub const SO_PEERCRED: i32 = 17;
+pub const SCM_RIGHTS: i32 = 1;
 
 pub const MSG_DONTWAIT: i32 = 0x40;
+pub const MSG_TRUNC: i32 = 0x20;
+pub const MSG_CTRUNC: i32 = 0x8;
+pub const MSG_CMSG_CLOEXEC: i32 = 0x40000000;
 
 pub const SHUT_RD: i32 = 0;
 pub const SHUT_WR: i32 = 1;

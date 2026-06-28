@@ -2,6 +2,7 @@ mod devfs;
 pub mod fat16;
 pub mod fat32;
 mod gdt;
+pub mod memfd;
 pub mod mbr;
 pub mod partition;
 pub mod pipe;

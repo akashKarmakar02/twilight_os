@@ -6,11 +6,12 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixDatagram;
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::bootstrap::BootstrapServer;
 use crate::config::{OutputMode, RestartPolicy, ServiceConfig, ServiceType};
 use crate::control::ControlServer;
 use crate::os;
@@ -50,6 +51,7 @@ pub struct ServiceState {
     pub stderr_log: Option<File>,
     pub stdout_buffer: String,
     pub stderr_buffer: String,
+    pub registered_txpc_fd: Option<UnixStream>,
 }
 
 impl ServiceState {
@@ -65,6 +67,7 @@ impl ServiceState {
             stderr_log: None,
             stdout_buffer: String::new(),
             stderr_buffer: String::new(),
+            registered_txpc_fd: None,
         }
     }
 }
@@ -97,7 +100,6 @@ pub fn start_service(service: &mut ServiceState) {
             service.stderr_buffer.clear();
             service.pid = Some(pid);
             service.status = RuntimeStatus::Running;
-            println!("twinit: started service {} pid={pid}", service.config.name);
         }
         Err(error) => {
             service.status = RuntimeStatus::Failed(-1);
@@ -205,7 +207,11 @@ fn redirect_output(mode: OutputMode, target_fd: i32, log_writer: Option<&File>) 
 // Supervision loop
 // ---------------------------------------------------------------------------
 
-pub fn supervise(services: &mut [ServiceState], control: &mut ControlServer) -> ! {
+pub fn supervise(
+    services: &mut [ServiceState],
+    control: &mut ControlServer,
+    bootstrap: &mut BootstrapServer,
+) -> ! {
     loop {
         // 1. Reap all exited children.
         loop {
@@ -223,10 +229,13 @@ pub fn supervise(services: &mut [ServiceState], control: &mut ControlServer) -> 
         // 2. Accept and process any pending control socket clients.
         control.poll_clients(services);
 
-        // 3. Drain bounded chunks from service stdout/stderr log pipes.
+        // 3. Accept and process any pending bootstrap socket clients.
+        bootstrap.poll_clients(services);
+
+        // 4. Drain bounded chunks from service stdout/stderr log pipes.
         drain_service_logs(services);
 
-        // 4. Sleep briefly before the next iteration.
+        // 5. Sleep briefly before the next iteration.
         os::sleep(REAP_INTERVAL);
     }
 }
@@ -318,6 +327,7 @@ fn handle_child_exit(services: &mut [ServiceState], pid: i32, wait_status: i32) 
     };
 
     service.pid = None;
+    service.registered_txpc_fd = None;
     drain_log_pipe(
         &service.config.name,
         "INFO",
@@ -333,10 +343,6 @@ fn handle_child_exit(services: &mut [ServiceState], pid: i32, wait_status: i32) 
     let outcome = decode_wait_status(wait_status);
     match outcome {
         WaitOutcome::Exited(code) => {
-            println!(
-                "twinit: service {} pid={pid} exited status={code}",
-                service.config.name
-            );
             service.status = if code == 0 {
                 RuntimeStatus::Exited(code)
             } else {
