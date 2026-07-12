@@ -137,8 +137,8 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Build standalone vi submodule at userspace/vi and install as /bin/vi.
-    // This runs after apps/ to ensure the submodule binary wins if both exist.
+    // Build standalone submodules outside apps/.
+    build_oksh_submodule(out_bin_dir)?;
     build_vi_submodule(out_bin_dir)?;
     install_sbin_aliases(out_bin_dir)?;
 
@@ -484,6 +484,129 @@ fn apply_ccache_env(cmd: &mut Command) {
 
     cmd.env("CCACHE_DIR", ccache_dir);
     cmd.env("CCACHE_TEMPDIR", ccache_tmpdir);
+}
+
+fn build_oksh_submodule(out_bin_dir: &Path) -> io::Result<()> {
+    let oksh_dir = Path::new("oksh");
+    if !oksh_dir.exists() {
+        return Ok(());
+    }
+
+    let configure = oksh_dir.join("configure");
+    if !configure.exists() {
+        println!(
+            "userspace/oksh exists but has no configure script; skipping standalone oksh build"
+        );
+        return Ok(());
+    }
+
+    println!("\n=== Building standalone app: oksh (submodule) ===");
+
+    if let Ok(meta) = fs::metadata(&configure) {
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o111 == 0 {
+            perms.set_mode(perms.mode() | 0o111);
+            fs::set_permissions(&configure, perms)?;
+        }
+    }
+
+    let cc = selected_cc();
+    let make_cc = cc_for_make(&cc);
+    let cflags = if no_pie_enabled() {
+        "-O2 -DSMALL -fno-pie".to_string()
+    } else {
+        "-O2 -DSMALL".to_string()
+    };
+    let ldflags = if no_pie_enabled() {
+        "-no-pie".to_string()
+    } else {
+        String::new()
+    };
+
+    let makefile = oksh_dir.join("Makefile");
+    let expected_cc = format!("CC =\t\t{}", cc);
+    let expected_cflags = format!("CFLAGS =\t{} -DEMACS -DVI -std=gnu99", cflags);
+    let expected_ldflags = if ldflags.is_empty() {
+        "LDFLAGS =\t-static".to_string()
+    } else {
+        format!("LDFLAGS =\t{} -static", ldflags)
+    };
+    let needs_configure = match fs::read_to_string(&makefile) {
+        Ok(s) => {
+            !s.lines().any(|line| line.trim_end() == expected_cc)
+                || !s.lines().any(|line| line.trim_end() == expected_cflags)
+                || !s.lines().any(|line| line.trim_end() == expected_ldflags)
+        }
+        Err(_) => true,
+    };
+
+    if needs_configure {
+        println!(
+            "Running ./configure --no-thanks --disable-curses --enable-static with CC={}",
+            cc
+        );
+        let mut cmd = Command::new("./configure");
+        cmd.arg("--no-thanks")
+            .arg("--disable-curses")
+            .arg("--enable-static")
+            .arg(format!("--cc={}", cc))
+            .arg(format!("--cflags={}", cflags))
+            .current_dir(oksh_dir)
+            .env("CC", &cc)
+            .env("CFLAGS", &cflags);
+
+        if !ldflags.is_empty() {
+            cmd.env("LDFLAGS", &ldflags);
+        }
+
+        apply_ccache_env(&mut cmd);
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "standalone userspace/oksh configure failed",
+            ));
+        }
+
+        let mut clean_cmd = Command::new("make");
+        clean_cmd.arg("-C").arg(oksh_dir).arg("clean");
+        apply_ccache_env(&mut clean_cmd);
+        let status = clean_cmd.status()?;
+        if !status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "standalone userspace/oksh clean failed",
+            ));
+        }
+    }
+
+    println!("Running make -C oksh with CC={}", make_cc);
+    let mut cmd = Command::new("make");
+    cmd.arg("-C").arg(oksh_dir).env("CC", &make_cc);
+    apply_ccache_env(&mut cmd);
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "standalone userspace/oksh make failed",
+        ));
+    }
+
+    let src = oksh_dir.join("oksh");
+    if !src.exists() || !src.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "userspace/oksh build did not produce ./oksh/oksh",
+        ));
+    }
+
+    let dst = out_bin_dir.join("oksh");
+    println!("Copying {} -> {}", src.display(), dst.display());
+    fs::copy(&src, &dst)?;
+    let mut perms = fs::metadata(&dst)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&dst, perms)?;
+    Ok(())
 }
 
 fn build_vi_submodule(out_bin_dir: &Path) -> io::Result<()> {
