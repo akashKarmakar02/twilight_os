@@ -28,7 +28,7 @@ pub fn init_tty() {
     }
 }
 
-pub fn put_char_in_tty(c: u8) {
+pub(crate) fn put_char_in_tty(c: u8) {
     let tty = get_tty();
     tty.put_input(c);
     // Wake processes that are blocked waiting for TTY input
