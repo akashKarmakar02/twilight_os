@@ -122,6 +122,10 @@ impl Bus {
         unsafe { self.lba2_register.read() }
     }
 
+    fn sector_count(&mut self) -> u8 {
+        unsafe { self.sector_count_register.read() }
+    }
+
     fn read_data(&mut self) -> u16 {
         unsafe { self.data_register.read() }
     }
@@ -202,7 +206,7 @@ impl Bus {
 
     fn write_command(&mut self, cmd: Command) -> Result<(), ()> {
         unsafe { self.command_register.write(cmd as u8) }
-        self.wait(120); // Wait at least 400 ns
+        self.wait(400); // ATA requires a 400 ns command-settle delay.
         self.status(); // Ignore results of first read
         self.clear_interrupt();
         if self.status() == 0 {
@@ -365,9 +369,9 @@ impl Bus {
     fn reset(&mut self) {
         unsafe {
             self.control_register.write(4); // Set SRST bit
-            self.wait(5); // Wait at least 5 ns
+            self.wait(5_000); // Assert SRST for at least 5 us.
             self.control_register.write(0); // Then clear it
-            self.wait(200); // Wait at least 2 ms
+            self.wait(2_000_000); // Allow at least 2 ms for recovery.
         }
     }
 

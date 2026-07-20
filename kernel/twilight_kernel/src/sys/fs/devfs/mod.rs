@@ -11,7 +11,9 @@ use crate::driver::mouse::MouseDev;
 use crate::fs::vfs::Metadata;
 use crate::sys::console::tty::TtyDev;
 use crate::sys::framebuffer::FramebufferDev;
-use crate::sys::fs::devfs::disk::{Disk0, Disk1, disk_size_bytes, usb_disk_size_bytes};
+use crate::sys::fs::devfs::disk::{
+    Cdrom0, Disk0, Disk1, disk_size_bytes, optical_disk_size_bytes, usb_disk_size_bytes,
+};
 use crate::sys::fs::devfs::full::Full;
 use crate::sys::fs::devfs::kmsg::KmsgDev;
 use crate::sys::fs::devfs::null::Null;
@@ -121,6 +123,18 @@ impl DevFs {
             devices.push((
                 "disk1".to_string(),
                 VfsNode::new(dummy_blockdev(), disk1_meta, Arc::new(RwLock::new(Disk1))),
+            ));
+        }
+
+        if let Some(size) = optical_disk_size_bytes() {
+            let cdrom_meta = Metadata::blk(15, "cdrom0", size);
+            devices.push((
+                "cdrom0".to_string(),
+                VfsNode::new(
+                    dummy_blockdev(),
+                    cdrom_meta,
+                    Arc::new(RwLock::new(Cdrom0)),
+                ),
             ));
         }
 
