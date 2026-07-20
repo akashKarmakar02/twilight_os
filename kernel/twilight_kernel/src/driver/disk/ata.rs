@@ -1,5 +1,6 @@
 use crate::driver::disk::mount_ata;
 use crate::println;
+use crate::utils::sync::Mutex;
 use alloc::string::String;
 use alloc::vec::Vec;
 use bit_field::BitField;
@@ -7,8 +8,9 @@ use core::convert::TryInto;
 use core::fmt;
 use core::hint::spin_loop;
 use lazy_static::lazy_static;
-use crate::utils::sync::Mutex;
 use x86_64::instructions::port::{Port, PortReadOnly, PortWriteOnly};
+
+pub mod atapi;
 // Information Technology
 // AT Attachment with Packet Interface Extension (ATA/ATAPI-4)
 // (1998)
@@ -53,6 +55,7 @@ enum Status {
 pub struct Bus {
     id: u8,
     irq: u8,
+    io_base: u16,
 
     data_register: Port<u16>,
     error_register: PortReadOnly<u8>,
@@ -75,6 +78,7 @@ impl Bus {
         Self {
             id,
             irq,
+            io_base,
             data_register: Port::new(io_base + 0),
             error_register: PortReadOnly::new(io_base + 1),
             features_register: PortWriteOnly::new(io_base + 1),
@@ -120,6 +124,19 @@ impl Bus {
 
     fn read_data(&mut self) -> u16 {
         unsafe { self.data_register.read() }
+    }
+
+    fn read_data_words(&mut self, dst: *mut u8, words: usize) {
+        let dst = dst as usize;
+        unsafe {
+            core::arch::asm!(
+                "rep insw",
+                in("dx") self.io_base,
+                inout("rdi") dst => _,
+                inout("rcx") words => _,
+                options(nostack)
+            );
+        }
     }
 
     fn write_data(&mut self, data: u16) {
@@ -321,13 +338,21 @@ impl Bus {
         }
         self.select_drive(drive)?;
         self.write_command_params(drive, 0, 1)?;
-        if self.write_command(Command::Identify).is_err() {
-            if self.status() == 0 {
-                return Ok(IdentifyResponse::None);
-            } else {
-                return Err(());
-            }
+        unsafe { self.command_register.write(Command::Identify as u8) };
+        self.wait(400);
+        let status = self.status();
+        if status == 0 || status == 0xFF {
+            return Ok(IdentifyResponse::None);
         }
+        self.poll(Status::BSY, false)?;
+        if self.is_error() {
+            return match (self.lba1(), self.lba2()) {
+                (0x14, 0xEB) => Ok(IdentifyResponse::Atapi),
+                (0x3C, 0xC3) => Ok(IdentifyResponse::Sata),
+                _ => Err(()),
+            };
+        }
+        self.poll(Status::DRQ, true)?;
         match (self.lba1(), self.lba2()) {
             (0x00, 0x00) => Ok(IdentifyResponse::Ata([(); 256].map(|_| self.read_data()))),
             (0x14, 0xEB) => Ok(IdentifyResponse::Atapi),
@@ -387,6 +412,7 @@ pub fn init() {
         );
         mount_ata(drive.bus, drive.dsk);
     }
+
 }
 
 #[derive(Clone, Debug)]

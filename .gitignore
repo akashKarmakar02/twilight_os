@@ -10,6 +10,9 @@ twilight_kernel/kernel
 kernel/twilight_kernel/kernel
 twilight-os.iso
 rootfs.cpio
+initramfs.cpio
+system.tfs
+/build
 hdd.img
 twilight-os.hdd
 qemu.log

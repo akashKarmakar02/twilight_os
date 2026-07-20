@@ -23,6 +23,10 @@ endif
 export RUSTUP_TOOLCHAIN
 
 override IMAGE_NAME := twilight-os
+override INITRAMFS_IMAGE := initramfs.cpio
+override SYSTEM_IMAGE := system.tfs
+override INITRAMFS_STAGE := build/initramfs
+override ISO_REPRO_FLAGS := -iso-level 3 -uid 0 -gid 0 --modification-date=1970010100000000
 
 .PHONY: all
 all: $(IMAGE_NAME).iso
@@ -244,14 +248,31 @@ kernel:
 userspace:
 	cd userspace && RUSTUP_TOOLCHAIN=stable cargo build --release
 
-cpio: userspace
-	cd rootfs && find . | cpio -o -H newc > ../rootfs.cpio
+$(INITRAMFS_IMAGE): userspace
+	rm -rf $(INITRAMFS_STAGE)
+	mkdir -p $(INITRAMFS_STAGE)/bin $(INITRAMFS_STAGE)/dev $(INITRAMFS_STAGE)/proc $(INITRAMFS_STAGE)/home $(INITRAMFS_STAGE)/run $(INITRAMFS_STAGE)/tmp $(INITRAMFS_STAGE)/etc
+	install -m 0755 rootfs/bin/init $(INITRAMFS_STAGE)/bin/init
+	install -m 0755 rootfs/bin/oksh $(INITRAMFS_STAGE)/bin/oksh
+	install -m 0755 rootfs/bin/install $(INITRAMFS_STAGE)/bin/install
+	find $(INITRAMFS_STAGE) -exec touch -h -d @0 {} +
+	cd $(INITRAMFS_STAGE) && find . -print | LC_ALL=C sort | cpio --quiet --reproducible --owner=0:0 -o -H newc > ../../$(INITRAMFS_IMAGE)
+	test $$(stat -c '%s' $(INITRAMFS_IMAGE)) -le 4194304
 
-$(IMAGE_NAME).iso: limine/limine kernel cpio
+.PHONY: initramfs
+initramfs: $(INITRAMFS_IMAGE)
+
+$(SYSTEM_IMAGE): userspace tools/mktfs/Cargo.toml tools/mktfs/src/main.rs
+	cargo run --release --manifest-path tools/mktfs/Cargo.toml -- rootfs $(SYSTEM_IMAGE)
+
+.PHONY: system-image
+system-image: $(SYSTEM_IMAGE)
+
+$(IMAGE_NAME).iso: limine/limine kernel $(INITRAMFS_IMAGE) $(SYSTEM_IMAGE)
 	rm -rf iso_root
 	mkdir -p iso_root/boot
 	cp -v kernel/twilight_kernel/kernel iso_root/boot/
-	cp -v rootfs.cpio iso_root/boot/
+	cp -v $(INITRAMFS_IMAGE) iso_root/boot/
+	cp -v $(SYSTEM_IMAGE) iso_root/SYSTEM.TFS
 	mkdir -p iso_root/boot/limine
 	cp -v limine.conf iso_root/boot/limine/
 	mkdir -p iso_root/EFI/BOOT
@@ -259,40 +280,44 @@ ifeq ($(KARCH),x86_64)
 	cp -v limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin iso_root/boot/limine/
 	cp -v limine/BOOTX64.EFI iso_root/EFI/BOOT/
 	cp -v limine/BOOTIA32.EFI iso_root/EFI/BOOT/
+	find iso_root -exec touch -h -d @0 {} +
 	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
+		$(ISO_REPRO_FLAGS) iso_root -o $(IMAGE_NAME).iso
 	./limine/limine bios-install $(IMAGE_NAME).iso
 endif
 ifeq ($(KARCH),aarch64)
 	cp -v limine/limine-uefi-cd.bin iso_root/boot/limine/
 	cp -v limine/BOOTAA64.EFI iso_root/EFI/BOOT/
+	find iso_root -exec touch -h -d @0 {} +
 	xorriso -as mkisofs \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
+		$(ISO_REPRO_FLAGS) iso_root -o $(IMAGE_NAME).iso
 endif
 ifeq ($(KARCH),riscv64)
 	cp -v limine/limine-uefi-cd.bin iso_root/boot/limine/
 	cp -v limine/BOOTRISCV64.EFI iso_root/EFI/BOOT/
+	find iso_root -exec touch -h -d @0 {} +
 	xorriso -as mkisofs \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
+		$(ISO_REPRO_FLAGS) iso_root -o $(IMAGE_NAME).iso
 endif
 ifeq ($(KARCH),loongarch64)
 	cp -v limine/limine-uefi-cd.bin iso_root/boot/limine/
 	cp -v limine/BOOTLOONGARCH64.EFI iso_root/EFI/BOOT/
+	find iso_root -exec touch -h -d @0 {} +
 	xorriso -as mkisofs \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(IMAGE_NAME).iso
+		$(ISO_REPRO_FLAGS) iso_root -o $(IMAGE_NAME).iso
 endif
 	rm -rf iso_root
 
-$(IMAGE_NAME).hdd: limine/limine kernel cpio
+$(IMAGE_NAME).hdd: limine/limine kernel $(INITRAMFS_IMAGE) $(SYSTEM_IMAGE)
 	rm -f $(IMAGE_NAME).hdd
 	dd if=/dev/zero bs=1M count=0 seek=200 of=$(IMAGE_NAME).hdd
 	PATH=$$PATH:/usr/sbin:/sbin sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00 -m 1
@@ -303,7 +328,8 @@ endif
 	mformat -F -i $(IMAGE_NAME).hdd@@1M
 	mmd -i $(IMAGE_NAME).hdd@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
 	mcopy -i $(IMAGE_NAME).hdd@@1M kernel/twilight_kernel/kernel ::/boot
-	mcopy -i $(IMAGE_NAME).hdd@@1M rootfs.cpio ::/boot
+	mcopy -i $(IMAGE_NAME).hdd@@1M $(INITRAMFS_IMAGE) ::/boot
+	mcopy -i $(IMAGE_NAME).hdd@@1M $(SYSTEM_IMAGE) ::/SYSTEM.TFS
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine.conf ::/boot/limine
 ifeq ($(KARCH),x86_64)
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine/limine-bios.sys ::/boot/limine
@@ -322,8 +348,8 @@ endif
 
 .PHONY: clean
 clean:
-	$(MAKE) -C twilight_kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
+	$(MAKE) -C kernel/twilight_kernel clean
+	rm -rf iso_root build rootfs.cpio $(INITRAMFS_IMAGE) $(SYSTEM_IMAGE) $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
 .PHONY: distclean
 distclean: clean

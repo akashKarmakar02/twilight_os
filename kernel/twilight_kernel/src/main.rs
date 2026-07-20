@@ -91,7 +91,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     if let Some(module_response) = MODULE_REQUEST.get_response() {
         for module in module_response.modules() {
-            if module.path().to_str().unwrap() == "/boot/rootfs.cpio" {
+            if module.path().to_str().unwrap() == "/boot/initramfs.cpio" {
                 // let cpio_buf = unsafe { core::slice::from_raw_parts(module.addr() as *const u8, module.size() as usize) };
                 // let cpio = CpioIterator::new(cpio_buf);
                 cpio_response = Some(module);

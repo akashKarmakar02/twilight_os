@@ -3,12 +3,12 @@ use crate::kernel_utils::install::INITRAMFS;
 use crate::serial_println;
 use crate::sys::fs::ram_fs::initramfs::CpioError;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, Metadata, VfsNode, VfsNodeOps};
+use crate::utils::sync::RwLock;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cmp::min;
-use crate::utils::sync::RwLock;
 
 pub mod initramfs;
 
@@ -24,6 +24,14 @@ pub struct InitramfsFs {
 }
 
 impl InitramfsFs {
+    pub fn empty() -> Self {
+        Self {
+            root: Node::Dir {
+                children: BTreeMap::new(),
+            },
+        }
+    }
+
     pub fn new() -> Self {
         let mut initramfs = INITRAMFS.lock().clone();
 

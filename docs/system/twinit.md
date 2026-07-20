@@ -19,7 +19,7 @@ Service files live in `/etc/twinit/services/` and use a deliberately small TOML 
 ```toml
 name = "shell"
 description = "Twilight interactive shell"
-exec = "/bin/tsh"
+exec = "/bin/oksh"
 args = []
 enabled = true
 runlevel = "default"
@@ -48,7 +48,7 @@ A service is disabled after five restarts in a ten-second window. Running longer
 
 ## Runlevels and fallback
 
-The normal active runlevel is `default`. `twinit --single` selects `single` when invoked as PID 1. Runtime switching is not implemented. If the service directory is missing or contains no valid enabled service for the active runlevel, `twinit` supervises a built-in `/bin/tsh` fallback shell with `restart = "always"`.
+The normal active runlevel is `default`. `twinit --single` selects `single` when invoked as PID 1. Runtime switching is not implemented. If the service directory is missing or contains no valid enabled service for the active runlevel, `twinit` supervises a built-in `/bin/oksh` fallback shell with `restart = "always"`.
 
 `twinit --shutdown` and `twinit --reboot` currently provide command hooks only. Under PID 1 they announce that orderly handling is still TODO; under another PID they describe the action that would be requested.
 

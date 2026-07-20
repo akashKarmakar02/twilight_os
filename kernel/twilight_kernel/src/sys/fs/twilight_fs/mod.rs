@@ -7,7 +7,7 @@ pub mod superblock;
 
 use crate::driver;
 use crate::driver::disk::virtioblkdev::VirtioBlkHandle;
-use crate::driver::disk::{BLOCK_DEVICE, BlockDeviceIO, UsbBlkHandle};
+use crate::driver::disk::{BlockDeviceIO, PartitionBlockDevice, UsbBlkHandle};
 use crate::driver::timer::cmos::CMOS;
 use crate::sys::fs::MFS;
 use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
@@ -18,6 +18,8 @@ use crate::sys::fs::twilight_fs::inode::{Inode, MODE_SOCKET, MODE_TYPE_MASK, TFS
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
 use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
+use crate::utils::sync::Mutex;
+use crate::utils::sync::RwLock;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -26,11 +28,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::utils::sync::Mutex;
-use crate::utils::sync::RwLock;
 
 pub const FS_BLOCK_SIZE: usize = 2048;
-static FS_BLOCK_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
 const PATH_LOOKUP_CACHE_CAPACITY: usize = 1024;
 const FILE_CACHE_MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
@@ -46,26 +45,6 @@ fn to_u32_saturating(value: u64) -> u32 {
     }
 }
 
-#[inline]
-pub fn fs_block_offset_bytes() -> usize {
-    FS_BLOCK_OFFSET.load(Ordering::Relaxed)
-}
-
-#[inline]
-pub fn set_fs_block_offset_bytes(offset: usize) {
-    FS_BLOCK_OFFSET.store(offset, Ordering::Relaxed);
-}
-
-#[inline]
-pub fn set_fs_block_offset_lba(start_lba: u32) {
-    set_fs_block_offset_bytes((start_lba as usize) * partition::SECTOR_SIZE as usize);
-}
-
-#[inline]
-fn fs_block_offset_sectors() -> usize {
-    fs_block_offset_bytes() / partition::SECTOR_SIZE as usize
-}
-
 pub fn read_tfs_block(
     device: &mut dyn BlockDeviceIO,
     block_no: u32,
@@ -79,8 +58,17 @@ pub fn read_tfs_blocks(
     start_block_no: u32,
     buf: &mut [u8],
 ) -> Result<(), FsError> {
-    let start_block_no = start_block_no as usize;
-    let start_device_block = (start_block_no * 4) + fs_block_offset_sectors();
+    let device_block_size = device.block_size();
+    if device_block_size == 0
+        || FS_BLOCK_SIZE % device_block_size != 0
+        || buf.len() % device_block_size != 0
+    {
+        return Err(InvalidInode);
+    }
+    let blocks_per_fs_block = FS_BLOCK_SIZE / device_block_size;
+    let start_device_block = (start_block_no as usize)
+        .checked_mul(blocks_per_fs_block)
+        .ok_or(InvalidInode)?;
     device
         .read_blocks(start_device_block as u32, buf)
         .map_err(|_| InvalidInode)
@@ -99,8 +87,17 @@ pub fn write_tfs_blocks(
     start_block_no: u32,
     buf: &[u8],
 ) -> Result<(), FsError> {
-    let start_block_no = start_block_no as usize;
-    let start_device_block = (start_block_no * 4) + fs_block_offset_sectors();
+    let device_block_size = device.block_size();
+    if device_block_size == 0
+        || FS_BLOCK_SIZE % device_block_size != 0
+        || buf.len() % device_block_size != 0
+    {
+        return Err(InvalidInode);
+    }
+    let blocks_per_fs_block = FS_BLOCK_SIZE / device_block_size;
+    let start_device_block = (start_block_no as usize)
+        .checked_mul(blocks_per_fs_block)
+        .ok_or(InvalidInode)?;
     device
         .write_blocks(start_device_block as u32, buf)
         .map_err(|_| InvalidInode)
@@ -138,22 +135,6 @@ fn detect_twilight_partition(bus: u8, dsk: u8) -> Option<PartitionEntry> {
     partition::find_entry(&entries, TWILIGHT_PARTITION_TYPE)
 }
 
-fn detect_twilight_partition_blk_dev() -> Option<PartitionEntry> {
-    let mut sector = [0u8; 512];
-    #[allow(static_mut_refs)]
-    let dev = unsafe { BLOCK_DEVICE.as_mut().unwrap() };
-    if dev.read(0, &mut sector).is_err() {
-        return None;
-    }
-
-    if !partition::has_signature(&sector) {
-        return None;
-    }
-
-    let entries = partition::decode_entries(&sector);
-    partition::find_entry(&entries, TWILIGHT_PARTITION_TYPE)
-}
-
 fn detect_twilight_partition_on_device(device: &mut dyn BlockDeviceIO) -> Option<PartitionEntry> {
     if device.block_size() != 512 {
         return None;
@@ -173,18 +154,24 @@ fn detect_twilight_partition_on_device(device: &mut dyn BlockDeviceIO) -> Option
 }
 
 pub fn format_superblock(
-    block_device: &'static mut dyn BlockDeviceIO,
+    block_device: Box<dyn BlockDeviceIO + Send + 'static>,
     partition_start_lba: u32,
     partition_sector_count: u32,
 ) -> Result<TwilightFs, &'static str> {
-    set_fs_block_offset_lba(partition_start_lba);
-    let sb = Superblock::write(block_device, partition_sector_count)?;
-    let device_box: Box<dyn BlockDeviceIO + Send + 'static> =
-        unsafe { Box::from_raw(block_device as *mut _) };
+    let mut partition = PartitionBlockDevice::new(
+        block_device,
+        partition_start_lba,
+        partition_sector_count as usize,
+        false,
+    )
+    .map_err(|_| "Invalid TwilightFS partition geometry")?;
+    let sb = Superblock::write(&mut partition, partition_sector_count)?;
+    let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(partition);
     let device_arc = Arc::new(Mutex::new(device_box));
     Ok(TwilightFs {
         superblock: sb,
         device: device_arc,
+        mount_mode: MountMode::ReadWrite,
         shared: Arc::new(TwilightFsShared::new()),
     })
 }
@@ -578,10 +565,37 @@ impl TwilightFsShared {
 pub struct TwilightFs {
     pub superblock: Superblock,
     pub device: BlockDev,
+    mount_mode: MountMode,
     pub(crate) shared: Arc<TwilightFsShared>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountMode {
+    ReadOnly,
+    ReadWrite,
+}
+
 impl TwilightFs {
+    pub fn open(
+        mut device: Box<dyn BlockDeviceIO + Send + 'static>,
+        mount_mode: MountMode,
+    ) -> Result<Self, &'static str> {
+        let sb = read_superblock(device.as_mut())?;
+        let device = Arc::new(Mutex::new(device));
+        let mut fs = Self {
+            superblock: sb,
+            device,
+            mount_mode,
+            shared: Arc::new(TwilightFsShared::new()),
+        };
+        fs.validate_root_inode()?;
+        Ok(fs)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.mount_mode == MountMode::ReadOnly
+    }
+
     pub fn resolve_path(&mut self, path: &str) -> Result<u32, FsError> {
         if path.is_empty() {
             return Err(FsError::InvalidPath);
@@ -628,60 +642,37 @@ impl TwilightFs {
     }
 
     pub fn check_ata(bus: u8, dsk: u8) -> Result<Self, &'static str> {
-        if let Some(entry) = detect_twilight_partition(bus, dsk) {
-            set_fs_block_offset_lba(entry.lba_start);
-        } else {
-            set_fs_block_offset_bytes(0);
-        }
-
-        let mut device =
+        let device =
             driver::disk::AtaBlockDevice::new(bus, dsk).ok_or("Failed to open ATA device")?;
-
-        let mut buf = [0u8; FS_BLOCK_SIZE];
-        if read_tfs_block(&mut device, 0, &mut buf).is_err() {
-            return Err("Failed to read Twilight FS superblock");
-        }
-
-        let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
-        if !sb.is_valid() {
-            return Err("Invalid Twilight FS superblock magic");
-        }
-
-        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(device);
-        let device_arc = Arc::new(Mutex::new(device_box));
-
-        Ok(TwilightFs {
-            superblock: sb,
-            device: device_arc,
-            shared: Arc::new(TwilightFsShared::new()),
-        })
+        let raw: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(device);
+        let device: Box<dyn BlockDeviceIO + Send + 'static> =
+            if let Some(entry) = detect_twilight_partition(bus, dsk) {
+                Box::new(
+                    PartitionBlockDevice::new(raw, entry.lba_start, entry.sectors as usize, false)
+                        .map_err(|_| "Invalid ATA TwilightFS partition")?,
+                )
+            } else {
+                raw
+            };
+        Self::open(device, MountMode::ReadWrite)
     }
+
     pub fn check_virtio_blk() -> Result<Self, &'static str> {
-        if let Some(entry) = detect_twilight_partition_blk_dev() {
-            set_fs_block_offset_lba(entry.lba_start);
+        let mut virtio = VirtioBlkHandle;
+        if virtio.block_size() == 0 || virtio.block_count() == 0 {
+            return Err("Virtio block device not available");
+        }
+        let entry = detect_twilight_partition_on_device(&mut virtio);
+        let raw: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(VirtioBlkHandle);
+        let device: Box<dyn BlockDeviceIO + Send + 'static> = if let Some(entry) = entry {
+            Box::new(
+                PartitionBlockDevice::new(raw, entry.lba_start, entry.sectors as usize, false)
+                    .map_err(|_| "Invalid Virtio TwilightFS partition")?,
+            )
         } else {
-            set_fs_block_offset_bytes(0);
-        }
-
-        let mut device = VirtioBlkHandle;
-        let mut buf = [0u8; FS_BLOCK_SIZE];
-        if read_tfs_block(&mut device, 0, &mut buf).is_err() {
-            return Err("Failed to read Twilight FS superblock");
-        }
-
-        let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
-        if !sb.is_valid() {
-            return Err("Invalid Twilight FS superblock magic");
-        }
-
-        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(VirtioBlkHandle);
-        let device_arc = Arc::new(Mutex::new(device_box));
-
-        Ok(TwilightFs {
-            superblock: sb,
-            device: device_arc,
-            shared: Arc::new(TwilightFsShared::new()),
-        })
+            raw
+        };
+        Self::open(device, MountMode::ReadWrite)
     }
 
     pub fn check_usb_blk() -> Result<Self, &'static str> {
@@ -690,32 +681,17 @@ impl TwilightFs {
             return Err("USB block device not available");
         }
 
-        if let Some(entry) = detect_twilight_partition_on_device(&mut device) {
-            set_fs_block_offset_lba(entry.lba_start);
+        let entry = detect_twilight_partition_on_device(&mut device);
+        let raw: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(UsbBlkHandle);
+        let device: Box<dyn BlockDeviceIO + Send + 'static> = if let Some(entry) = entry {
+            Box::new(
+                PartitionBlockDevice::new(raw, entry.lba_start, entry.sectors as usize, false)
+                    .map_err(|_| "Invalid USB TwilightFS partition")?,
+            )
         } else {
-            set_fs_block_offset_bytes(0);
-        }
-
-        let mut buf = [0u8; FS_BLOCK_SIZE];
-        if read_tfs_block(&mut device, 0, &mut buf).is_err() {
-            return Err("Failed to read USB Twilight FS superblock");
-        }
-
-        let sb: Superblock = unsafe { core::ptr::read(buf.as_ptr() as *const _) };
-        if !sb.is_valid() {
-            return Err("Invalid Twilight FS superblock magic on USB");
-        }
-
-        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(UsbBlkHandle);
-        let device_arc = Arc::new(Mutex::new(device_box));
-
-        let mut fs = TwilightFs {
-            superblock: sb,
-            device: device_arc,
-            shared: Arc::new(TwilightFsShared::new()),
+            raw
         };
-        fs.validate_root_inode()?;
-        Ok(fs)
+        Self::open(device, MountMode::ReadWrite)
     }
 
     pub fn format_usb_blk() -> Result<Self, &'static str> {
@@ -731,7 +707,10 @@ impl TwilightFs {
             return Err("USB device too small");
         }
 
-        let (partition_start_lba, partition_sectors) = if block_size == 512 {
+        if block_size != partition::SECTOR_SIZE as usize {
+            return Err("Unsupported USB sector size for TwilightFS formatting");
+        }
+        let (partition_start_lba, partition_sectors) = {
             if let Some(entry) = detect_twilight_partition_on_device(&mut device) {
                 (entry.lba_start, entry.sectors)
             } else {
@@ -750,24 +729,26 @@ impl TwilightFs {
                     .map_err(|_| "Failed to write USB partition table")?;
                 (start_lba, sectors)
             }
-        } else {
-            (0, total_sectors)
         };
 
-        set_fs_block_offset_lba(partition_start_lba);
-        let sb = Superblock::write(&mut device, partition_sectors)?;
+        let raw: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(UsbBlkHandle);
+        let mut partition =
+            PartitionBlockDevice::new(raw, partition_start_lba, partition_sectors as usize, false)
+                .map_err(|_| "Invalid USB TwilightFS partition")?;
+        let sb = Superblock::write(&mut partition, partition_sectors)?;
         let zero = [0u8; FS_BLOCK_SIZE];
         for block in 1..sb.first_data_zone {
-            write_tfs_block(&mut device, block, &zero)
+            write_tfs_block(&mut partition, block, &zero)
                 .map_err(|_| "Failed to clear USB TwilightFS metadata")?;
         }
 
-        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(UsbBlkHandle);
+        let device_box: Box<dyn BlockDeviceIO + Send + 'static> = Box::new(partition);
         let device_arc = Arc::new(Mutex::new(device_box));
 
         let mut fs = TwilightFs {
             superblock: sb,
             device: device_arc,
+            mount_mode: MountMode::ReadWrite,
             shared: Arc::new(TwilightFsShared::new()),
         };
         fs.initialize_root_inode()?;
@@ -2208,7 +2189,7 @@ impl FsCtx for TwilightFs {
     }
 
     fn write_block(&mut self, lba: u32, buf: &[u8]) -> Result<(), ()> {
-        if buf.len() != self.block_size() {
+        if self.is_read_only() || buf.len() != self.block_size() {
             return Err(());
         }
 
@@ -2224,18 +2205,30 @@ impl FsCtx for TwilightFs {
     }
 
     fn alloc_zone(&mut self) -> Result<u32, TfsError> {
+        if self.is_read_only() {
+            return Err(TfsError::IoError);
+        }
         self.allocate_zone()
     }
 
     fn free_zone(&mut self, zone: u32) -> Result<(), TfsError> {
+        if self.is_read_only() {
+            return Err(TfsError::IoError);
+        }
         self.dealloc_zone(zone)
     }
 
     fn write_inode_twilight(&mut self, ino: u32, inode: Inode) -> Result<(), &'static str> {
+        if self.is_read_only() {
+            return Err("Read-only TwilightFS");
+        }
         self.write_inode(ino, &inode)
     }
 
     fn remove_file(&mut self, path: &str) -> Result<(), ()> {
+        if self.is_read_only() {
+            return Err(());
+        }
         if self.remove_entry(path).is_err() {
             Err(())
         } else {
@@ -2244,11 +2237,14 @@ impl FsCtx for TwilightFs {
     }
 
     fn alloc_zones(&mut self, count: usize) -> Result<Vec<u32>, TfsError> {
+        if self.is_read_only() {
+            return Err(TfsError::IoError);
+        }
         self.allocate_zones(count)
     }
 
     fn write_blocks(&mut self, start_lba: u32, buf: &[u8]) -> Result<(), ()> {
-        if buf.len() % self.block_size() != 0 {
+        if self.is_read_only() || buf.len() % self.block_size() != 0 {
             return Err(());
         }
         write_tfs_blocks(self.device.lock().as_mut(), start_lba, buf).map_err(|_| ())
@@ -2300,6 +2296,9 @@ impl FileSystem for TwilightFs {
     }
 
     fn mkdir(&mut self, parent_dir: &str, path: &str, mode: u16) -> Result<(), ()> {
+        if self.is_read_only() {
+            return Err(());
+        }
         if let Ok(inode_num) = self.resolve_path(parent_dir) {
             let inode = self.read_inode(inode_num).unwrap();
             if inode.is_dir() {
@@ -2317,6 +2316,9 @@ impl FileSystem for TwilightFs {
     }
 
     fn rmdir(&mut self, path: &str) -> Result<(), ()> {
+        if self.is_read_only() {
+            return Err(());
+        }
         if let Err(_) = self.remove_entry(path) {
             Err(())
         } else {
@@ -2325,6 +2327,9 @@ impl FileSystem for TwilightFs {
     }
 
     fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), ()> {
+        if self.is_read_only() {
+            return Err(());
+        }
         self.rename_entry(old_path, new_path).map_err(|_| ())
     }
 
@@ -2340,6 +2345,9 @@ impl FileSystem for TwilightFs {
     }
 
     fn rm(&mut self, path: &str) -> Result<(), ()> {
+        if self.is_read_only() {
+            return Err(());
+        }
         if let Err(_) = self.remove_entry(path) {
             Err(())
         } else {
@@ -2348,6 +2356,9 @@ impl FileSystem for TwilightFs {
     }
 
     fn touch(&mut self, parent_path: &str, filename: &str, mode: u16) -> Result<(), ()> {
+        if self.is_read_only() {
+            return Err(());
+        }
         if let Ok(inode_num) = self.resolve_path(parent_path) {
             let inode = self.read_inode(inode_num).unwrap();
             if inode.is_dir() {
@@ -2402,6 +2413,9 @@ impl FileSystem for TwilightFs {
     fn chmod(&mut self, path: &str, mode: u16) -> Result<(), crate::sys::fs::vfs::VfsError> {
         const CHMOD_MASK: u16 = 0o7777;
         use crate::sys::fs::vfs::VfsError;
+        if self.is_read_only() {
+            return Err(VfsError::ReadOnly);
+        }
 
         let inode_num = if path == "/" {
             1
@@ -2416,6 +2430,9 @@ impl FileSystem for TwilightFs {
     }
 
     fn set_attr(&mut self, path: &str, attr: u32, value: u32) -> Result<(), ()> {
+        if self.is_read_only() {
+            return Err(());
+        }
         if attr != IFLAG_ENCRYPTED {
             return Err(());
         }
