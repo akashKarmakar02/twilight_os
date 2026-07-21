@@ -135,7 +135,7 @@ pub fn fallback_shell(runlevel: &str) -> ServiceConfig {
     ServiceConfig {
         name: "fallback-shell".to_string(),
         description: "Built-in interactive fallback shell".to_string(),
-        exec: "/bin/tsh".to_string(),
+        exec: "/bin/oksh".to_string(),
         args: Vec::new(),
         enabled: true,
         runlevel: runlevel.to_string(),

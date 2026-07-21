@@ -69,7 +69,7 @@ Service tables are line-based. Each service produces one key=value line:
 
 ```text
 OK
-name=shell state=running pid=5 restart=always runlevel=default enabled=true disabled=false restarts=0 exec=/bin/tsh
+name=shell state=running pid=5 restart=always runlevel=default enabled=true disabled=false restarts=0 exec=/bin/oksh
 name=network state=running pid=7 restart=on-failure runlevel=default enabled=true disabled=false restarts=0 exec=/sbin/netd
 ```
 
@@ -83,7 +83,7 @@ Query all services:
 client: STATUS
 server:
 OK
-name=shell state=running pid=5 restart=always runlevel=default enabled=true disabled=false restarts=0 exec=/bin/tsh
+name=shell state=running pid=5 restart=always runlevel=default enabled=true disabled=false restarts=0 exec=/bin/oksh
 ```
 
 Query one service:
@@ -92,7 +92,7 @@ Query one service:
 client: SHOW shell
 server:
 OK
-name=shell state=running pid=5 restart=always runlevel=default enabled=true disabled=false restarts=0 exec=/bin/tsh
+name=shell state=running pid=5 restart=always runlevel=default enabled=true disabled=false restarts=0 exec=/bin/oksh
 ```
 
 Health check:

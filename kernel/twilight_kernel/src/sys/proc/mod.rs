@@ -963,17 +963,17 @@ impl Process {
         // 0. Allocate PID
         let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);
         let proc_mm = self.proc_mm.lock();
-        crate::serial_println!(
-            "[fork] parent={} child={} rip={:#x} rsp={:#x} regions={} heap={:#x}-{:#x} mmap={}",
-            self.pid,
-            pid,
-            tf.iret.rip,
-            tf.iret.rsp,
-            self.addr_size_vec.len(),
-            proc_mm.heap_start,
-            proc_mm.mapped_heap_end,
-            proc_mm.mmap_regions.len(),
-        );
+        // crate::serial_println!(
+        //     "[fork] parent={} child={} rip={:#x} rsp={:#x} regions={} heap={:#x}-{:#x} mmap={}",
+        //     self.pid,
+        //     pid,
+        //     tf.iret.rip,
+        //     tf.iret.rsp,
+        //     self.addr_size_vec.len(),
+        //     proc_mm.heap_start,
+        //     proc_mm.mapped_heap_end,
+        //     proc_mm.mmap_regions.len(),
+        // );
 
         // 1. Allocate new page table
         let (_, flags) = Cr3::read();
@@ -1149,7 +1149,7 @@ impl Process {
             signal_alt_stack: self.signal_alt_stack,
         };
 
-        crate::serial_println!("[fork] child={} ready", pid);
+        // crate::serial_println!("[fork] child={} ready", pid);
         Ok(child)
     }
 

@@ -1,9 +1,9 @@
 use crate::sys::fs::vfs::BlockDev;
+use crate::utils::sync::Mutex;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::utils::sync::Mutex;
 
 pub mod ata;
 pub mod ata_dma;
@@ -13,6 +13,55 @@ pub const BLOCK_SIZE: usize = 2048;
 
 pub static mut BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
 pub static mut USB_BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
+pub static mut OPTICAL_BLOCK_DEVICE: Option<&'static mut dyn BlockDeviceIO> = None;
+
+pub struct OpticalBlkHandle;
+
+impl OpticalBlkHandle {
+    fn with_dev<R>(f: impl FnOnce(&mut dyn BlockDeviceIO) -> Result<R, ()>) -> Result<R, ()> {
+        #[allow(static_mut_refs)]
+        unsafe {
+            match OPTICAL_BLOCK_DEVICE.as_mut() {
+                Some(dev) => f(*dev),
+                None => Err(()),
+            }
+        }
+    }
+}
+
+impl BlockDeviceIO for OpticalBlkHandle {
+    fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.read(addr, buf))
+    }
+
+    fn write(&mut self, _addr: u32, _buf: &[u8]) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn block_size(&self) -> usize {
+        #[allow(static_mut_refs)]
+        unsafe {
+            OPTICAL_BLOCK_DEVICE
+                .as_ref()
+                .map(|dev| dev.block_size())
+                .unwrap_or(0)
+        }
+    }
+
+    fn block_count(&self) -> usize {
+        #[allow(static_mut_refs)]
+        unsafe {
+            OPTICAL_BLOCK_DEVICE
+                .as_ref()
+                .map(|dev| dev.block_count())
+                .unwrap_or(0)
+        }
+    }
+
+    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.read_blocks(start_addr, buf))
+    }
+}
 
 pub struct UsbBlkHandle;
 
@@ -25,6 +74,58 @@ impl UsbBlkHandle {
                 None => Err(()),
             }
         }
+    }
+}
+
+pub struct GlobalBlkHandle;
+
+impl GlobalBlkHandle {
+    fn with_dev<R>(f: impl FnOnce(&mut dyn BlockDeviceIO) -> Result<R, ()>) -> Result<R, ()> {
+        #[allow(static_mut_refs)]
+        unsafe {
+            match BLOCK_DEVICE.as_mut() {
+                Some(dev) => f(*dev),
+                None => Err(()),
+            }
+        }
+    }
+}
+
+impl BlockDeviceIO for GlobalBlkHandle {
+    fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.read(addr, buf))
+    }
+
+    fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.write(addr, buf))
+    }
+
+    fn block_size(&self) -> usize {
+        #[allow(static_mut_refs)]
+        unsafe {
+            BLOCK_DEVICE
+                .as_ref()
+                .map(|dev| dev.block_size())
+                .unwrap_or(0)
+        }
+    }
+
+    fn block_count(&self) -> usize {
+        #[allow(static_mut_refs)]
+        unsafe {
+            BLOCK_DEVICE
+                .as_ref()
+                .map(|dev| dev.block_count())
+                .unwrap_or(0)
+        }
+    }
+
+    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.read_blocks(start_addr, buf))
+    }
+
+    fn write_blocks(&mut self, start_addr: u32, buf: &[u8]) -> Result<(), ()> {
+        Self::with_dev(|dev| dev.write_blocks(start_addr, buf))
     }
 }
 
@@ -118,6 +219,159 @@ pub trait BlockDeviceIO: Send + Sync + 'static {
             self.write(start_addr + idx as u32, chunk)?;
         }
         Ok(())
+    }
+}
+
+pub struct PartitionBlockDevice {
+    inner: Box<dyn BlockDeviceIO + Send>,
+    start_block: u32,
+    block_count: usize,
+    read_only: bool,
+}
+
+impl PartitionBlockDevice {
+    pub fn new(
+        inner: Box<dyn BlockDeviceIO + Send>,
+        start_block: u32,
+        block_count: usize,
+        read_only: bool,
+    ) -> Result<Self, ()> {
+        let end = (start_block as usize).checked_add(block_count).ok_or(())?;
+        if block_count == 0 || end > inner.block_count() {
+            return Err(());
+        }
+        Ok(Self {
+            inner,
+            start_block,
+            block_count,
+            read_only,
+        })
+    }
+}
+
+impl BlockDeviceIO for PartitionBlockDevice {
+    fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        let block_size = self.block_size();
+        if block_size == 0 || buf.len() % block_size != 0 {
+            return Err(());
+        }
+        let blocks = buf.len() / block_size;
+        if addr as usize + blocks > self.block_count {
+            return Err(());
+        }
+        self.inner.read_blocks(self.start_block + addr, buf)
+    }
+
+    fn write(&mut self, addr: u32, buf: &[u8]) -> Result<(), ()> {
+        if self.read_only {
+            return Err(());
+        }
+        let block_size = self.block_size();
+        if block_size == 0 || buf.len() % block_size != 0 {
+            return Err(());
+        }
+        let blocks = buf.len() / block_size;
+        if addr as usize + blocks > self.block_count {
+            return Err(());
+        }
+        self.inner.write_blocks(self.start_block + addr, buf)
+    }
+
+    fn block_size(&self) -> usize {
+        self.inner.block_size()
+    }
+
+    fn block_count(&self) -> usize {
+        self.block_count
+    }
+
+    fn read_blocks(&mut self, start_addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        self.read(start_addr, buf)
+    }
+
+    fn write_blocks(&mut self, start_addr: u32, buf: &[u8]) -> Result<(), ()> {
+        self.write(start_addr, buf)
+    }
+}
+
+pub struct FileBlockDevice {
+    node: crate::sys::fs::vfs::VfsNode,
+    block_size: usize,
+    block_count: usize,
+    cache_start: usize,
+    cache: Vec<u8>,
+}
+
+const FILE_BLOCK_READ_AHEAD_BYTES: usize = 512 * 1024;
+
+impl FileBlockDevice {
+    pub fn new(node: crate::sys::fs::vfs::VfsNode, block_size: usize) -> Result<Self, ()> {
+        if block_size == 0 || node.metadata.size == 0 || node.metadata.size % block_size != 0 {
+            return Err(());
+        }
+        let block_count = node.metadata.size / block_size;
+        Ok(Self {
+            node,
+            block_size,
+            block_count,
+            cache_start: 0,
+            cache: Vec::new(),
+        })
+    }
+
+    fn cached_read(&mut self, offset: usize, out: &mut [u8]) -> Result<(), ()> {
+        let end = offset.checked_add(out.len()).ok_or(())?;
+        let cache_end = self.cache_start.saturating_add(self.cache.len());
+        if !self.cache.is_empty() && offset >= self.cache_start && end <= cache_end {
+            let start = offset - self.cache_start;
+            out.copy_from_slice(&self.cache[start..start + out.len()]);
+            return Ok(());
+        }
+
+        if out.len() >= FILE_BLOCK_READ_AHEAD_BYTES {
+            return self.node.read_exact(offset, out);
+        }
+
+        let file_size = self.node.metadata.size;
+        let window_start = (offset / self.block_size) * self.block_size;
+        let window_len = core::cmp::min(FILE_BLOCK_READ_AHEAD_BYTES, file_size - window_start);
+        self.cache.clear();
+        self.cache_start = window_start;
+        self.cache.resize(window_len, 0);
+        if self.node.read_exact(window_start, &mut self.cache).is_err() {
+            self.cache.clear();
+            return Err(());
+        }
+
+        let start = offset - window_start;
+        out.copy_from_slice(&self.cache[start..start + out.len()]);
+        Ok(())
+    }
+}
+
+impl BlockDeviceIO for FileBlockDevice {
+    fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+        if buf.is_empty() || buf.len() % self.block_size != 0 {
+            return Err(());
+        }
+        let offset = (addr as usize).checked_mul(self.block_size).ok_or(())?;
+        let end = offset.checked_add(buf.len()).ok_or(())?;
+        if end > self.node.metadata.size {
+            return Err(());
+        }
+        self.cached_read(offset, buf)
+    }
+
+    fn write(&mut self, _addr: u32, _buf: &[u8]) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    fn block_count(&self) -> usize {
+        self.block_count
     }
 }
 
@@ -382,5 +636,44 @@ pub fn init() {
         AtaImpl::Pio => ata::init(),
         AtaImpl::Dma => ata_dma::init(),
     }
+    ata::atapi::init();
     virtioblkdev::init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NumberedBlocks;
+
+    impl BlockDeviceIO for NumberedBlocks {
+        fn read(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), ()> {
+            buf.fill(addr as u8);
+            Ok(())
+        }
+
+        fn write(&mut self, _addr: u32, _buf: &[u8]) -> Result<(), ()> {
+            Ok(())
+        }
+
+        fn block_size(&self) -> usize {
+            512
+        }
+
+        fn block_count(&self) -> usize {
+            16
+        }
+    }
+
+    #[test]
+    fn partition_translates_and_bounds_blocks() {
+        let mut partition =
+            PartitionBlockDevice::new(Box::new(NumberedBlocks), 2, 4, true).unwrap();
+        let mut bytes = [0u8; 1024];
+        partition.read_blocks(1, &mut bytes).unwrap();
+        assert!(bytes[..512].iter().all(|byte| *byte == 3));
+        assert!(bytes[512..].iter().all(|byte| *byte == 4));
+        assert!(partition.read_blocks(3, &mut bytes).is_err());
+        assert!(partition.write_blocks(0, &[0u8; 512]).is_err());
+    }
 }

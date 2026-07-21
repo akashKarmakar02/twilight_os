@@ -2,8 +2,9 @@ mod devfs;
 pub mod fat16;
 pub mod fat32;
 mod gdt;
-pub mod memfd;
+pub mod iso9660;
 pub mod mbr;
+pub mod memfd;
 pub mod partition;
 pub mod pipe;
 mod procfs;
@@ -11,26 +12,29 @@ pub mod ram_fs;
 pub mod twilight_fs;
 pub mod vfs;
 
-use crate::driver::disk::USB_BLOCK_DEVICE;
+use crate::driver::disk::{FileBlockDevice, OpticalBlkHandle, USB_BLOCK_DEVICE, UsbBlkHandle};
 use crate::println;
 use crate::sys::fs::devfs::DevFs;
 use crate::sys::fs::fat16::{Fat16Fs, detect_fat16_partition};
 use crate::sys::fs::fat32::{Fat32Fs, detect_fat32_partition};
+use crate::sys::fs::iso9660::{Iso9660Fs, boxed_device};
 use crate::sys::fs::procfs::ProcFs;
 use crate::sys::fs::ram_fs::InitramfsFs;
-use crate::sys::fs::twilight_fs::{
-    TfsProxy, TwilightFs, fs_block_offset_bytes, set_fs_block_offset_bytes,
-};
-use crate::sys::fs::vfs::VFS;
-use crate::sys::fs::vfs::{FileSystem, FsStats, Metadata, VfsNode};
+use crate::sys::fs::twilight_fs::{MountMode, TfsProxy, TwilightFs};
+use crate::sys::fs::vfs::{FileSystem, VFS, VfsNode};
+use crate::utils::sync::Mutex;
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use conquer_once::TryInitError;
 use conquer_once::spin::OnceCell;
-use crate::utils::sync::Mutex;
+use lazy_static::lazy_static;
 
 pub static MFS: OnceCell<Mutex<TwilightFs>> = OnceCell::uninit();
+lazy_static! {
+    pub static ref LIVE_SYSTEM_FS: Mutex<Option<Arc<Mutex<TwilightFs>>>> = Mutex::new(None);
+}
 
 pub const KERNEL_PADDING: usize = 4 * 1024 * 1024;
 
@@ -42,74 +46,6 @@ pub enum VfsError {
     PermissionDenied,
     InvalidOperation,
     IoError,
-}
-
-struct OffsetScopedTwilightFs {
-    fs: TwilightFs,
-    offset_bytes: usize,
-}
-
-impl OffsetScopedTwilightFs {
-    fn run_with_offset<T, E>(
-        &mut self,
-        f: impl FnOnce(&mut TwilightFs) -> Result<T, E>,
-    ) -> Result<T, E> {
-        let old = fs_block_offset_bytes();
-        set_fs_block_offset_bytes(self.offset_bytes);
-        let out = f(&mut self.fs);
-        set_fs_block_offset_bytes(old);
-        out
-    }
-}
-
-impl FileSystem for OffsetScopedTwilightFs {
-    fn open(&mut self, path: &str) -> Result<VfsNode, ()> {
-        self.run_with_offset(|fs| fs.open(path))
-    }
-
-    fn mkdir(&mut self, parent_dir: &str, path: &str, mode: u16) -> Result<(), ()> {
-        self.run_with_offset(|fs| fs.mkdir(parent_dir, path, mode))
-    }
-
-    fn rmdir(&mut self, path: &str) -> Result<(), ()> {
-        self.run_with_offset(|fs| fs.rmdir(path))
-    }
-
-    fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), ()> {
-        self.run_with_offset(|fs| fs.rename(old_path, new_path))
-    }
-
-    fn ls(&mut self, path: &str) -> Result<Vec<Metadata>, ()> {
-        self.run_with_offset(|fs| fs.ls(path))
-    }
-
-    fn rm(&mut self, path: &str) -> Result<(), ()> {
-        self.run_with_offset(|fs| fs.rm(path))
-    }
-
-    fn touch(&mut self, parent_path: &str, filename: &str, mode: u16) -> Result<(), ()> {
-        self.run_with_offset(|fs| fs.touch(parent_path, filename, mode))
-    }
-
-    fn metadata(&mut self, path: &str) -> Result<Metadata, ()> {
-        self.run_with_offset(|fs| fs.metadata(path))
-    }
-
-    fn chmod(&mut self, path: &str, mode: u16) -> Result<(), crate::sys::fs::vfs::VfsError> {
-        self.run_with_offset(|fs| fs.chmod(path, mode))
-    }
-
-    fn fs_type_name(&self) -> &'static str {
-        "twilightfs"
-    }
-
-    fn source_name(&self) -> &'static str {
-        "/dev/disk1"
-    }
-
-    fn stats(&mut self) -> Result<FsStats, ()> {
-        self.run_with_offset(|fs| fs.stats())
-    }
 }
 
 pub fn init(show_log: bool) {
@@ -134,10 +70,7 @@ pub fn init(show_log: bool) {
                 }
                 #[allow(static_mut_refs)]
                 unsafe {
-                    VFS.get_mut().mount(
-                        "/",
-                        Arc::new(Mutex::new(TwilightFs::check_ata(bus, dsk).unwrap())),
-                    );
+                    VFS.get_mut().mount("/", Arc::new(Mutex::new(TfsProxy)));
                 }
                 #[allow(static_mut_refs)]
                 unsafe {
@@ -197,6 +130,11 @@ pub fn init(show_log: bool) {
         return;
     }
 
+    if try_mount_live_system(show_log) {
+        mount_pseudo_filesystems(true);
+        return;
+    }
+
     #[allow(static_mut_refs)]
     unsafe {
         VFS.get_mut()
@@ -225,41 +163,26 @@ fn try_init_usb_storage(show_log: bool) -> bool {
         return false;
     }
 
-    let old_offset = fs_block_offset_bytes();
-    let mut mount_target: Option<(TwilightFs, usize)> = None;
+    let mut mount_target: Option<TwilightFs> = None;
 
     let result = match TwilightFs::check_usb_blk() {
         Ok(fs) => {
-            mount_target = Some((fs, fs_block_offset_bytes()));
+            mount_target = Some(fs);
             true
         }
-        Err(_) => match TwilightFs::format_usb_blk() {
-            Ok(fs) => {
-                mount_target = Some((fs, fs_block_offset_bytes()));
-                if show_log {
-                    println!(
-                        "\x1b[93m[{:.6}]\x1b[0m USB storage initialized with TwilightFS at /dev/disk1",
-                        crate::driver::timer::pit::uptime()
-                    );
-                }
-                true
+        Err(err) => {
+            if show_log {
+                println!(
+                    "\x1b[93m[{:.6}]\x1b[0m USB media left unchanged: {}",
+                    crate::driver::timer::pit::uptime(),
+                    err
+                );
             }
-            Err(err) => {
-                if show_log {
-                    println!(
-                        "\x1b[93m[{:.6}]\x1b[0m USB storage init skipped: {}",
-                        crate::driver::timer::pit::uptime(),
-                        err
-                    );
-                }
-                false
-            }
-        },
+            false
+        }
     };
 
-    set_fs_block_offset_bytes(old_offset);
-
-    if let Some((fs, offset_bytes)) = mount_target.take() {
+    if let Some(fs) = mount_target.take() {
         #[allow(static_mut_refs)]
         let mounted = unsafe {
             VFS.get_mut()
@@ -277,10 +200,7 @@ fn try_init_usb_storage(show_log: bool) -> bool {
                 if VFS.get_mut().metadata("/mnt/usb").is_err() {
                     let _ = VFS.get_mut().mkdir("/mnt", "usb", 0o755);
                 }
-                VFS.get_mut().mount(
-                    "/mnt/usb",
-                    Arc::new(Mutex::new(OffsetScopedTwilightFs { fs, offset_bytes })),
-                );
+                VFS.get_mut().mount("/mnt/usb", Arc::new(Mutex::new(fs)));
             }
         }
 
@@ -302,6 +222,96 @@ fn try_mount_rootfs() {
             .mount("/", Arc::new(Mutex::new(InitramfsFs::new())))
     };
     // InitramfsFs::new();
+}
+
+fn try_mount_live_system(show_log: bool) -> bool {
+    #[allow(static_mut_refs)]
+    let boot_image = unsafe { VFS.get_mut().open("/boot/SYSTEM.TFS") };
+    if let Ok(image) = boot_image {
+        if try_mount_live_image(image, "/boot/SYSTEM.TFS", None, show_log) {
+            return true;
+        }
+    }
+
+    if try_mount_live_device(boxed_device(OpticalBlkHandle), "/dev/cdrom", show_log) {
+        return true;
+    }
+
+    #[allow(static_mut_refs)]
+    let usb_ready = unsafe { USB_BLOCK_DEVICE.is_some() };
+    usb_ready && try_mount_live_device(boxed_device(UsbBlkHandle), "/dev/usb0", show_log)
+}
+
+fn try_mount_live_device(
+    device: crate::sys::fs::vfs::BlockDev,
+    source: &'static str,
+    show_log: bool,
+) -> bool {
+    let mut iso = match Iso9660Fs::probe(device) {
+        Ok(iso) => iso,
+        Err(_) => return false,
+    };
+    let image = match iso.open("/SYSTEM.TFS") {
+        Ok(image) => image,
+        Err(_) => return false,
+    };
+    try_mount_live_image(image, source, Some(iso), show_log)
+}
+
+fn try_mount_live_image(
+    image: VfsNode,
+    source: &'static str,
+    install_media: Option<Iso9660Fs>,
+    show_log: bool,
+) -> bool {
+    let image_device = match FileBlockDevice::new(image, 512) {
+        Ok(device) => device,
+        Err(_) => return false,
+    };
+    let system = match TwilightFs::open(Box::new(image_device), MountMode::ReadOnly) {
+        Ok(system) => system,
+        Err(err) => {
+            if show_log {
+                println!("Live system image rejected: {}", err);
+            }
+            return false;
+        }
+    };
+
+    let system = Arc::new(Mutex::new(system));
+    *LIVE_SYSTEM_FS.lock() = Some(system.clone());
+    #[allow(static_mut_refs)]
+    unsafe {
+        VFS.get_mut().mount("/", system);
+        if let Some(iso) = install_media {
+            VFS.get_mut()
+                .mount("/media/install", Arc::new(Mutex::new(iso)));
+        }
+    }
+    if show_log {
+        println!(
+            "\x1b[93m[{:.6}]\x1b[0m Live system mounted from {}",
+            crate::driver::timer::pit::uptime(),
+            source
+        );
+    }
+    true
+}
+
+fn mount_pseudo_filesystems(live: bool) {
+    #[allow(static_mut_refs)]
+    unsafe {
+        VFS.get_mut()
+            .mount("/dev", Arc::new(Mutex::new(DevFs::new())));
+        VFS.get_mut()
+            .mount("/proc", Arc::new(Mutex::new(ProcFs::new())));
+        if live {
+            for path in ["/run", "/tmp", "/home", "/var/log"] {
+                VFS.get_mut()
+                    .mount(path, Arc::new(Mutex::new(InitramfsFs::empty())));
+            }
+        }
+    }
 }
 
 fn try_mount_boot(bus: u8, dsk: u8, show_log: bool) -> bool {

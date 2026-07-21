@@ -1536,12 +1536,12 @@ pub fn fork(
 
     // We need to find the current process to call fork on it.
     let current_pid = crate::sys::proc::id();
-    crate::serial_println!(
-        "[sys_fork] current={} user_rip={:#x} user_rsp={:#x}",
-        current_pid,
-        stack_frame.instruction_pointer.as_u64(),
-        stack_frame.stack_pointer.as_u64(),
-    );
+    // crate::serial_println!(
+    //     "[sys_fork] current={} user_rip={:#x} user_rsp={:#x}",
+    //     current_pid,
+    //     stack_frame.instruction_pointer.as_u64(),
+    //     stack_frame.stack_pointer.as_u64(),
+    // );
     let process_opt = table.proc_list.iter_mut().find(|p| p.pid == current_pid);
 
     if let Some(process) = process_opt {
@@ -1578,16 +1578,16 @@ pub fn fork(
         if let Ok(child) = process.fork(&tf) {
             let child_pid = child.pid;
             table.proc_list.push_back(child);
-            crate::serial_println!(
-                "[sys_fork] parent={} child={} return",
-                current_pid,
-                child_pid
-            );
+            // crate::serial_println!(
+            //     "[sys_fork] parent={} child={} return",
+            //     current_pid,
+            //     child_pid
+            // );
             return child_pid as i64;
         }
     }
 
-    crate::serial_println!("[sys_fork] current={} failed", current_pid);
+    // crate::serial_println!("[sys_fork] current={} failed", current_pid);
     -(ENOSYS as i64)
 }
 
@@ -1739,12 +1739,12 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
                         .retain(|process| !(process.is_thread && process.tgid == tgid));
                     reaped_pid = Some(p.pid);
                     let table_frame = p.page_table_frame;
-                    crate::serial_println!(
-                        "[wait4] pid={} reap child={} status={:#x}",
-                        current_pid,
-                        p.pid,
-                        p.wait_status,
-                    );
+                    // crate::serial_println!(
+                    //     "[wait4] pid={} reap child={} status={:#x}",
+                    //     current_pid,
+                    //     p.pid,
+                    //     p.wait_status,
+                    // );
                     p.cleanup(table_frame);
                 }
             } else if let Some(idx) = stopped_pid {
@@ -1753,7 +1753,7 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
                     reaped_pid = Some(p.pid);
                 }
             } else if !has_children {
-                crate::serial_println!("[wait4] pid={} no children", current_pid);
+                // crate::serial_println!("[wait4] pid={} no children", current_pid);
                 return -(ECHILD as i64);
             }
         }
@@ -1775,13 +1775,13 @@ pub fn wait4(pid: i32, status_ptr: usize, options: i32, _rusage_ptr: usize) -> i
             #[allow(static_mut_refs)]
             let table = unsafe { crate::sys::proc::PROCESS_TABLE.get_mut().unwrap() };
             if let Some(me) = table.proc_list.iter_mut().find(|p| p.pid == current_pid) {
-                crate::serial_println!("[wait4] pid={} block", current_pid);
+                // crate::serial_println!("[wait4] pid={} block", current_pid);
                 me.state = crate::sys::proc::ProcessState::Waiting;
             }
         }
 
         crate::sys::proc::schedule_now(); // Yield
-        crate::serial_println!("[wait4] pid={} resumed", current_pid);
+        // crate::serial_println!("[wait4] pid={} resumed", current_pid);
     }
 }
 

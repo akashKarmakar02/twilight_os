@@ -1,4 +1,4 @@
-#!/bin/tsh
+#!/bin/oksh
 
 echo "Testing grep..."
 echo "hello world" > grep_test.txt

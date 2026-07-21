@@ -7,14 +7,14 @@ use crate::sys::fs::mbr::Mbr;
 use crate::sys::fs::partition::{self};
 use crate::sys::fs::ram_fs::initramfs::CpioIterator;
 use crate::sys::fs::twilight_fs::inode::Inode;
-use crate::sys::fs::vfs::VFS;
+use crate::sys::fs::vfs::{FileSystem, FileType, VFS};
+use crate::utils::sync::Mutex;
 use crate::{print, serial_println};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp;
 use lazy_static::lazy_static;
-use crate::utils::sync::Mutex;
 
 lazy_static! {
     pub static ref INITRAMFS: Mutex<CpioIterator> = Mutex::new(CpioIterator::default());
@@ -31,7 +31,36 @@ struct TwilightPartitionLayout {
     boot_partition: Option<crate::fs::mbr::PartitionEntry>,
 }
 
+#[derive(Clone)]
+struct SourceEntry {
+    path: String,
+    mode: u16,
+    size: usize,
+}
+
 pub fn main() {
+    let source = match crate::fs::LIVE_SYSTEM_FS.lock().clone() {
+        Some(source) => source,
+        None => {
+            println!("install: no live system image is mounted");
+            return;
+        }
+    };
+    let mut source_entries = Vec::new();
+    if collect_source_entries(&source, "/", &mut source_entries).is_err() {
+        println!("install: failed to enumerate live system image");
+        return;
+    }
+    let total_files = source_entries.len() as u64;
+    let total_bytes = source_entries
+        .iter()
+        .map(|entry| entry.size as u64)
+        .sum::<u64>();
+    if total_files == 0 {
+        println!("install: live system image contains no files");
+        return;
+    }
+
     let need_copy = {
         #[allow(static_mut_refs)]
         {
@@ -65,7 +94,7 @@ pub fn main() {
             );
 
             let mut fs = match crate::fs::twilight_fs::format_superblock(
-                &mut **disk,
+                alloc::boxed::Box::new(crate::driver::disk::GlobalBlkHandle),
                 layout.twilight_start_lba,
                 layout.twilight_sectors,
             ) {
@@ -105,68 +134,38 @@ pub fn main() {
     };
 
     if need_copy {
-        // Clone to avoid consuming the global initramfs iterator (rootfs mount also iterates it).
-        let mut scan = INITRAMFS.lock().clone();
-        let mut total_files: u64 = 0;
-        let mut total_bytes: u64 = 0;
-
-        while let Some(cpio_res) = scan.next() {
-            if let Ok(entry) = cpio_res {
-                if entry.header.is_regular_file() {
-                    total_files += 1;
-                    total_bytes += entry.data.len() as u64;
-                }
-            }
-        }
-
-        if total_files == 0 {
-            println!("install: nothing to copy");
-            return;
-        }
-
         print!("\x1b[?25l"); // hide cursor
 
-        let mut initramfs = INITRAMFS.lock().clone();
         let mut done_files: u64 = 0;
         let mut done_bytes: u64 = 0;
         let mut dir_cache: Option<(String, u32)> = None;
 
         render_progress(done_files, total_files, done_bytes, total_bytes, None);
 
-        while let Some(cpio_res) = initramfs.next() {
-            match cpio_res {
-                Ok(entry) => {
-                    if entry.header.is_regular_file() {
-                        let name = entry.filename().unwrap_or("");
-                        done_files += 1;
-                        done_bytes += entry.data.len() as u64;
-                        render_progress(
-                            done_files,
-                            total_files,
-                            done_bytes,
-                            total_bytes,
-                            Some(name),
-                        );
-
-                        copy_file(
-                            format!("/{}", name).as_str(),
-                            entry.data,
-                            false,
-                            &mut dir_cache,
-                        );
-
-                        // Re-render in case copy_file printed messages.
-                        render_progress(
-                            done_files,
-                            total_files,
-                            done_bytes,
-                            total_bytes,
-                            Some(name),
-                        );
-                    }
+        for entry in source_entries.drain(..) {
+            let mut node = match source.lock().open(&entry.path) {
+                Ok(node) => node,
+                Err(_) => {
+                    println!("install: failed to open {}", entry.path);
+                    continue;
                 }
-                Err(_e) => {}
+            };
+            let mut data = alloc::vec![0u8; entry.size];
+            if node.read_exact(0, &mut data).is_err() {
+                println!("install: failed to read {}", entry.path);
+                continue;
             }
+
+            done_files += 1;
+            done_bytes += data.len() as u64;
+            render_progress(
+                done_files,
+                total_files,
+                done_bytes,
+                total_bytes,
+                Some(&entry.path),
+            );
+            copy_file(&entry.path, &data, entry.mode, false, &mut dir_cache);
         }
 
         render_progress(
@@ -180,10 +179,49 @@ pub fn main() {
 
         #[allow(static_mut_refs)]
         unsafe {
+            for mount in [
+                "/run",
+                "/tmp",
+                "/home",
+                "/var/log",
+                "/media/install",
+                "/dev",
+                "/proc",
+            ] {
+                VFS.get_mut().unmount(mount);
+            }
             VFS.get_mut().unmount("/");
         }
-        crate::fs::init(false);
+        *crate::fs::LIVE_SYSTEM_FS.lock() = None;
     }
+}
+
+fn collect_source_entries(
+    source: &alloc::sync::Arc<Mutex<crate::fs::twilight_fs::TwilightFs>>,
+    path: &str,
+    files: &mut Vec<SourceEntry>,
+) -> Result<(), ()> {
+    let entries = source.lock().ls(path)?;
+    for entry in entries {
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
+        let child = if path == "/" {
+            format!("/{}", entry.name)
+        } else {
+            format!("{}/{}", path.trim_end_matches('/'), entry.name)
+        };
+        match entry.file_type {
+            FileType::Dir => collect_source_entries(source, &child, files)?,
+            FileType::File => files.push(SourceEntry {
+                path: child,
+                mode: entry.mode,
+                size: entry.size,
+            }),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn render_progress(
@@ -410,7 +448,7 @@ fn align_up_u64(value: u64, align: u64) -> u64 {
     ((value + align - 1) / align) * align
 }
 
-fn copy_file(path: &str, data: &[u8], verbose: bool, cache: &mut Option<(String, u32)>) {
+fn copy_file(path: &str, data: &[u8], mode: u16, verbose: bool, cache: &mut Option<(String, u32)>) {
     use crate::sys::fs::twilight_fs::FsError;
 
     let mut fs = unsafe { crate::fs::MFS.get_unchecked().lock() };
@@ -467,7 +505,7 @@ fn copy_file(path: &str, data: &[u8], verbose: bool, cache: &mut Option<(String,
     // Create and write file
     match fs.create_file(cur_inode, file_name) {
         Ok(file_inode) => {
-            ensure_bin_executable(&mut fs, file_inode, path);
+            set_file_mode(&mut fs, file_inode, mode);
             if let Err(e) = fs.write_file(file_inode, data) {
                 println!("Failed to write to '{}': {:?}", path, e);
             } else if verbose {
@@ -479,7 +517,7 @@ fn copy_file(path: &str, data: &[u8], verbose: bool, cache: &mut Option<(String,
         }
         Err(FsError::FileAlreadyExists) => {
             if let Ok(Some(file_inode)) = fs.find_dir_entry(cur_inode, file_name) {
-                ensure_bin_executable(&mut fs, file_inode, path);
+                set_file_mode(&mut fs, file_inode, mode);
             }
             if verbose {
                 println!("Skipped (exists) {}", path);
@@ -491,22 +529,13 @@ fn copy_file(path: &str, data: &[u8], verbose: bool, cache: &mut Option<(String,
     }
 }
 
-fn ensure_bin_executable(fs: &mut crate::fs::twilight_fs::TwilightFs, inode_num: u32, path: &str) {
-    if !is_bin_file(path) {
-        return;
-    }
-
+fn set_file_mode(fs: &mut crate::fs::twilight_fs::TwilightFs, inode_num: u32, mode: u16) {
     let Ok(mut inode) = fs.read_inode(inode_num) else {
         return;
     };
-    let new_mode = inode.mode | 0o111;
+    let new_mode = (inode.mode & crate::fs::twilight_fs::inode::MODE_TYPE_MASK) | (mode & 0o7777);
     if new_mode != inode.mode {
         inode.mode = new_mode;
         let _ = fs.write_inode(inode_num, &inode);
     }
-}
-
-fn is_bin_file(path: &str) -> bool {
-    path.strip_prefix("/bin/")
-        .map_or(false, |name| !name.is_empty())
 }

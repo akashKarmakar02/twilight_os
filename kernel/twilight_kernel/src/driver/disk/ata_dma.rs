@@ -32,6 +32,10 @@ const MAX_MERGED_BYTES: usize = DMA_BUF_BYTES;
 const MAX_MERGED_REQS: usize = 32;
 const DMA_RETRY_COUNT: usize = 1;
 const ENABLE_COOP_QUEUE: bool = true;
+const ATA_CMD_PACKET: u8 = 0xA0;
+const ATA_FEATURE_PACKET_DMA: u8 = 1 << 0;
+const ATAPI_IREASON_COD: u8 = 1 << 0;
+const ATAPI_IREASON_IO: u8 = 1 << 1;
 
 // If set, caps negotiated UDMA mode to this value (0..=6) regardless of controller heuristics.
 // Leave as `None` for auto.
@@ -177,9 +181,6 @@ fn on_irq_secondary() {
     IDE_IRQ_SECONDARY.store(true, Ordering::Release);
 }
 
-// Keep track of the last selected bus and drive pair to speed up operations
-pub static LAST_SELECTED: Mutex<Option<(u8, u8)>> = Mutex::new(None);
-
 #[repr(u16)]
 #[derive(Debug, Clone, Copy)]
 enum Command {
@@ -294,10 +295,10 @@ impl Bus {
         self.poll(Status::BSY, false)?;
         self.poll(Status::DRQ, false)?;
 
-        if *LAST_SELECTED.lock() == Some((self.id, drive)) {
+        if *crate::driver::disk::ata::LAST_SELECTED.lock() == Some((self.id, drive)) {
             return Ok(());
         }
-        *LAST_SELECTED.lock() = Some((self.id, drive));
+        *crate::driver::disk::ata::LAST_SELECTED.lock() = Some((self.id, drive));
 
         unsafe {
             self.drive_register.write(0xA0 | (drive << 4));
@@ -373,7 +374,7 @@ impl Bus {
 
     fn write_command(&mut self, cmd: Command) -> Result<(), ()> {
         unsafe { self.command_register.write(cmd as u8) }
-        self.wait(120);
+        self.wait(400);
         let _ = self.status();
         self.poll(Status::BSY, false)?;
         Ok(())
@@ -953,6 +954,109 @@ impl Bus {
         Ok(())
     }
 
+    fn configure_atapi_dma(&mut self, drive: u8, identify: &[u16; 256]) -> Option<u8> {
+        // ATAPI IDENTIFY word 49 bit 8 advertises DMA, while words 63/88
+        // describe the concrete MWDMA/UDMA modes. Require both so a malformed
+        // identify response cannot enable bus mastering accidentally.
+        if (identify[49] & (1 << 8)) == 0 {
+            return None;
+        }
+        let mode = self.best_xfer_mode_from_identify(identify)?;
+        if (mode & 0x60) == 0 {
+            return None;
+        }
+        self.set_transfer_mode(drive, mode).ok()?;
+        Some(mode)
+    }
+
+    fn read_atapi_dma(
+        &mut self,
+        drive: u8,
+        cdb: &[u8; 12],
+        out: &mut [u8],
+    ) -> Result<(), ()> {
+        // Linux filters non-16-byte ATAPI DMA lengths because real devices
+        // are known to choke on them. Optical blocks naturally satisfy this.
+        if out.is_empty() || out.len() > DMA_BUF_BYTES || (out.len() & 15) != 0 {
+            return Err(());
+        }
+
+        let use_bounce = self
+            .setup_dma_prdt_for_virt(out.as_mut_ptr(), out.len())
+            .is_err();
+        if use_bounce {
+            self.setup_dma_prdt_for_phys(self.dma_buf.addr(), out.len())?;
+        }
+
+        self.select_drive(drive)?;
+        self.poll(Status::BSY, false)?;
+        self.poll(Status::DRQ, false)?;
+
+        // Prepare the bus-master direction before issuing PACKET. The engine
+        // remains stopped until after the device has accepted the CDB.
+        // SAFETY: These are the discovered BMIDE channel's byte-wide command
+        // register accesses; bit 3 selects device-to-memory and bit 0 is START.
+        unsafe {
+            let mut command = self.bm_cmd.read();
+            command.set_bit(3, true);
+            command.set_bit(0, false);
+            self.bm_cmd.write(command);
+        }
+
+        // FreeBSD sets the PACKET DMA feature and a zero byte-count for DMA.
+        // Linux also supplies a bounded byte-count for controller snooping;
+        // 0xF800 is even and exactly 31 optical sectors.
+        // SAFETY: The channel is selected and idle while its ATA task-file
+        // registers are programmed, and the BUSES mutex serializes this path.
+        unsafe {
+            self.features_register.write(ATA_FEATURE_PACKET_DMA);
+            self.sector_count_register.write(0);
+            self.lba0_register.write(0);
+            self.lba1_register.write(0x00);
+            self.lba2_register.write(0xF8);
+            self.command_register.write(ATA_CMD_PACKET);
+        }
+        self.wait(400);
+        self.poll(Status::BSY, false)?;
+        if self.status().get_bit(Status::ERR as usize) {
+            return Err(());
+        }
+        self.poll(Status::DRQ, true)?;
+
+        // The command-out phase must request a CDB from the host.
+        // SAFETY: Reading the selected channel's sector-count register is the
+        // ATA-defined way to obtain the ATAPI interrupt-reason byte.
+        let reason = unsafe { self.sector_count_register.read() };
+        if reason & (ATAPI_IREASON_COD | ATAPI_IREASON_IO) != ATAPI_IREASON_COD {
+            return Err(());
+        }
+
+        for word in cdb.chunks_exact(2) {
+            // SAFETY: DRQ is asserted for command-out, and a 12-byte CDB is
+            // transferred as the six 16-bit words required by ATAPI.
+            unsafe {
+                self.data_register
+                    .write(u16::from_le_bytes([word[0], word[1]]));
+            }
+        }
+        let _ = self.status();
+
+        // SAFETY: The PRDT describes `out` (or the owned bounce buffer), the
+        // direction is device-to-memory, and neither buffer is accessed until
+        // dma_wait_done() has stopped the engine.
+        unsafe {
+            let mut command = self.bm_cmd.read();
+            command.set_bit(0, true);
+            self.bm_cmd.write(command);
+        }
+        self.dma_wait_done()?;
+
+        if use_bounce {
+            out.copy_from_slice(&self.dma_buf[..out.len()]);
+        }
+        Ok(())
+    }
+
     fn read_dma_resilient(&mut self, drive: u8, block: u32, buf: &mut [u8]) -> Result<(), ()> {
         match self.read_dma(drive, block, buf) {
             Ok(()) => {
@@ -1480,4 +1584,24 @@ pub fn write(bus: u8, drive: u8, block: u32, buf: &[u8]) -> Result<(), ()> {
         drain_channel_queue(bus);
     }
     wait_for_request(&req)
+}
+
+pub(crate) fn configure_atapi(bus: u8, drive: u8, identify: &[u16; 256]) -> Option<u8> {
+    let mut buses = BUSES.lock();
+    buses
+        .get_mut(bus as usize)?
+        .configure_atapi_dma(drive, identify)
+}
+
+pub(crate) fn read_atapi(
+    bus: u8,
+    drive: u8,
+    cdb: &[u8; 12],
+    out: &mut [u8],
+) -> Result<(), ()> {
+    let mut buses = BUSES.lock();
+    buses
+        .get_mut(bus as usize)
+        .ok_or(())?
+        .read_atapi_dma(drive, cdb, out)
 }
