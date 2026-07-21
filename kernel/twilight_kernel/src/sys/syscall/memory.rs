@@ -221,16 +221,16 @@ pub fn mmap(addr: u64, size: usize, prot: usize, flags: usize, fd: u64, offset: 
             .lock()
             .track_mmap(va, len, MmapKind::Owned, permissions);
     }
-    logger!(
-        "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
-        addr,
-        size,
-        prot,
-        flags,
-        fd,
-        offset,
-        va
-    );
+    // logger!(
+    //     "mmap: addr=0x{:x}, size={}, prot=0x{:x}, flags=0x{:x}, fd=0x{:x}, offset=0x{:x} => 0x{:x}",
+    //     addr,
+    //     size,
+    //     prot,
+    //     flags,
+    //     fd,
+    //     offset,
+    //     va
+    // );
     va as i64
 }
 
@@ -329,7 +329,7 @@ pub fn brk(addr: usize) -> i64 {
 
     if addr == 0 {
         let proc_mm = process.proc_mm.lock();
-        logger!("brk:- addr: {:#X} => {:#X}", addr, proc_mm.curr_brk());
+        // logger!("brk:- addr: {:#X} => {:#X}", addr, proc_mm.curr_brk());
         return proc_mm.curr_brk() as i64; // report current break
     }
     let proc_mm = process.proc_mm.clone();
@@ -339,7 +339,7 @@ pub fn brk(addr: usize) -> i64 {
         Err(_) => proc_mm.curr_brk() as i64, // failure: return current break
     };
 
-    logger!("brk:- addr: {:#X} => {:#X}", addr, res);
+    // logger!("brk:- addr: {:#X} => {:#X}", addr, res);
     res
 }
 
