@@ -7,6 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr;
 
+mod output;
 mod wire;
 use wire::{
     create_empty_memfd, parse_chunk, push_fixed, push_i32, push_u32, push_wayland_string,
@@ -391,6 +392,19 @@ struct SoftwareOutput {
     pixels: *mut u8,
 }
 
+impl SoftwareOutput {
+    /// The output's pixel dimensions, as `i32` for the Wayland wire format.
+    ///
+    /// Construction (`SoftwareOutput::open`) rejects dimensions that do not
+    /// fit in `i32`, so this never wraps; the `try_from` is a defensive
+    /// re-check that falls back to `i32::MAX` rather than panicking.
+    fn geometry(&self) -> (i32, i32) {
+        let w = i32::try_from(self.width).unwrap_or(i32::MAX);
+        let h = i32::try_from(self.height).unwrap_or(i32::MAX);
+        (w, h)
+    }
+}
+
 
 fn main() {
     if let Err(error) = run() {
@@ -672,7 +686,7 @@ fn dispatch_request(
         },
         WaylandObjectKind::Registry => match opcode {
             WL_REGISTRY_BIND => {
-                handle_registry_bind(client, stream, object_id, &message.payload)
+                handle_registry_bind(client, output, stream, object_id, &message.payload)
             }
             other => ignore_unimplemented("wl_registry", other, object_id),
         },
@@ -816,6 +830,7 @@ fn handle_get_registry(
 
 fn handle_registry_bind(
     client: &mut Client,
+    output: &SoftwareOutput,
     stream: &mut UnixStream,
     registry_id: u32,
     payload: &[u8],
@@ -871,6 +886,11 @@ fn handle_registry_bind(
         )?;
         send_seat_name(stream, new_id, &seat_name)?;
         println!("twland: wl_seat bound, sent pointer keyboard capabilities");
+    }
+    if global.kind == WaylandObjectKind::Output {
+        let (width, height) = output.geometry();
+        output::send_initial_events(stream, new_id, version, width, height)?;
+        println!("twland: wl_output bound, sent geometry/mode/done");
     }
 
     Ok(())
@@ -2600,6 +2620,17 @@ impl SoftwareOutput {
                 format!(
                     "unsupported framebuffer mode {}x{} {}bpp",
                     var.xres, var.yres, var.bits_per_pixel
+                ),
+            ));
+        }
+        // Reject dimensions that do not fit in i32, so geometry() can report
+        // valid Wayland mode sizes without an unchecked cast wrapping negative.
+        if i32::try_from(var.xres).is_err() || i32::try_from(var.yres).is_err() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "framebuffer dimensions {}x{} exceed i32 range",
+                    var.xres, var.yres
                 ),
             ));
         }
