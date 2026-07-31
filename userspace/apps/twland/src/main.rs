@@ -2,11 +2,17 @@ use core::ffi::c_void;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind};
-use std::mem::size_of;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr;
+
+mod wire;
+use wire::{
+    create_empty_memfd, parse_chunk, push_fixed, push_i32, push_u32, push_wayland_string,
+    read_i32, read_u32, read_wayland_string, recv_raw, send_message, OwnedFdRaw,
+    ReceivedMessage,
+};
 
 const RUNTIME_DIR: &str = "/run/user/0";
 const WAYLAND_SOCKET: &str = "/run/user/0/wayland-0";
@@ -84,12 +90,6 @@ const PROT_WRITE: i32 = 0x2;
 const MAP_SHARED: i32 = 0x01;
 const MAP_FAILED: *mut c_void = usize::MAX as *mut c_void;
 
-const SOL_SOCKET: i32 = 1;
-const SCM_RIGHTS: i32 = 1;
-const MSG_DONTWAIT: i32 = 0x40;
-const MAX_WIRE_CHUNK: usize = 64 * 1024;
-const MAX_CONTROL_BYTES: usize = 128;
-
 const GLOBALS: &[Global] = &[
     Global {
         name: 1,
@@ -124,34 +124,6 @@ const GLOBALS: &[Global] = &[
 ];
 
 #[repr(C)]
-struct Iovec {
-    iov_base: *mut c_void,
-    iov_len: usize,
-}
-
-#[repr(C)]
-struct Msghdr {
-    msg_name: *mut c_void,
-    msg_namelen: u32,
-    msg_iov: *mut Iovec,
-    msg_iovlen: i32,
-    __pad_iovlen: i32,
-    msg_control: *mut c_void,
-    msg_controllen: u32,
-    __pad_controllen: u32,
-    msg_flags: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Cmsghdr {
-    cmsg_len: u32,
-    __pad_len: i32,
-    cmsg_level: i32,
-    cmsg_type: i32,
-}
-
-#[repr(C)]
 #[derive(Default)]
 struct FbVarScreenInfo {
     xres: u32,
@@ -170,8 +142,6 @@ struct FbFixScreenInfo {
 }
 
 unsafe extern "C" {
-    fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize;
-    fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize;
     fn sched_yield() -> i32;
     fn mmap(
         addr: *mut c_void,
@@ -184,19 +154,6 @@ unsafe extern "C" {
     fn munmap(addr: *mut c_void, len: usize) -> i32;
     fn close(fd: i32) -> i32;
     fn ioctl(fd: i32, request: u64, ...) -> i32;
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WaylandHeader {
-    object_id: u32,
-    opcode: u16,
-    size: u16,
-}
-
-struct ReceivedMessage {
-    header: WaylandHeader,
-    payload: Vec<u8>,
-    fds: Vec<OwnedFdRaw>,
 }
 
 struct Client {
@@ -403,10 +360,6 @@ struct SoftwareOutput {
     pixels: *mut u8,
 }
 
-#[derive(Debug)]
-struct OwnedFdRaw {
-    fd: i32,
-}
 
 fn main() {
     if let Err(error) = run() {
@@ -2244,132 +2197,11 @@ fn recv_wayland_message(
         return Ok(Some(message));
     }
 
-    let mut data = vec![0_u8; MAX_WIRE_CHUNK];
-    let mut control = [0_u8; MAX_CONTROL_BYTES];
-    let mut iov = Iovec {
-        iov_base: data.as_mut_ptr().cast(),
-        iov_len: data.len(),
-    };
-    let mut msg = Msghdr {
-        msg_name: ptr::null_mut(),
-        msg_namelen: 0,
-        msg_iov: &mut iov,
-        msg_iovlen: 1,
-        __pad_iovlen: 0,
-        msg_control: control.as_mut_ptr().cast(),
-        msg_controllen: control.len() as u32,
-        __pad_controllen: 0,
-        msg_flags: 0,
-    };
-
-    // SAFETY: `msg` points to valid writable iovec/control buffers for the
-    // duration of the call, and the fd comes from a live UnixStream.
-    let received = unsafe { recvmsg(stream.as_raw_fd(), &mut msg, MSG_DONTWAIT) };
-    if received < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if received == 0 {
+    let Some((bytes, fds)) = recv_raw(stream)? else {
         return Ok(None);
-    }
-
-    let fds = parse_received_fds(&control, msg.msg_controllen as usize);
-    parse_wire_chunk(&data[..received as usize], fds, &mut client.queued_messages)?;
+    };
+    parse_chunk(&bytes, fds, &mut client.queued_messages)?;
     Ok(client.queued_messages.pop_front())
-}
-
-fn parse_wire_chunk(
-    bytes: &[u8],
-    mut fds: Vec<OwnedFdRaw>,
-    queue: &mut VecDeque<ReceivedMessage>,
-) -> io::Result<()> {
-    let mut offset = 0usize;
-    let mut first = true;
-
-    while offset < bytes.len() {
-        if offset + 8 > bytes.len() {
-            return Err(io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "truncated Wayland header",
-            ));
-        }
-
-        let header = parse_header(&bytes[offset..offset + 8]);
-        if header.size < 8 {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid message size {}", header.size),
-            ));
-        }
-
-        let end = offset + usize::from(header.size);
-        if end > bytes.len() {
-            return Err(io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "truncated Wayland payload",
-            ));
-        }
-
-        let message_fds = if first {
-            first = false;
-            std::mem::take(&mut fds)
-        } else {
-            Vec::new()
-        };
-        queue.push_back(ReceivedMessage {
-            header,
-            payload: bytes[offset + 8..end].to_vec(),
-            fds: message_fds,
-        });
-        offset = end;
-    }
-
-    Ok(())
-}
-
-fn parse_received_fds(control: &[u8], controllen: usize) -> Vec<OwnedFdRaw> {
-    let mut fds = Vec::new();
-    if controllen < size_of::<Cmsghdr>() || controllen > control.len() {
-        return fds;
-    }
-
-    let mut offset = 0usize;
-    while offset + size_of::<Cmsghdr>() <= controllen {
-        // SAFETY: Bounds above guarantee enough bytes for an unaligned cmsghdr.
-        let cmsg = unsafe { ptr::read_unaligned(control.as_ptr().add(offset).cast::<Cmsghdr>()) };
-        let cmsg_len = cmsg.cmsg_len as usize;
-        if cmsg_len < size_of::<Cmsghdr>() || offset + cmsg_len > controllen {
-            break;
-        }
-
-        if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
-            let data_start = offset + size_of::<Cmsghdr>();
-            let data_len = cmsg_len - size_of::<Cmsghdr>();
-            for chunk in control[data_start..data_start + data_len].chunks_exact(size_of::<i32>()) {
-                let fd = i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                if fd >= 0 {
-                    fds.push(OwnedFdRaw { fd });
-                }
-            }
-        }
-
-        let next = cmsg_align(cmsg_len);
-        if next <= offset {
-            break;
-        }
-        offset += next;
-    }
-
-    fds
-}
-
-fn parse_header(raw: &[u8]) -> WaylandHeader {
-    let object_id = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-    let packed = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-    WaylandHeader {
-        object_id,
-        opcode: (packed & 0xffff) as u16,
-        size: (packed >> 16) as u16,
-    }
 }
 
 fn send_registry_global(
@@ -2438,15 +2270,24 @@ fn send_seat_name(stream: &mut UnixStream, seat_id: u32, name: &str) -> io::Resu
 }
 
 fn send_keyboard_keymap(stream: &mut UnixStream, keyboard_id: u32) -> io::Result<()> {
+    // wl_keyboard.keymap(format, fd, size): the fd is a Wayland fd argument,
+    // so it travels out-of-band via SCM_RIGHTS and occupies zero payload bytes.
+    // The payload is just (format, size).  For NO_KEYMAP we still must pass a
+    // real (empty) file descriptor; an empty memfd satisfies the protocol
+    // without carrying any keymap data.  A later XKB stage should replace this
+    // with a memfd holding the compiled keymap string.
+    let keymap_fd = create_empty_memfd().map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("failed to create keymap memfd: {err}"),
+        )
+    })?;
+    let size = 0u32;
+
     let mut payload = Vec::new();
     push_u32(&mut payload, WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP);
-    // wl_keyboard.keymap is (format, fd, size).  This first input milestone uses
-    // format=NO_KEYMAP, so there is no real keymap fd to pass yet; keep the fd
-    // slot as 0 for Twilight's minimal test clients and size as 0.  A later XKB
-    // stage should send a memfd through SCM_RIGHTS here.
-    push_u32(&mut payload, 0);
-    push_u32(&mut payload, 0);
-    send_message(stream, keyboard_id, WL_KEYBOARD_KEYMAP, &payload)
+    push_u32(&mut payload, size);
+    wire::send_message_with_fds(stream, keyboard_id, WL_KEYBOARD_KEYMAP, &payload, &[keymap_fd.as_raw()])
 }
 
 fn send_pointer_enter(
@@ -2544,65 +2385,6 @@ fn send_keyboard_key(
     push_u32(&mut payload, keycode);
     push_u32(&mut payload, state);
     send_message(stream, keyboard_id, WL_KEYBOARD_KEY, &payload)
-}
-
-fn send_message(
-    stream: &mut UnixStream,
-    object_id: u32,
-    opcode: u16,
-    payload: &[u8],
-) -> io::Result<()> {
-    let size = 8_usize
-        .checked_add(payload.len())
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "message too large"))?;
-    if size > u16::MAX as usize {
-        return Err(io::Error::new(ErrorKind::InvalidInput, "message too large"));
-    }
-
-    let mut message = Vec::with_capacity(size);
-    push_u32(&mut message, object_id);
-    push_u32(&mut message, ((size as u32) << 16) | u32::from(opcode));
-    message.extend_from_slice(payload);
-    send_wayland_bytes(stream, &message)
-}
-
-fn send_wayland_bytes(stream: &mut UnixStream, message: &[u8]) -> io::Result<()> {
-    let mut offset = 0;
-    while offset < message.len() {
-        let mut iov = Iovec {
-            // sendmsg does not mutate the buffer, but musl's iovec field is a
-            // mutable pointer in C. Keep the cast local to this syscall wrapper.
-            iov_base: message[offset..].as_ptr() as *mut c_void,
-            iov_len: message.len() - offset,
-        };
-        let hdr = Msghdr {
-            msg_name: ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: &mut iov,
-            msg_iovlen: 1,
-            __pad_iovlen: 0,
-            msg_control: ptr::null_mut(),
-            msg_controllen: 0,
-            __pad_controllen: 0,
-            msg_flags: 0,
-        };
-
-        // SAFETY: `hdr` and its single iovec point at the immutable `message`
-        // slice for the duration of the syscall. `msg_name` and control are
-        // null because this is a connected AF_UNIX stream.
-        let sent = unsafe { sendmsg(stream.as_raw_fd(), &hdr, 0) };
-        if sent < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if sent == 0 {
-            return Err(io::Error::new(
-                ErrorKind::WriteZero,
-                "sendmsg wrote zero bytes",
-            ));
-        }
-        offset += sent as usize;
-    }
-    Ok(())
 }
 
 fn blit_shm_buffer_to_output(
@@ -2884,24 +2666,6 @@ impl Drop for ShmPoolState {
     }
 }
 
-impl OwnedFdRaw {
-    fn into_raw(mut self) -> i32 {
-        let fd = self.fd;
-        self.fd = -1;
-        fd
-    }
-}
-
-impl Drop for OwnedFdRaw {
-    fn drop(&mut self) {
-        if self.fd >= 0 {
-            // SAFETY: fd is owned by this wrapper unless it was moved out using
-            // into_raw, in which case it is set to -1.
-            let _ = unsafe { close(self.fd) };
-            self.fd = -1;
-        }
-    }
-}
 
 impl Rect {
     fn union(self, other: Rect) -> Rect {
@@ -2922,75 +2686,4 @@ impl Rect {
             height: y1.saturating_sub(y0),
         }
     }
-}
-
-fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> {
-    let raw = bytes
-        .get(offset..offset + 4)
-        .ok_or_else(|| io::Error::new(ErrorKind::UnexpectedEof, "missing u32 argument"))?;
-    Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
-}
-
-fn read_i32(bytes: &[u8], offset: usize) -> io::Result<i32> {
-    Ok(read_u32(bytes, offset)? as i32)
-}
-
-fn read_wayland_string(bytes: &[u8], offset: usize) -> io::Result<(String, usize)> {
-    let length = read_u32(bytes, offset)? as usize;
-    if length == 0 {
-        return Ok((String::new(), align4(offset + 4)));
-    }
-
-    let start = offset + 4;
-    let end = start
-        .checked_add(length)
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "string length overflow"))?;
-    let raw = bytes
-        .get(start..end)
-        .ok_or_else(|| io::Error::new(ErrorKind::UnexpectedEof, "truncated string argument"))?;
-    if raw.last() != Some(&0) {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "string argument is not NUL-terminated",
-        ));
-    }
-
-    let value = std::str::from_utf8(&raw[..raw.len() - 1])
-        .map_err(|_| io::Error::new(ErrorKind::InvalidData, "string argument is not UTF-8"))?
-        .to_string();
-    Ok((value, align4(end)))
-}
-
-fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_i32(bytes: &mut Vec<u8>, value: i32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_fixed(bytes: &mut Vec<u8>, value: i32) {
-    push_i32(bytes, value.saturating_mul(256));
-}
-
-fn push_wayland_string(bytes: &mut Vec<u8>, value: &str) {
-    let length = value.len() + 1;
-    push_u32(bytes, length as u32);
-    bytes.extend_from_slice(value.as_bytes());
-    bytes.push(0);
-    while bytes.len() % 4 != 0 {
-        bytes.push(0);
-    }
-}
-
-fn align4(value: usize) -> usize {
-    (value + 3) & !3
-}
-
-fn cmsg_align(value: usize) -> usize {
-    align4_to(value, size_of::<usize>())
-}
-
-fn align4_to(value: usize, alignment: usize) -> usize {
-    (value + alignment - 1) & !(alignment - 1)
 }
