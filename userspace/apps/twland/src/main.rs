@@ -167,6 +167,14 @@ struct Client {
     xdg_surfaces: HashMap<u32, XdgSurfaceState>,
     xdg_toplevels: HashMap<u32, XdgToplevelState>,
     queued_messages: VecDeque<ReceivedMessage>,
+    /// Bytes from a read that did not contain a complete final frame; the next
+    /// read appends to this and framing resumes.  AF_UNIX streams split frames
+    /// at arbitrary byte boundaries, so a frame can span two reads.
+    residual: Vec<u8>,
+    /// Out-of-band file descriptors received via `SCM_RIGHTS`, in stream order.
+    /// A single read may carry fds for several batched requests, so each
+    /// fd-carrying request handler pops exactly the fds its signature requires.
+    pending_fds: VecDeque<OwnedFdRaw>,
     input: InputState,
     compositor: CompositorState,
     next_serial: u32,
@@ -500,6 +508,8 @@ impl Client {
             xdg_surfaces: HashMap::new(),
             xdg_toplevels: HashMap::new(),
             queued_messages: VecDeque::new(),
+            residual: Vec::new(),
+            pending_fds: VecDeque::new(),
             input: InputState {
                 pointer_x: 80,
                 pointer_y: 80,
@@ -636,7 +646,7 @@ fn dispatch_request(
             handle_compositor_create_surface(client, &message.payload)
         }
         (WaylandObjectKind::Shm, WL_SHM_CREATE_POOL) => {
-            handle_shm_create_pool(client, message.payload, message.fds)
+            handle_shm_create_pool(client, message.payload)
         }
         (WaylandObjectKind::Seat, WL_SEAT_GET_POINTER) => {
             handle_seat_get_pointer(client, message.header.object_id, &message.payload)
@@ -875,11 +885,7 @@ fn handle_seat_get_keyboard(
     Ok(())
 }
 
-fn handle_shm_create_pool(
-    client: &mut Client,
-    payload: Vec<u8>,
-    mut fds: Vec<OwnedFdRaw>,
-) -> io::Result<()> {
+fn handle_shm_create_pool(client: &mut Client, payload: Vec<u8>) -> io::Result<()> {
     let pool_id = read_u32(&payload, 0)?;
     let size = read_i32(&payload, 4)?;
     if size <= 0 {
@@ -889,14 +895,15 @@ fn handle_shm_create_pool(
         ));
     }
 
-    if fds.is_empty() {
-        return Err(io::Error::new(
+    // wl_shm.create_pool carries exactly one fd argument; pop it from the
+    // per-client FIFO in stream order.
+    let fd = client.pending_fds.pop_front().ok_or_else(|| {
+        io::Error::new(
             ErrorKind::InvalidData,
             "wl_shm.create_pool requires one SCM_RIGHTS fd",
-        ));
-    }
-
-    let fd = fds.remove(0).into_raw();
+        )
+    })?;
+    let fd = fd.into_raw();
     let size = size as usize;
     let mapped = unsafe_mmap_shm(fd, size)?;
 
@@ -2200,7 +2207,16 @@ fn recv_wayland_message(
     let Some((bytes, fds)) = recv_raw(stream)? else {
         return Ok(None);
     };
-    parse_chunk(&bytes, fds, &mut client.queued_messages)?;
+
+    // Fds from this read go into the per-client FIFO; request handlers pop them
+    // in stream order as their signatures require.
+    client.pending_fds.extend(fds);
+
+    // Append to any leftover from a previous read, frame as many complete
+    // messages as are available, then retain the unconsumed tail.
+    client.residual.extend_from_slice(&bytes);
+    let consumed = parse_chunk(&client.residual, &mut client.queued_messages)?;
+    client.residual.drain(..consumed);
     Ok(client.queued_messages.pop_front())
 }
 

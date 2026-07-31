@@ -39,21 +39,18 @@ struct Msghdr {
     msg_name: *mut c_void,
     msg_namelen: u32,
     msg_iov: *mut Iovec,
-    msg_iovlen: i32,
-    __pad_iovlen: i32,
+    msg_iovlen: usize,
     msg_control: *mut c_void,
-    msg_controllen: u32,
-    __pad_controllen: u32,
+    msg_controllen: usize,
     msg_flags: i32,
 }
 
-/// `cmsghdr` with explicit padding so `cmsg_len` occupies a full `size_t` on
-/// 64-bit, matching the kernel's `struct cmsghdr` layout.
+/// `cmsghdr` matching the kernel's `struct cmsghdr` layout: `cmsg_len` is
+/// `size_t`, so on 64-bit targets it occupies a full 8 bytes with no padding.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Cmsghdr {
-    cmsg_len: u32,
-    __pad_len: i32,
+    cmsg_len: usize,
     cmsg_level: i32,
     cmsg_type: i32,
 }
@@ -72,12 +69,12 @@ pub struct WaylandHeader {
     pub size: u16,
 }
 
-/// One decoded Wayland message: header, payload bytes, and any fds received
-/// alongside it via `SCM_RIGHTS`.
+/// One decoded Wayland message: header and payload bytes.  File descriptors
+/// for fd-carrying requests are not attached here; they live in a per-client
+/// FIFO and are popped by the request handler that needs them.
 pub struct ReceivedMessage {
     pub header: WaylandHeader,
     pub payload: Vec<u8>,
-    pub fds: Vec<OwnedFdRaw>,
 }
 
 /// An owned raw file descriptor that is closed on drop unless moved out with
@@ -207,10 +204,8 @@ fn send_bytes(stream: &mut UnixStream, message: &[u8], fds: &[i32]) -> io::Resul
             msg_namelen: 0,
             msg_iov: &mut iov,
             msg_iovlen: 1,
-            __pad_iovlen: 0,
             msg_control: control_ptr,
             msg_controllen: control_len,
-            __pad_controllen: 0,
             msg_flags: 0,
         };
 
@@ -237,7 +232,7 @@ fn send_bytes(stream: &mut UnixStream, message: &[u8], fds: &[i32]) -> io::Resul
 
 /// Build a single `SCM_RIGHTS` control message carrying `fds` into `control`
 /// and return the aligned length to set as `msg_controllen`.
-fn build_scm_rights(control: &mut [u8; MAX_CONTROL_BYTES], fds: &[i32]) -> io::Result<u32> {
+fn build_scm_rights(control: &mut [u8; MAX_CONTROL_BYTES], fds: &[i32]) -> io::Result<usize> {
     let header_len = size_of::<Cmsghdr>();
     let data_len = size_of_val(fds);
     let cmsg_len = header_len + data_len;
@@ -250,8 +245,7 @@ fn build_scm_rights(control: &mut [u8; MAX_CONTROL_BYTES], fds: &[i32]) -> io::R
     }
 
     let cmsg = Cmsghdr {
-        cmsg_len: cmsg_len as u32,
-        __pad_len: 0,
+        cmsg_len,
         cmsg_level: SOL_SOCKET,
         cmsg_type: SCM_RIGHTS,
     };
@@ -268,7 +262,7 @@ fn build_scm_rights(control: &mut [u8; MAX_CONTROL_BYTES], fds: &[i32]) -> io::R
         *byte = 0;
     }
 
-    Ok(aligned as u32)
+    Ok(aligned)
 }
 
 /// Read one chunk from the socket.  Returns `Ok(None)` on EOF, `Err(WouldBlock)`
@@ -286,10 +280,8 @@ pub fn recv_raw(stream: &mut UnixStream) -> io::Result<Option<(Vec<u8>, Vec<Owne
         msg_namelen: 0,
         msg_iov: &mut iov,
         msg_iovlen: 1,
-        __pad_iovlen: 0,
         msg_control: control.as_mut_ptr().cast(),
-        msg_controllen: control.len() as u32,
-        __pad_controllen: 0,
+        msg_controllen: control.len(),
         msg_flags: 0,
     };
 
@@ -303,30 +295,41 @@ pub fn recv_raw(stream: &mut UnixStream) -> io::Result<Option<(Vec<u8>, Vec<Owne
         return Ok(None);
     }
 
-    let fds = parse_received_fds(&control, msg.msg_controllen as usize);
+    // If the control buffer was too small for the ancillary data, the kernel
+    // sets MSG_CTRUNC and drops the excess descriptors.  Treat that as a
+    // transport error rather than silently returning fewer fds than sent.
+    const MSG_CTRUNC: i32 = 0x08;
+    if msg.msg_flags & MSG_CTRUNC != 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "ancillary data truncated; control buffer too small",
+        ));
+    }
+
+    let fds = parse_received_fds(&control, msg.msg_controllen);
     data.truncate(received as usize);
     Ok(Some((data, fds)))
 }
 
-/// Decode a received chunk into one or more queued messages.  All fds from the
-/// chunk attach to the first message, matching how clients send fd-carrying
-/// requests on the stream.
+/// Decode complete Wayland messages from the front of `bytes` into `queue`.
+///
+/// Returns the number of bytes consumed.  A frame whose header or payload is
+/// only partially present (because the stream split it across reads) is left
+/// untouched: the caller retains the unconsumed tail and appends the next
+/// chunk to it.  This never errors on a short buffer — only on a structurally
+/// invalid header (`size < 8`).
+///
+/// File descriptors are not attached here.  Wayland fd arguments are
+/// out-of-band and a single `recvmsg` may carry fds for several batched
+/// requests, so the caller owns a per-client fd FIFO and each request handler
+/// pops exactly the fds its signature requires.
 pub fn parse_chunk(
     bytes: &[u8],
-    mut fds: Vec<OwnedFdRaw>,
     queue: &mut VecDeque<ReceivedMessage>,
-) -> io::Result<()> {
+) -> io::Result<usize> {
     let mut offset = 0usize;
-    let mut first = true;
 
-    while offset < bytes.len() {
-        if offset + 8 > bytes.len() {
-            return Err(io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "truncated Wayland header",
-            ));
-        }
-
+    while offset + 8 <= bytes.len() {
         let header = parse_header(&bytes[offset..offset + 8]);
         if header.size < 8 {
             return Err(io::Error::new(
@@ -337,27 +340,19 @@ pub fn parse_chunk(
 
         let end = offset + usize::from(header.size);
         if end > bytes.len() {
-            return Err(io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "truncated Wayland payload",
-            ));
+            // Payload (or this is the last partial frame) not fully received
+            // yet; wait for more bytes from the next read.
+            break;
         }
 
-        let message_fds = if first {
-            first = false;
-            std::mem::take(&mut fds)
-        } else {
-            Vec::new()
-        };
         queue.push_back(ReceivedMessage {
             header,
             payload: bytes[offset + 8..end].to_vec(),
-            fds: message_fds,
         });
         offset = end;
     }
 
-    Ok(())
+    Ok(offset)
 }
 
 fn parse_received_fds(control: &[u8], controllen: usize) -> Vec<OwnedFdRaw> {
@@ -370,7 +365,7 @@ fn parse_received_fds(control: &[u8], controllen: usize) -> Vec<OwnedFdRaw> {
     while offset + size_of::<Cmsghdr>() <= controllen {
         // SAFETY: Bounds above guarantee enough bytes for an unaligned cmsghdr.
         let cmsg = unsafe { ptr::read_unaligned(control.as_ptr().add(offset).cast::<Cmsghdr>()) };
-        let cmsg_len = cmsg.cmsg_len as usize;
+        let cmsg_len = cmsg.cmsg_len;
         if cmsg_len < size_of::<Cmsghdr>() || offset + cmsg_len > controllen {
             break;
         }
@@ -458,13 +453,15 @@ pub fn push_fixed(bytes: &mut Vec<u8>, value: i32) {
 }
 
 pub fn push_wayland_string(bytes: &mut Vec<u8>, value: &str) {
+    // A Wayland string is: u32 length (including NUL), the bytes, a NUL
+    // terminator, then NUL padding to a 4-byte boundary.  Compute the padding
+    // from the field length so it is independent of the caller's buffer state.
     let length = value.len() + 1;
     push_u32(bytes, length as u32);
     bytes.extend_from_slice(value.as_bytes());
     bytes.push(0);
-    while !bytes.len().is_multiple_of(4) {
-        bytes.push(0);
-    }
+    let padding = align4(length) - length;
+    bytes.resize(bytes.len() + padding, 0);
 }
 
 fn align4(value: usize) -> usize {
