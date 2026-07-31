@@ -394,8 +394,14 @@ struct SoftwareOutput {
 
 impl SoftwareOutput {
     /// The output's pixel dimensions, as `i32` for the Wayland wire format.
+    ///
+    /// Construction (`SoftwareOutput::open`) rejects dimensions that do not
+    /// fit in `i32`, so this never wraps; the `try_from` is a defensive
+    /// re-check that falls back to `i32::MAX` rather than panicking.
     fn geometry(&self) -> (i32, i32) {
-        (self.width as i32, self.height as i32)
+        let w = i32::try_from(self.width).unwrap_or(i32::MAX);
+        let h = i32::try_from(self.height).unwrap_or(i32::MAX);
+        (w, h)
     }
 }
 
@@ -883,7 +889,7 @@ fn handle_registry_bind(
     }
     if global.kind == WaylandObjectKind::Output {
         let (width, height) = output.geometry();
-        output::send_initial_events(stream, new_id, width, height)?;
+        output::send_initial_events(stream, new_id, version, width, height)?;
         println!("twland: wl_output bound, sent geometry/mode/done");
     }
 
@@ -2614,6 +2620,17 @@ impl SoftwareOutput {
                 format!(
                     "unsupported framebuffer mode {}x{} {}bpp",
                     var.xres, var.yres, var.bits_per_pixel
+                ),
+            ));
+        }
+        // Reject dimensions that do not fit in i32, so geometry() can report
+        // valid Wayland mode sizes without an unchecked cast wrapping negative.
+        if i32::try_from(var.xres).is_err() || i32::try_from(var.yres).is_err() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "framebuffer dimensions {}x{} exceed i32 range",
+                    var.xres, var.yres
                 ),
             ));
         }

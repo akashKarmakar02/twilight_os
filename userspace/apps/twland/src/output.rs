@@ -34,7 +34,9 @@ const TRANSFORM_NORMAL: u32 = 0;
 const DEFAULT_REFRESH_MHZ: u32 = 60_000;
 
 /// Send the initial `wl_output` event sequence for a freshly bound output:
-/// `geometry`, the current `mode`, then `done`.
+/// `geometry`, the current `mode`, then `done` (only at version 2+, since
+/// `wl_output.done` was introduced in version 2 — emitting it to a v1 client
+/// is a protocol error).
 ///
 /// `width`/`height` are the output's pixel dimensions.  Physical dimensions
 /// and manufacturer/model are unknown for the framebuffer, so they are sent
@@ -42,12 +44,16 @@ const DEFAULT_REFRESH_MHZ: u32 = 60_000;
 pub fn send_initial_events(
     stream: &mut UnixStream,
     output_id: u32,
+    version: u32,
     width: i32,
     height: i32,
 ) -> io::Result<()> {
     send_geometry(stream, output_id)?;
     send_mode(stream, output_id, MODE_CURRENT | MODE_PREFERRED, width, height)?;
-    send_done(stream, output_id)
+    if version >= 2 {
+        send_done(stream, output_id)?;
+    }
+    Ok(())
 }
 
 fn send_geometry(stream: &mut UnixStream, output_id: u32) -> io::Result<()> {
