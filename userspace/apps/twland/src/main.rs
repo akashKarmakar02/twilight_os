@@ -7,6 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr;
 
+mod output;
 mod wire;
 use wire::{
     create_empty_memfd, parse_chunk, push_fixed, push_i32, push_u32, push_wayland_string,
@@ -391,6 +392,13 @@ struct SoftwareOutput {
     pixels: *mut u8,
 }
 
+impl SoftwareOutput {
+    /// The output's pixel dimensions, as `i32` for the Wayland wire format.
+    fn geometry(&self) -> (i32, i32) {
+        (self.width as i32, self.height as i32)
+    }
+}
+
 
 fn main() {
     if let Err(error) = run() {
@@ -672,7 +680,7 @@ fn dispatch_request(
         },
         WaylandObjectKind::Registry => match opcode {
             WL_REGISTRY_BIND => {
-                handle_registry_bind(client, stream, object_id, &message.payload)
+                handle_registry_bind(client, output, stream, object_id, &message.payload)
             }
             other => ignore_unimplemented("wl_registry", other, object_id),
         },
@@ -816,6 +824,7 @@ fn handle_get_registry(
 
 fn handle_registry_bind(
     client: &mut Client,
+    output: &SoftwareOutput,
     stream: &mut UnixStream,
     registry_id: u32,
     payload: &[u8],
@@ -871,6 +880,11 @@ fn handle_registry_bind(
         )?;
         send_seat_name(stream, new_id, &seat_name)?;
         println!("twland: wl_seat bound, sent pointer keyboard capabilities");
+    }
+    if global.kind == WaylandObjectKind::Output {
+        let (width, height) = output.geometry();
+        output::send_initial_events(stream, new_id, width, height)?;
+        println!("twland: wl_output bound, sent geometry/mode/done");
     }
 
     Ok(())
