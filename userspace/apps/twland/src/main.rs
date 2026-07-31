@@ -181,7 +181,7 @@ struct Client {
     next_window_offset: i32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct WaylandObject {
     kind: WaylandObjectKind,
 }
@@ -203,6 +203,29 @@ enum WaylandObjectKind {
     XdgWmBase,
     XdgSurface,
     XdgToplevel,
+}
+
+impl WaylandObjectKind {
+    /// The Wayland interface name, for log lines.
+    fn as_str(self) -> &'static str {
+        match self {
+            WaylandObjectKind::Display => "wl_display",
+            WaylandObjectKind::Registry => "wl_registry",
+            WaylandObjectKind::Callback => "wl_callback",
+            WaylandObjectKind::Compositor => "wl_compositor",
+            WaylandObjectKind::Shm => "wl_shm",
+            WaylandObjectKind::ShmPool => "wl_shm_pool",
+            WaylandObjectKind::Buffer => "wl_buffer",
+            WaylandObjectKind::Surface => "wl_surface",
+            WaylandObjectKind::Seat => "wl_seat",
+            WaylandObjectKind::Pointer => "wl_pointer",
+            WaylandObjectKind::Keyboard => "wl_keyboard",
+            WaylandObjectKind::Output => "wl_output",
+            WaylandObjectKind::XdgWmBase => "xdg_wm_base",
+            WaylandObjectKind::XdgSurface => "xdg_surface",
+            WaylandObjectKind::XdgToplevel => "xdg_toplevel",
+        }
+    }
 }
 
 struct ShmPoolState {
@@ -625,100 +648,136 @@ fn dispatch_request(
     stream: &mut UnixStream,
     message: ReceivedMessage,
 ) -> io::Result<()> {
-    let Some(object) = client.objects.get(&message.header.object_id) else {
+    let Some(object) = client.objects.get(&message.header.object_id).copied() else {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             format!("unknown object {}", message.header.object_id),
         ));
     };
 
-    match (object.kind, message.header.opcode) {
-        (WaylandObjectKind::Display, WL_DISPLAY_SYNC) => {
-            handle_display_sync(client, stream, &message.payload)
+    let opcode = message.header.opcode;
+    let object_id = message.header.object_id;
+
+    // Route by interface, then by opcode.  Each interface ends in a non-fatal
+    // fallback: a minimal compositor may legitimately ignore optional requests
+    // it does not implement (set_opaque_region, create_region, get_touch,
+    // set_window_geometry, ...).  Disconnecting on them would drop every real
+    // toolkit client.  Only a structurally unknown object is fatal, and that
+    // is caught above before we reach this match.
+    match object.kind {
+        WaylandObjectKind::Display => match opcode {
+            WL_DISPLAY_SYNC => handle_display_sync(client, stream, &message.payload),
+            WL_DISPLAY_GET_REGISTRY => handle_get_registry(client, stream, &message.payload),
+            other => ignore_unimplemented("wl_display", other, object_id),
+        },
+        WaylandObjectKind::Registry => match opcode {
+            WL_REGISTRY_BIND => {
+                handle_registry_bind(client, stream, object_id, &message.payload)
+            }
+            other => ignore_unimplemented("wl_registry", other, object_id),
+        },
+        WaylandObjectKind::Compositor => match opcode {
+            WL_COMPOSITOR_CREATE_SURFACE => handle_compositor_create_surface(client, &message.payload),
+            other => ignore_unimplemented("wl_compositor", other, object_id),
+        },
+        WaylandObjectKind::Shm => match opcode {
+            WL_SHM_CREATE_POOL => handle_shm_create_pool(client, message.payload),
+            other => ignore_unimplemented("wl_shm", other, object_id),
+        },
+        WaylandObjectKind::ShmPool => match opcode {
+            WL_SHM_POOL_CREATE_BUFFER => {
+                handle_shm_pool_create_buffer(client, object_id, &message.payload)
+            }
+            WL_SHM_POOL_DESTROY => {
+                handle_shm_pool_destroy(client, object_id);
+                Ok(())
+            }
+            other => ignore_unimplemented("wl_shm_pool", other, object_id),
+        },
+        WaylandObjectKind::Buffer => match opcode {
+            WL_BUFFER_DESTROY => {
+                handle_buffer_destroy(client, object_id);
+                Ok(())
+            }
+            other => ignore_unimplemented("wl_buffer", other, object_id),
+        },
+        WaylandObjectKind::Surface => match opcode {
+            WL_SURFACE_DESTROY => {
+                handle_surface_destroy(client, output, object_id)?;
+                Ok(())
+            }
+            WL_SURFACE_ATTACH => handle_surface_attach(client, object_id, &message.payload),
+            WL_SURFACE_DAMAGE => handle_surface_damage(client, object_id, &message.payload),
+            WL_SURFACE_FRAME => handle_surface_frame(client, object_id, &message.payload),
+            WL_SURFACE_COMMIT => handle_surface_commit(client, output, stream, object_id),
+            // set_opaque_region(4), set_input_region(5), set_buffer_transform(7),
+            // set_buffer_scale(8), damage_buffer(9): optional, ignored.
+            other => ignore_unimplemented("wl_surface", other, object_id),
+        },
+        WaylandObjectKind::Seat => match opcode {
+            WL_SEAT_GET_POINTER => handle_seat_get_pointer(client, object_id, &message.payload),
+            WL_SEAT_GET_KEYBOARD => {
+                handle_seat_get_keyboard(client, stream, object_id, &message.payload)
+            }
+            // get_touch(2): optional, ignored.
+            other => ignore_unimplemented("wl_seat", other, object_id),
+        },
+        WaylandObjectKind::XdgWmBase => match opcode {
+            XDG_WM_BASE_PONG => handle_xdg_wm_base_pong(&message.payload),
+            XDG_WM_BASE_GET_XDG_SURFACE => {
+                handle_xdg_wm_base_get_xdg_surface(client, object_id, &message.payload)
+            }
+            other => ignore_unimplemented("xdg_wm_base", other, object_id),
+        },
+        WaylandObjectKind::XdgSurface => match opcode {
+            XDG_SURFACE_DESTROY => {
+                handle_xdg_surface_destroy(client, output, object_id)?;
+                Ok(())
+            }
+            XDG_SURFACE_GET_TOPLEVEL => {
+                handle_xdg_surface_get_toplevel(client, object_id, &message.payload)
+            }
+            XDG_SURFACE_ACK_CONFIGURE => {
+                handle_xdg_surface_ack_configure(client, object_id, &message.payload)
+            }
+            // get_popup(2), set_window_geometry(3): optional, ignored.
+            other => ignore_unimplemented("xdg_surface", other, object_id),
+        },
+        WaylandObjectKind::XdgToplevel => match opcode {
+            XDG_TOPLEVEL_SET_TITLE => {
+                handle_xdg_toplevel_set_title(client, object_id, &message.payload)
+            }
+            XDG_TOPLEVEL_SET_APP_ID => {
+                handle_xdg_toplevel_set_app_id(client, object_id, &message.payload)
+            }
+            XDG_TOPLEVEL_DESTROY => {
+                handle_xdg_toplevel_destroy(client, output, object_id)?;
+                Ok(())
+            }
+            // move(4), resize(5), set_min/max_size, set_maximized, etc.: optional, ignored.
+            other => ignore_unimplemented("xdg_toplevel", other, object_id),
+        },
+        // These objects emit only events; clients never send requests to them.
+        WaylandObjectKind::Callback
+        | WaylandObjectKind::Pointer
+        | WaylandObjectKind::Keyboard
+        | WaylandObjectKind::Output => {
+            ignore_unimplemented(object.kind.as_str(), opcode, object_id)
         }
-        (WaylandObjectKind::Display, WL_DISPLAY_GET_REGISTRY) => {
-            handle_get_registry(client, stream, &message.payload)
-        }
-        (WaylandObjectKind::Registry, WL_REGISTRY_BIND) => {
-            handle_registry_bind(client, stream, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::Compositor, WL_COMPOSITOR_CREATE_SURFACE) => {
-            handle_compositor_create_surface(client, &message.payload)
-        }
-        (WaylandObjectKind::Shm, WL_SHM_CREATE_POOL) => {
-            handle_shm_create_pool(client, message.payload)
-        }
-        (WaylandObjectKind::Seat, WL_SEAT_GET_POINTER) => {
-            handle_seat_get_pointer(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::Seat, WL_SEAT_GET_KEYBOARD) => {
-            handle_seat_get_keyboard(client, stream, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::ShmPool, WL_SHM_POOL_CREATE_BUFFER) => {
-            handle_shm_pool_create_buffer(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::ShmPool, WL_SHM_POOL_DESTROY) => {
-            handle_shm_pool_destroy(client, message.header.object_id);
-            Ok(())
-        }
-        (WaylandObjectKind::Buffer, WL_BUFFER_DESTROY) => {
-            handle_buffer_destroy(client, message.header.object_id);
-            Ok(())
-        }
-        (WaylandObjectKind::Surface, WL_SURFACE_DESTROY) => {
-            handle_surface_destroy(client, output, message.header.object_id)?;
-            Ok(())
-        }
-        (WaylandObjectKind::Surface, WL_SURFACE_ATTACH) => {
-            handle_surface_attach(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::Surface, WL_SURFACE_DAMAGE) => {
-            handle_surface_damage(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::Surface, WL_SURFACE_FRAME) => {
-            handle_surface_frame(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::Surface, WL_SURFACE_COMMIT) => {
-            handle_surface_commit(client, output, stream, message.header.object_id)
-        }
-        (WaylandObjectKind::XdgWmBase, XDG_WM_BASE_PONG) => {
-            handle_xdg_wm_base_pong(&message.payload)
-        }
-        (WaylandObjectKind::XdgWmBase, XDG_WM_BASE_GET_XDG_SURFACE) => {
-            handle_xdg_wm_base_get_xdg_surface(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::XdgSurface, XDG_SURFACE_DESTROY) => {
-            handle_xdg_surface_destroy(client, output, message.header.object_id)?;
-            Ok(())
-        }
-        (WaylandObjectKind::XdgSurface, XDG_SURFACE_GET_TOPLEVEL) => {
-            handle_xdg_surface_get_toplevel(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::XdgSurface, XDG_SURFACE_ACK_CONFIGURE) => {
-            handle_xdg_surface_ack_configure(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::XdgToplevel, XDG_TOPLEVEL_SET_TITLE) => {
-            handle_xdg_toplevel_set_title(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::XdgToplevel, XDG_TOPLEVEL_SET_APP_ID) => {
-            handle_xdg_toplevel_set_app_id(client, message.header.object_id, &message.payload)
-        }
-        (WaylandObjectKind::XdgToplevel, XDG_TOPLEVEL_DESTROY) => {
-            handle_xdg_toplevel_destroy(client, output, message.header.object_id)?;
-            Ok(())
-        }
-        (WaylandObjectKind::XdgToplevel, opcode) => {
-            println!(
-                "twland: xdg_toplevel request opcode={opcode} ignored for now object={}",
-                message.header.object_id
-            );
-            Ok(())
-        }
-        (kind, opcode) => Err(io::Error::new(
-            ErrorKind::InvalidData,
-            format!("unsupported request kind={kind:?} opcode={opcode}"),
-        )),
     }
+}
+
+/// Log and discard an optional request this compositor does not implement.
+///
+/// Used as the fallback arm for every interface.  A Wayland client may send
+/// optional requests (regions, transforms, touch, popup geometry, ...) that a
+/// minimal compositor can legitimately ignore; tearing down the connection on
+/// them would disconnect every real toolkit client.
+fn ignore_unimplemented(interface: &str, opcode: u16, object_id: u32) -> io::Result<()> {
+    println!(
+        "twland: {interface} request opcode={opcode} ignored (unimplemented) object={object_id}"
+    );
+    Ok(())
 }
 
 fn handle_display_sync(
