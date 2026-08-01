@@ -1683,40 +1683,37 @@ fn redraw_scene(client: &mut Client, output: &mut SoftwareOutput) -> io::Result<
     output.sync()
 }
 
-/// Draw a simple arrow cursor at the pointer position.  The compositor owns
-/// the cursor (Wayland server-side cursor), so this is drawn on top of all
-/// windows after the scene is composited.
+/// Draw an X-shaped cursor at the pointer position.  The compositor owns the
+/// cursor (Wayland server-side cursor), so this is drawn on top of all windows
+/// after the scene is composited.
 fn draw_cursor(output: &mut SoftwareOutput, x: i32, y: i32) -> io::Result<()> {
     let outline = 0xff000000u32;
     let fill = 0xffffffffu32;
 
-    // A small arrow: a filled triangle with a black outline.  Built from
-    // vertical spans so it stays within the framebuffer bounds via fill_rect.
-    // Each row is (y_offset, x_offset, width).
-    const SHAPE: &[(i32, i32, i32)] = &[
+    // An X drawn as two diagonals.  Each row is (y_offset, x_offset, width),
+    // centered on the hotspot at (x, y).  The two arms meet at the center.
+    const ARM: &[(i32, i32, i32)] = &[
         (0, 0, 2),
-        (1, 0, 4),
-        (2, 0, 6),
-        (3, 0, 8),
-        (4, 0, 10),
-        (5, 0, 12),
-        (6, 0, 14),
-        (7, 0, 16),
-        (8, 2, 14),
-        (9, 4, 12),
-        (10, 6, 10),
-        (11, 8, 8),
-        (12, 10, 6),
-        (13, 12, 4),
-        (14, 14, 2),
+        (1, 1, 2),
+        (2, 2, 2),
+        (3, 3, 2),
+        (4, 4, 2),
+        (5, 5, 2),
+        (6, 6, 2),
+        (7, 7, 2),
+        (8, 8, 2),
+        (9, 9, 2),
     ];
 
-    for &(dy, dx, w) in SHAPE {
-        let row_y = y + dy;
-        // Outline (one pixel wider on each side).
-        output.fill_rect(Rect { x: x + dx - 1, y: row_y, width: w + 2, height: 1 }, outline)?;
-        // Fill.
-        output.fill_rect(Rect { x: x + dx, y: row_y, width: w, height: 1 }, fill)?;
+    // Draw both diagonals of the X, plus a black outline around each span.
+    for &(dy, dx, w) in ARM {
+        // Top-left -> bottom-right diagonal.
+        output.fill_rect(Rect { x: x + dx - 1, y: y + dy, width: w + 2, height: 1 }, outline)?;
+        output.fill_rect(Rect { x: x + dx, y: y + dy, width: w, height: 1 }, fill)?;
+        // Top-right -> bottom-left diagonal (mirror x within the 10px span).
+        let mx = 10 - dx - w;
+        output.fill_rect(Rect { x: x + mx - 1, y: y + dy, width: w + 2, height: 1 }, outline)?;
+        output.fill_rect(Rect { x: x + mx, y: y + dy, width: w, height: 1 }, fill)?;
     }
     Ok(())
 }
