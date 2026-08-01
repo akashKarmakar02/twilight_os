@@ -52,7 +52,7 @@
 #define WL_REGISTRY_GLOBAL 0
 #define WL_SHM_FORMAT 0
 #define WL_BUFFER_RELEASE 0
-#define XDG_WM_BASE_PING 1
+#define XDG_WM_BASE_PING 0
 #define XDG_SURFACE_CONFIGURE 0
 #define XDG_TOPLEVEL_CONFIGURE 0
 #define XDG_TOPLEVEL_CLOSE 1
@@ -133,6 +133,23 @@ static int read_exact(int fd, void *buf, size_t len) {
     return 0;
 }
 
+/* Loop over short writes and retry on EINTR, mirroring read_exact.  A partial
+ * send would leave a truncated Wayland message on the wire and desynchronize
+ * framing for every subsequent request on this connection. */
+static int write_exact(int fd, const void *buf, size_t len) {
+    const uint8_t *out = buf;
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = write(fd, out + done, len - done);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        done += (size_t)n;
+    }
+    return 0;
+}
+
 static int send_message(int fd, uint32_t object_id, uint16_t opcode,
                         const uint8_t *payload, size_t payload_len) {
     uint8_t message[256];
@@ -148,10 +165,15 @@ static int send_message(int fd, uint32_t object_id, uint16_t opcode,
     if (payload_len) {
         memcpy(message + offset, payload, payload_len);
     }
-    return write(fd, message, size) == (ssize_t)size ? 0 : -1;
+    return write_exact(fd, message, size);
 }
 
-/* Send a request carrying one file descriptor via SCM_RIGHTS. */
+/* Send a request carrying one file descriptor via SCM_RIGHTS.
+ *
+ * The fd attaches to the first byte of the message and is consumed by the
+ * kernel on the first successful sendmsg.  If that sendmsg accepts only part
+ * of the message, the remaining bytes are flushed with plain write_exact (no
+ * control message) — the fd has already been delivered. */
 static int send_message_with_fd(int sock, uint32_t object_id, uint16_t opcode,
                                 const uint8_t *payload, size_t payload_len,
                                 int pass_fd) {
@@ -186,7 +208,19 @@ static int send_message_with_fd(int sock, uint32_t object_id, uint16_t opcode,
     cmsg->cmsg_type = SCM_RIGHTS;
     memcpy(CMSG_DATA(cmsg), &pass_fd, sizeof(pass_fd));
 
-    return sendmsg(sock, &msg, 0) == (ssize_t)size ? 0 : -1;
+    for (;;) {
+        ssize_t sent = sendmsg(sock, &msg, 0);
+        if (sent < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if ((size_t)sent == size) {
+            return 0;
+        }
+        /* Partial send: the fd was delivered with the first byte.  Flush the
+         * rest as plain bytes — no control message. */
+        return write_exact(sock, message + sent, size - (size_t)sent);
+    }
 }
 
 /* Read one message: header + payload.  Returns 0 on success, -1 on error/EOF. */
@@ -232,9 +266,16 @@ static int get_registry(int fd, Globals *globals) {
     put_u32(payload, &offset, REGISTRY_ID);
     if (send_message(fd, 1, WL_DISPLAY_GET_REGISTRY, payload, offset) < 0) return -1;
 
-    /* twland advertises exactly the globals we need; read until we have all. */
+    /* twland advertises the globals we need plus a couple we ignore
+     * (wl_seat, wl_output).  Bound the loop so a compositor that never
+     * advertises a required global produces an error instead of hanging. */
     int remaining = 3;
+    int max_events = 16;
     while (remaining > 0) {
+        if (max_events-- == 0) {
+            errno = EPROTO;
+            return -1;
+        }
         uint32_t object = 0;
         uint16_t opcode = 0;
         uint8_t event[256];
@@ -480,6 +521,13 @@ static int run_until_close(int fd) {
         }
         if (object == BUFFER_ID && opcode == WL_BUFFER_RELEASE) {
             /* Buffer released by the compositor; safe to reuse. */
+            continue;
+        }
+        if (object == XDG_SURFACE_ID && opcode == XDG_SURFACE_CONFIGURE) {
+            /* Ack every configure, not just the first — the compositor sends
+             * these on resize/maximize/focus changes and requires an ack. */
+            if (payload_len < 4) { errno = EPROTO; return -1; }
+            if (ack_configure(fd, get_u32(payload, 0)) < 0) return -1;
             continue;
         }
         /* Ignore other events. */
