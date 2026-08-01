@@ -29,8 +29,8 @@ pub const BTN_LEFT: u32 = 0x110;
 /// One decoded mouse event.
 #[derive(Debug, Clone, Copy)]
 pub enum MouseEvent {
-    /// Relative motion in device pixels.  PS/2 dy is positive downward, which
-    /// already matches screen coordinates — no inversion needed.
+    /// Relative motion in device pixels. PS/2 Y is positive upward, so it is
+    /// inverted during decoding to match screen coordinates (positive down).
     Motion { dx: i32, dy: i32 },
     /// A button state transition.  Only emitted on an edge (press↔release).
     Button { button: u32, pressed: bool },
@@ -108,7 +108,7 @@ impl Mouse {
         // The data bytes are already in two's complement — cast directly to i8,
         // matching the proven decode in doomgeneric_twilight.c.
         let dx = packet[1] as i8 as i32;
-        let dy = packet[2] as i8 as i32;
+        let dy = -(packet[2] as i8 as i32);
 
         if dx != 0 || dy != 0 {
             if TWLAND_DEBUG_MOUSE {

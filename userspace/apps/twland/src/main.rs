@@ -1914,15 +1914,6 @@ fn send_close_for_surface(
 }
 
 fn poll_input_events(client: &mut Client) -> Vec<TwlandInputEvent> {
-    // Only forward input once a client has bound both pointer and keyboard.
-    if !client
-        .seats
-        .values()
-        .any(|seat| seat.pointer_id.is_some() && seat.keyboard_id.is_some())
-    {
-        return Vec::new();
-    }
-
     let Some(mouse) = client.mouse.as_mut() else {
         return Vec::new();
     };
