@@ -7,7 +7,7 @@
 //! initialized; without `done` conforming clients block waiting for it.
 //!
 //! This module knows only the output geometry (pixel width/height), not the
-//! framebuffer internals, so it stays decoupled from `SoftwareOutput`.
+//! framebuffer internals, so it stays decoupled from the rendering module.
 
 use std::io;
 use std::os::unix::net::UnixStream;

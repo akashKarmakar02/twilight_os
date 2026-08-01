@@ -1,15 +1,16 @@
 use core::ffi::c_void;
 use std::collections::{HashMap, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io::{self, ErrorKind};
-use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr;
 
+mod framebuffer;
 mod input;
 mod output;
 mod wire;
+use framebuffer::{Frame, Framebuffer, Rect};
 use wire::{
     create_empty_memfd, parse_chunk, push_fixed, push_i32, push_u32, push_wayland_string,
     read_i32, read_u32, read_wayland_string, recv_raw, send_message, OwnedFdRaw,
@@ -18,8 +19,6 @@ use wire::{
 
 const RUNTIME_DIR: &str = "/run/user/0";
 const WAYLAND_SOCKET: &str = "/run/user/0/wayland-0";
-const FB_PATH: &str = "/dev/fb0";
-
 const WL_DISPLAY_SYNC: u16 = 0;
 const WL_DISPLAY_GET_REGISTRY: u16 = 1;
 const WL_CALLBACK_DONE: u16 = 0;
@@ -80,12 +79,7 @@ const BORDER_WIDTH: i32 = 2;
 const CLOSE_BUTTON_SIZE: i32 = 18;
 const DESKTOP_BACKGROUND: u32 = 0xff101018;
 
-const FBIOGET_VSCREENINFO: u64 = 0x4600;
-const FBIOGET_FSCREENINFO: u64 = 0x4602;
-const FBIOPAN_DISPLAY: u64 = 0x4606;
-
 const PROT_READ: i32 = 0x1;
-const PROT_WRITE: i32 = 0x2;
 const MAP_SHARED: i32 = 0x01;
 const MAP_FAILED: *mut c_void = usize::MAX as *mut c_void;
 
@@ -122,24 +116,6 @@ const GLOBALS: &[Global] = &[
     },
 ];
 
-#[repr(C)]
-#[derive(Default)]
-struct FbVarScreenInfo {
-    xres: u32,
-    yres: u32,
-    bits_per_pixel: u32,
-    red_offset: u32,
-    green_offset: u32,
-    blue_offset: u32,
-}
-
-#[repr(C)]
-#[derive(Default)]
-struct FbFixScreenInfo {
-    line_length: u32,
-    smem_len: u32,
-}
-
 unsafe extern "C" {
     fn sched_yield() -> i32;
     fn mmap(
@@ -152,7 +128,6 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn munmap(addr: *mut c_void, len: usize) -> i32;
     fn close(fd: i32) -> i32;
-    fn ioctl(fd: i32, request: u64, ...) -> i32;
 }
 
 struct Client {
@@ -377,43 +352,12 @@ struct XdgToplevelState {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Rect {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-}
-
-#[derive(Debug, Clone, Copy)]
 struct Global {
     name: u32,
     interface: &'static str,
     version: u32,
     kind: WaylandObjectKind,
 }
-
-struct SoftwareOutput {
-    _file: File,
-    width: usize,
-    height: usize,
-    stride: usize,
-    map_bytes: usize,
-    pixels: *mut u8,
-}
-
-impl SoftwareOutput {
-    /// The output's pixel dimensions, as `i32` for the Wayland wire format.
-    ///
-    /// Construction (`SoftwareOutput::open`) rejects dimensions that do not
-    /// fit in `i32`, so this never wraps; the `try_from` is a defensive
-    /// re-check that falls back to `i32::MAX` rather than panicking.
-    fn geometry(&self) -> (i32, i32) {
-        let w = i32::try_from(self.width).unwrap_or(i32::MAX);
-        let h = i32::try_from(self.height).unwrap_or(i32::MAX);
-        (w, h)
-    }
-}
-
 
 fn main() {
     if let Err(error) = run() {
@@ -429,8 +373,8 @@ fn run() -> io::Result<()> {
     ensure_dir("/run/user")?;
     ensure_dir(RUNTIME_DIR)?;
 
-    let mut output = SoftwareOutput::open()?;
-    output.clear(DESKTOP_BACKGROUND)?;
+    let mut output = Framebuffer::open()?;
+    output.clear_and_present(DESKTOP_BACKGROUND)?;
     println!("twland: framebuffer cleared");
 
     match fs::remove_file(WAYLAND_SOCKET) {
@@ -451,7 +395,7 @@ fn run() -> io::Result<()> {
                 } else {
                     println!("twland: client disconnected");
                 }
-                let _ = output.clear(DESKTOP_BACKGROUND);
+                let _ = output.clear_and_present(DESKTOP_BACKGROUND);
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,
             Err(error) => eprintln!("twland: accept failed: {error}"),
@@ -475,7 +419,7 @@ fn ensure_dir(path: &str) -> io::Result<()> {
     }
 }
 
-fn handle_client(mut stream: UnixStream, output: &mut SoftwareOutput) -> io::Result<()> {
+fn handle_client(mut stream: UnixStream, output: &mut Framebuffer) -> io::Result<()> {
     let mut client = Client::new();
 
     loop {
@@ -686,7 +630,7 @@ impl Client {
 
 fn dispatch_request(
     client: &mut Client,
-    output: &mut SoftwareOutput,
+    output: &mut Framebuffer,
     stream: &mut UnixStream,
     message: ReceivedMessage,
 ) -> io::Result<()> {
@@ -858,7 +802,7 @@ fn handle_get_registry(
 
 fn handle_registry_bind(
     client: &mut Client,
-    output: &SoftwareOutput,
+    output: &Framebuffer,
     stream: &mut UnixStream,
     registry_id: u32,
     payload: &[u8],
@@ -1119,7 +1063,7 @@ fn handle_buffer_destroy(client: &mut Client, buffer_id: u32) {
 
 fn handle_surface_destroy(
     client: &mut Client,
-    output: &mut SoftwareOutput,
+    output: &mut Framebuffer,
     surface_id: u32,
 ) -> io::Result<()> {
     client.objects.remove(&surface_id);
@@ -1330,10 +1274,9 @@ fn handle_xdg_toplevel_set_title(
         .xdg_surfaces
         .get(&xdg_surface_id)
         .map(|xdg_surface| xdg_surface.wl_surface_id)
+        && let Some(window) = client.window_for_surface_mut(surface_id)
     {
-        if let Some(window) = client.window_for_surface_mut(surface_id) {
-            window.title = title.clone();
-        }
+        window.title = title.clone();
     }
     println!("twland: xdg_toplevel.set_title \"{}\"", title);
     Ok(())
@@ -1357,10 +1300,9 @@ fn handle_xdg_toplevel_set_app_id(
         .xdg_surfaces
         .get(&xdg_surface_id)
         .map(|xdg_surface| xdg_surface.wl_surface_id)
+        && let Some(window) = client.window_for_surface_mut(surface_id)
     {
-        if let Some(window) = client.window_for_surface_mut(surface_id) {
-            window.app_id = app_id.clone();
-        }
+        window.app_id = app_id.clone();
     }
     println!("twland: xdg_toplevel.set_app_id \"{}\"", app_id);
     Ok(())
@@ -1368,7 +1310,7 @@ fn handle_xdg_toplevel_set_app_id(
 
 fn handle_xdg_surface_destroy(
     client: &mut Client,
-    output: &mut SoftwareOutput,
+    output: &mut Framebuffer,
     xdg_surface_id: u32,
 ) -> io::Result<()> {
     client.objects.remove(&xdg_surface_id);
@@ -1392,7 +1334,7 @@ fn handle_xdg_surface_destroy(
 
 fn handle_xdg_toplevel_destroy(
     client: &mut Client,
-    output: &mut SoftwareOutput,
+    output: &mut Framebuffer,
     toplevel_id: u32,
 ) -> io::Result<()> {
     client.objects.remove(&toplevel_id);
@@ -1415,7 +1357,7 @@ fn handle_xdg_toplevel_destroy(
 
 fn handle_surface_commit(
     client: &mut Client,
-    output: &mut SoftwareOutput,
+    output: &mut Framebuffer,
     stream: &mut UnixStream,
     surface_id: u32,
 ) -> io::Result<()> {
@@ -1666,11 +1608,11 @@ fn remove_window_for_surface(client: &mut Client, surface_id: u32) {
     }
 }
 
-fn redraw_scene(client: &mut Client, output: &mut SoftwareOutput) -> io::Result<()> {
-    output.clear(DESKTOP_BACKGROUND)?;
+fn redraw_scene(client: &mut Client, output: &mut Framebuffer) -> io::Result<()> {
+    let mut frame = output.begin_frame(DESKTOP_BACKGROUND)?;
     let windows = client.compositor.windows.clone();
     for window in windows.iter().filter(|window| window.mapped) {
-        draw_window_decoration(output, window)?;
+        draw_window_decoration(&mut frame, window)?;
         let Some(surface) = client.surfaces.get(&window.surface_id).cloned() else {
             continue;
         };
@@ -1695,16 +1637,16 @@ fn redraw_scene(client: &mut Client, output: &mut SoftwareOutput) -> io::Result<
             width: buffer.width,
             height: buffer.height,
         };
-        let _ = blit_shm_buffer_to_output(output, pool, &buffer, &draw_surface, damage)?;
+        let _ = blit_shm_buffer_to_output(&mut frame, pool, &buffer, &draw_surface, damage)?;
     }
-    draw_cursor(output, client.input.pointer_x, client.input.pointer_y)?;
-    output.sync()
+    draw_cursor(&mut frame, client.input.pointer_x, client.input.pointer_y)?;
+    frame.present()
 }
 
 /// Draw an X-shaped cursor at the pointer position.  The compositor owns the
 /// cursor (Wayland server-side cursor), so this is drawn on top of all windows
 /// after the scene is composited.
-fn draw_cursor(output: &mut SoftwareOutput, x: i32, y: i32) -> io::Result<()> {
+fn draw_cursor(output: &mut Frame<'_>, x: i32, y: i32) -> io::Result<()> {
     let outline = 0xff000000u32;
     let fill = 0xffffffffu32;
 
@@ -1736,7 +1678,7 @@ fn draw_cursor(output: &mut SoftwareOutput, x: i32, y: i32) -> io::Result<()> {
     Ok(())
 }
 
-fn draw_window_decoration(output: &mut SoftwareOutput, window: &Window) -> io::Result<()> {
+fn draw_window_decoration(output: &mut Frame<'_>, window: &Window) -> io::Result<()> {
     if !window.decoration.enabled {
         return Ok(());
     }
@@ -1782,7 +1724,7 @@ fn draw_window_decoration(output: &mut SoftwareOutput, window: &Window) -> io::R
     Ok(())
 }
 
-fn draw_close_glyph(output: &mut SoftwareOutput, rect: Rect) -> io::Result<()> {
+fn draw_close_glyph(output: &mut Frame<'_>, rect: Rect) -> io::Result<()> {
     for i in 4..(rect.width - 4).max(4) {
         output.fill_rect(
             Rect {
@@ -1863,7 +1805,7 @@ fn rect_contains(rect: Rect, x: i32, y: i32) -> bool {
 fn focus_window(
     client: &mut Client,
     stream: &mut UnixStream,
-    output: &mut SoftwareOutput,
+    output: &mut Framebuffer,
     surface_id: u32,
     send_configure: bool,
 ) -> io::Result<()> {
@@ -1961,7 +1903,7 @@ fn poll_input_events(client: &mut Client) -> Vec<TwlandInputEvent> {
 fn dispatch_input_event(
     client: &mut Client,
     stream: &mut UnixStream,
-    output: &mut SoftwareOutput,
+    output: &mut Framebuffer,
     event: TwlandInputEvent,
 ) -> io::Result<()> {
     match event {
@@ -1985,12 +1927,12 @@ fn dispatch_input_event(
 fn dispatch_pointer_position(
     client: &mut Client,
     stream: &mut UnixStream,
-    output: &mut SoftwareOutput,
+    output: &mut Framebuffer,
     x: i32,
     y: i32,
 ) -> io::Result<()> {
-    let max_x = output.width.saturating_sub(1) as i32;
-    let max_y = output.height.saturating_sub(1) as i32;
+    let max_x = output.width().saturating_sub(1) as i32;
+    let max_y = output.height().saturating_sub(1) as i32;
     client.input.pointer_x = x.clamp(0, max_x);
     client.input.pointer_y = y.clamp(0, max_y);
 
@@ -2056,7 +1998,7 @@ fn dispatch_pointer_position(
 fn dispatch_pointer_button(
     client: &mut Client,
     stream: &mut UnixStream,
-    output: &mut SoftwareOutput,
+    output: &mut Framebuffer,
     button: u32,
     pressed: bool,
 ) -> io::Result<()> {
@@ -2066,12 +2008,10 @@ fn dispatch_pointer_button(
         client.input.buttons &= !1;
     }
 
-    if !pressed {
-        if let Some(drag) = client.compositor.drag.take() {
-            println!("twland: end drag surface={}", drag.surface_id);
-            redraw_scene(client, output)?;
-            return Ok(());
-        }
+    if !pressed && let Some(drag) = client.compositor.drag.take() {
+        println!("twland: end drag surface={}", drag.surface_id);
+        redraw_scene(client, output)?;
+        return Ok(());
     }
 
     let hit = hit_test(
@@ -2464,7 +2404,7 @@ fn send_keyboard_key(
 }
 
 fn blit_shm_buffer_to_output(
-    output: &mut SoftwareOutput,
+    output: &mut Frame<'_>,
     pool: &ShmPoolState,
     buffer: &BufferState,
     surface: &SurfaceState,
@@ -2497,7 +2437,7 @@ fn blit_shm_buffer_to_output(
         src_y0 -= dst_y0;
         dst_y0 = 0;
     }
-    if dst_x0 >= output.width as i32 || dst_y0 >= output.height as i32 {
+    if dst_x0 >= output.width() as i32 || dst_y0 >= output.height() as i32 {
         return Ok(Rect {
             x: 0,
             y: 0,
@@ -2506,8 +2446,8 @@ fn blit_shm_buffer_to_output(
         });
     }
 
-    let max_width = (output.width as i32 - dst_x0).max(0);
-    let max_height = (output.height as i32 - dst_y0).max(0);
+    let max_width = (output.width() as i32 - dst_x0).max(0);
+    let max_height = (output.height() as i32 - dst_y0).max(0);
     src_x1 = src_x1.min(src_x0 + max_width);
     src_y1 = src_y1.min(src_y0 + max_height);
     let width = src_x1 - src_x0;
@@ -2528,32 +2468,43 @@ fn blit_shm_buffer_to_output(
     let width = width as usize;
     let height = height as usize;
     let stride = buffer.stride as usize;
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "source row size overflow"))?;
+
+    if pool.mapped_addr.is_null() || pool.size == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "shared-memory pool is not mapped",
+        ));
+    }
+    // SAFETY: A live ShmPoolState owns this read-only mmap for `pool.size`
+    // bytes. The pool cannot be destroyed while it is immutably borrowed here.
+    let pool_bytes = unsafe { std::slice::from_raw_parts(pool.mapped_addr, pool.size) };
 
     for row in 0..height {
+        let src_row = src_y0
+            .checked_add(row)
+            .and_then(|y| y.checked_mul(stride))
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "source row overflow"))?;
         let src_offset = buffer
             .offset
-            .checked_add((src_y0 + row) * stride)
+            .checked_add(src_row)
             .and_then(|offset| offset.checked_add(src_x0 * 4))
             .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "source offset overflow"))?;
-        let dst_offset = (dst_y0 + row)
-            .checked_mul(output.stride)
-            .and_then(|offset| offset.checked_add(dst_x0 * 4))
-            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "destination offset overflow"))?;
-        let row_bytes = width * 4;
-        if src_offset + row_bytes > pool.size || dst_offset + row_bytes > output.map_bytes {
-            return Err(io::Error::new(ErrorKind::InvalidData, "blit out of bounds"));
+        let src_end = src_offset
+            .checked_add(row_bytes)
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "source end overflow"))?;
+        if src_end > pool_bytes.len() {
+            return Err(io::Error::new(ErrorKind::InvalidData, "blit source out of bounds"));
         }
 
-        // SAFETY: Bounds checks above prove both source and destination row
-        // ranges are within their mmap regions. The framebuffer and memfd
-        // mappings are distinct, non-overlapping mappings.
-        unsafe {
-            ptr::copy_nonoverlapping(
-                pool.mapped_addr.add(src_offset),
-                output.pixels.add(dst_offset),
-                row_bytes,
-            );
-        }
+        let dst_offset = dst_y0
+            .checked_add(row)
+            .and_then(|y| y.checked_mul(output.stride()))
+            .and_then(|offset| offset.checked_add(dst_x0 * 4))
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "destination offset overflow"))?;
+        output.copy_bytes(dst_offset, &pool_bytes[src_offset..src_end])?;
     }
 
     println!("twland: blit {}x{} at {},{}", width, height, dst_x0, dst_y0);
@@ -2577,167 +2528,6 @@ fn unsafe_mmap_shm(fd: i32, size: usize) -> io::Result<*mut u8> {
     }
 }
 
-impl SoftwareOutput {
-    fn open() -> io::Result<Self> {
-        let file = OpenOptions::new().read(true).write(true).open(FB_PATH)?;
-        let fd = file.as_raw_fd();
-        let mut var = FbVarScreenInfo::default();
-        let mut fix = FbFixScreenInfo::default();
-
-        // SAFETY: ioctl writes into valid framebuffer info structs for a live
-        // /dev/fb0 fd. Constants match Twilight's framebuffer device ABI.
-        let var_result = unsafe { ioctl(fd, FBIOGET_VSCREENINFO, &mut var) };
-        if var_result < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: Same as above for fixed screen information.
-        let fix_result = unsafe { ioctl(fd, FBIOGET_FSCREENINFO, &mut fix) };
-        if fix_result < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if var.xres == 0 || var.yres == 0 || var.bits_per_pixel != 32 {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "unsupported framebuffer mode {}x{} {}bpp",
-                    var.xres, var.yres, var.bits_per_pixel
-                ),
-            ));
-        }
-        // Reject dimensions that do not fit in i32, so geometry() can report
-        // valid Wayland mode sizes without an unchecked cast wrapping negative.
-        if i32::try_from(var.xres).is_err() || i32::try_from(var.yres).is_err() {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "framebuffer dimensions {}x{} exceed i32 range",
-                    var.xres, var.yres
-                ),
-            ));
-        }
-
-        let map_bytes = fix.smem_len as usize;
-        let expected = (var.yres as usize)
-            .checked_mul(fix.line_length as usize)
-            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "framebuffer size overflow"))?;
-        if map_bytes < expected {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "framebuffer mapping is smaller than geometry",
-            ));
-        }
-
-        // SAFETY: The framebuffer fd supports MAP_SHARED mmap. Pointer is
-        // checked against MAP_FAILED and owned by SoftwareOutput until Drop.
-        let pixels = unsafe {
-            mmap(
-                ptr::null_mut(),
-                map_bytes,
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        if pixels == MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-
-        println!(
-            "twland: framebuffer {}x{} stride={} bytes",
-            var.xres, var.yres, fix.line_length
-        );
-
-        Ok(Self {
-            _file: file,
-            width: var.xres as usize,
-            height: var.yres as usize,
-            stride: fix.line_length as usize,
-            map_bytes,
-            pixels: pixels.cast(),
-        })
-    }
-
-    fn clear(&mut self, color: u32) -> io::Result<()> {
-        for y in 0..self.height {
-            let row_offset = y
-                .checked_mul(self.stride)
-                .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "row offset overflow"))?;
-            // SAFETY: row_offset is inside the framebuffer mapping and each row
-            // writes exactly `width * 4` bytes, which is <= stride by fb init.
-            let row = unsafe {
-                std::slice::from_raw_parts_mut(
-                    self.pixels.add(row_offset).cast::<u32>(),
-                    self.width,
-                )
-            };
-            row.fill(color);
-        }
-        self.sync()
-    }
-
-    fn fill_rect(&mut self, rect: Rect, color: u32) -> io::Result<()> {
-        let x0 = rect.x.max(0) as usize;
-        let y0 = rect.y.max(0) as usize;
-        let x1 = rect
-            .x
-            .saturating_add(rect.width)
-            .clamp(0, self.width as i32) as usize;
-        let y1 = rect
-            .y
-            .saturating_add(rect.height)
-            .clamp(0, self.height as i32) as usize;
-        if x1 <= x0 || y1 <= y0 {
-            return Ok(());
-        }
-
-        for y in y0..y1 {
-            let offset = y
-                .checked_mul(self.stride)
-                .and_then(|row| row.checked_add(x0 * 4))
-                .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "fill offset overflow"))?;
-            let len = x1 - x0;
-            if offset + len * 4 > self.map_bytes {
-                return Err(io::Error::new(ErrorKind::InvalidData, "fill out of bounds"));
-            }
-            // SAFETY: The row slice is fully bounds-checked against the mmap
-            // size above and is within the framebuffer's 32-bit pixel format.
-            let row = unsafe {
-                std::slice::from_raw_parts_mut(self.pixels.add(offset).cast::<u32>(), len)
-            };
-            row.fill(color);
-        }
-        Ok(())
-    }
-
-    fn sync(&mut self) -> io::Result<()> {
-        // SAFETY: ioctl is called on the live framebuffer fd and does not read
-        // the null third argument for FBIOPAN_DISPLAY in Twilight.
-        let result = unsafe {
-            ioctl(
-                self._file.as_raw_fd(),
-                FBIOPAN_DISPLAY,
-                ptr::null::<c_void>(),
-            )
-        };
-        if result < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Drop for SoftwareOutput {
-    fn drop(&mut self) {
-        if !self.pixels.is_null() && self.map_bytes != 0 {
-            // SAFETY: `pixels` and `map_bytes` come from a successful mmap in
-            // SoftwareOutput::open and are unmapped exactly once here.
-            let _ = unsafe { munmap(self.pixels.cast(), self.map_bytes) };
-        }
-    }
-}
-
 impl Drop for ShmPoolState {
     fn drop(&mut self) {
         if !self.mapped_addr.is_null() && self.size != 0 {
@@ -2749,28 +2539,6 @@ impl Drop for ShmPoolState {
             // SAFETY: fd is owned by this pool after OwnedFdRaw::into_raw.
             let _ = unsafe { close(self.fd) };
             self.fd = -1;
-        }
-    }
-}
-
-
-impl Rect {
-    fn union(self, other: Rect) -> Rect {
-        let x0 = self.x.min(other.x);
-        let y0 = self.y.min(other.y);
-        let x1 = self
-            .x
-            .saturating_add(self.width)
-            .max(other.x.saturating_add(other.width));
-        let y1 = self
-            .y
-            .saturating_add(self.height)
-            .max(other.y.saturating_add(other.height));
-        Rect {
-            x: x0,
-            y: y0,
-            width: x1.saturating_sub(x0),
-            height: y1.saturating_sub(y0),
         }
     }
 }
