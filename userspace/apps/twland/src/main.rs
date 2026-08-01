@@ -1637,7 +1637,7 @@ fn redraw_scene(client: &mut Client, output: &mut Framebuffer) -> io::Result<()>
             width: buffer.width,
             height: buffer.height,
         };
-        let _ = blit_shm_buffer_to_output(&mut frame, pool, &buffer, &draw_surface, damage)?;
+        blit_shm_buffer_to_output(&mut frame, pool, &buffer, &draw_surface, damage)?;
     }
     draw_cursor(&mut frame, client.input.pointer_x, client.input.pointer_y)?;
     frame.present()
@@ -2478,10 +2478,6 @@ fn blit_shm_buffer_to_output(
             "shared-memory pool is not mapped",
         ));
     }
-    // SAFETY: A live ShmPoolState owns this read-only mmap for `pool.size`
-    // bytes. The pool cannot be destroyed while it is immutably borrowed here.
-    let pool_bytes = unsafe { std::slice::from_raw_parts(pool.mapped_addr, pool.size) };
-
     for row in 0..height {
         let src_row = src_y0
             .checked_add(row)
@@ -2495,8 +2491,11 @@ fn blit_shm_buffer_to_output(
         let src_end = src_offset
             .checked_add(row_bytes)
             .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "source end overflow"))?;
-        if src_end > pool_bytes.len() {
-            return Err(io::Error::new(ErrorKind::InvalidData, "blit source out of bounds"));
+        if src_end > pool.size {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "blit source out of bounds",
+            ));
         }
 
         let dst_offset = dst_y0
@@ -2504,7 +2503,14 @@ fn blit_shm_buffer_to_output(
             .and_then(|y| y.checked_mul(output.stride()))
             .and_then(|offset| offset.checked_add(dst_x0 * 4))
             .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "destination offset overflow"))?;
-        output.copy_bytes(dst_offset, &pool_bytes[src_offset..src_end])?;
+        // SAFETY: ShmPoolState owns a shared, readable mapping of `pool.size`
+        // bytes and cannot be destroyed during this borrow. The bounds check
+        // above proves this row is readable. Keeping the source as a raw
+        // pointer avoids claiming that client-writable shared memory is an
+        // immutable Rust slice.
+        unsafe {
+            output.copy_from_ptr(dst_offset, pool.mapped_addr.add(src_offset), row_bytes)?;
+        }
     }
 
     println!("twland: blit {}x{} at {},{}", width, height, dst_x0, dst_y0);
