@@ -20,6 +20,8 @@ const PS2_PACKET_SIZE: usize = 3;
 /// `O_NONBLOCK` from `fcntl.h` (Linux).  twland has no `libc` dependency, so
 /// the raw constant is used, matching the rest of the crate's FFI style.
 const O_NONBLOCK: i32 = 0o4000;
+/// Log raw mouse packets for debugging input.
+const TWLAND_DEBUG_MOUSE: bool = true;
 
 /// Linux input button codes (from `linux/input-event-codes.h`).
 pub const BTN_LEFT: u32 = 0x110;
@@ -96,35 +98,35 @@ impl Mouse {
     ///         bit 1 = right button
     ///         bit 2 = middle button
     ///         bit 3 = always 1 (sync bit)
-    ///         bit 4 = x sign
-    ///         bit 5 = y sign
-    ///         bit 6 = x overflow
-    ///         bit 7 = y overflow
-    /// byte 1: dx (9-bit signed via bit 4)
-    /// byte 2: dy (9-bit signed via bit 5)
+    ///         bit 4 = x sign (redundant — byte 1 is already two's complement)
+    ///         bit 5 = y sign (redundant — byte 2 is already two's complement)
+    /// byte 1: dx (signed 8-bit, two's complement)
+    /// byte 2: dy (signed 8-bit, two's complement)
     /// ```
     fn decode(&mut self, packet: &[u8; PS2_PACKET_SIZE], out: &mut Vec<MouseEvent>) {
         let flags = packet[0];
-        let dx = ps2_axis(packet[1], flags & 0x10 != 0);
-        let dy = ps2_axis(packet[2], flags & 0x20 != 0);
+        // The data bytes are already in two's complement — cast directly to i8,
+        // matching the proven decode in doomgeneric_twilight.c.
+        let dx = packet[1] as i8 as i32;
+        let dy = packet[2] as i8 as i32;
 
         if dx != 0 || dy != 0 {
+            if TWLAND_DEBUG_MOUSE {
+                eprintln!("twland: mouse dx={dx} dy={dy} flags=0x{flags:02x}");
+            }
             out.push(MouseEvent::Motion { dx, dy });
         }
 
         let left_pressed = flags & 0x01 != 0;
         if left_pressed != self.left_pressed {
             self.left_pressed = left_pressed;
+            if TWLAND_DEBUG_MOUSE {
+                eprintln!("twland: mouse left={left_pressed}");
+            }
             out.push(MouseEvent::Button {
                 button: BTN_LEFT,
                 pressed: left_pressed,
             });
         }
     }
-}
-
-/// Reassemble a 9-bit signed PS/2 axis value from its byte and sign bit.
-fn ps2_axis(byte: u8, negative: bool) -> i32 {
-    let value = i32::from(byte);
-    if negative { value - 256 } else { value }
 }
