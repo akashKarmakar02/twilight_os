@@ -177,6 +177,10 @@ struct Client {
     /// Real mouse reader (`/dev/input/mice`), opened non-blocking.  `None` when
     /// no mouse is present, in which case `poll_input_events` produces nothing.
     mouse: Option<input::Mouse>,
+    /// Real keyboard reader (`/dev/input/event0`), opened non-blocking.  `None`
+    /// when no keyboard is present, in which case `poll_input_events` produces
+    /// no key events.
+    keyboard: Option<input::Keyboard>,
     input: InputState,
     compositor: CompositorState,
     next_serial: u32,
@@ -343,8 +347,8 @@ enum TwlandInputEvent {
     #[allow(dead_code)]
     PointerAbsolute { x: i32, y: i32 },
     PointerButton { button: u32, pressed: bool },
-    /// Produced by the keyboard reader (issue #50); dispatched already.
-    #[allow(dead_code)]
+    /// Produced by the keyboard reader (`/dev/input/event0`); forwarded to the
+    /// focused surface as `wl_keyboard.key`.
     Key { keycode: u32, pressed: bool },
 }
 
@@ -563,6 +567,20 @@ impl Client {
                 }
                 Err(error) => {
                     eprintln!("twland: failed to open mouse: {error}");
+                    None
+                }
+            },
+            keyboard: match input::Keyboard::open() {
+                Ok(Some(keyboard)) => {
+                    println!("twland: keyboard opened on {}", input::EVENT0_PATH);
+                    Some(keyboard)
+                }
+                Ok(None) => {
+                    println!("twland: no keyboard at {}", input::EVENT0_PATH);
+                    None
+                }
+                Err(error) => {
+                    eprintln!("twland: failed to open keyboard: {error}");
                     None
                 }
             },
@@ -1914,27 +1932,30 @@ fn send_close_for_surface(
 }
 
 fn poll_input_events(client: &mut Client) -> Vec<TwlandInputEvent> {
-    let Some(mouse) = client.mouse.as_mut() else {
-        return Vec::new();
-    };
+    let mut events = Vec::new();
 
-    let raw_events = match mouse.poll() {
-        Ok(events) => events,
-        Err(error) => {
-            eprintln!("twland: mouse read error: {error}");
-            return Vec::new();
+    if let Some(mouse) = client.mouse.as_mut() {
+        match mouse.poll() {
+            Ok(raw) => events.extend(raw.into_iter().map(|event| match event {
+                input::MouseEvent::Motion { dx, dy } => TwlandInputEvent::PointerMove { dx, dy },
+                input::MouseEvent::Button { button, pressed } => {
+                    TwlandInputEvent::PointerButton { button, pressed }
+                }
+            })),
+            Err(error) => eprintln!("twland: mouse read error: {error}"),
         }
-    };
+    }
 
-    raw_events
-        .into_iter()
-        .map(|event| match event {
-            input::MouseEvent::Motion { dx, dy } => TwlandInputEvent::PointerMove { dx, dy },
-            input::MouseEvent::Button { button, pressed } => {
-                TwlandInputEvent::PointerButton { button, pressed }
-            }
-        })
-        .collect()
+    if let Some(keyboard) = client.keyboard.as_mut() {
+        match keyboard.poll() {
+            Ok(raw) => events.extend(raw.into_iter().map(
+                |input::KeyboardEvent { keycode, pressed }| TwlandInputEvent::Key { keycode, pressed },
+            )),
+            Err(error) => eprintln!("twland: keyboard read error: {error}"),
+        }
+    }
+
+    events
 }
 
 fn dispatch_input_event(
