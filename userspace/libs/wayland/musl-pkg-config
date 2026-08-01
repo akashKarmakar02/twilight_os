@@ -1,0 +1,16 @@
+#!/bin/sh
+# Cross pkg-config for musl targets.
+#
+# meson's cross-build needs the *musl* libffi (a cross dependency) but the
+# *host* wayland-scanner (a native build dependency). A plain `pkg-config` call
+# resolves against the host glibc sysroot, so it would find the glibc libffi
+# and link the wrong libc. This wrapper restricts the search path to the musl
+# sysroot inside the twilight_os rootfs and sets PKG_CONFIG_SYSROOT_DIR so the
+# .pc files' prefix=/usr/x86_64-linux-musl resolves under that rootfs tree.
+#
+# Location: userspace/libs/wayland/musl-pkg-config
+# Rootfs:   <repo-root>/rootfs  (three levels up from this file)
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)/rootfs"
+export PKG_CONFIG_LIBDIR="$ROOT/usr/x86_64-linux-musl/lib64/pkgconfig"
+export PKG_CONFIG_SYSROOT_DIR="$ROOT"
+exec pkg-config "$@"

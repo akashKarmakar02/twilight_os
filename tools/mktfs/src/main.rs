@@ -12,7 +12,10 @@ const IMAGE_HEADROOM: usize = 16 * 1024 * 1024;
 const MAGIC: u32 = u32::from_le_bytes(*b"TFS0");
 const MODE_DIR: u16 = 0o040000;
 const MODE_FILE: u16 = 0o100000;
+const MODE_SYMLINK: u16 = 0o120000;
 const MODE_PERM_MASK: u16 = 0o7777;
+const IFLAG_INLINE_DATA: u32 = 1 << 3;
+const INODE_INLINE_BYTES: usize = 64;
 const DIRECT_SLOTS: usize = 6;
 const POINTERS_PER_BLOCK: usize = BLOCK_SIZE / 4;
 
@@ -97,6 +100,7 @@ impl Default for Inode {
 enum NodeKind {
     Directory,
     File(PathBuf),
+    Symlink(PathBuf),
 }
 
 #[derive(Clone)]
@@ -127,7 +131,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .filter_map(|node| match &node.kind {
             NodeKind::File(path) => fs::metadata(path).ok().map(|meta| meta.len() as usize),
-            NodeKind::Directory => None,
+            // Symlinks store their target inline in the inode — no data zones.
+            NodeKind::Directory | NodeKind::Symlink(_) => None,
         })
         .sum::<usize>();
     let mut image_size =
@@ -179,7 +184,7 @@ fn collect_directory(
     for entry in entries {
         let metadata = entry.metadata()?;
         let file_type = metadata.file_type();
-        if !file_type.is_dir() && !file_type.is_file() {
+        if !file_type.is_dir() && !file_type.is_file() && !file_type.is_symlink() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported file type: {}", entry.path().display()),
@@ -204,6 +209,8 @@ fn collect_directory(
             mode: metadata.permissions().mode() as u16 & MODE_PERM_MASK,
             kind: if file_type.is_dir() {
                 NodeKind::Directory
+            } else if file_type.is_symlink() {
+                NodeKind::Symlink(entry.path())
             } else {
                 NodeKind::File(entry.path())
             },
@@ -278,6 +285,7 @@ fn build_image(nodes: &[Node], size: usize) -> Result<Vec<u8>, BuildError> {
         let inode = match &node.kind {
             NodeKind::Directory => builder.write_directory(nodes, index)?,
             NodeKind::File(path) => builder.write_file(path)?,
+            NodeKind::Symlink(path) => builder.write_symlink(path)?,
         };
         inodes[index] = inode;
     }
@@ -383,6 +391,25 @@ impl Builder {
                 }
             }
         }
+        Ok(inode)
+    }
+
+    fn write_symlink(&mut self, source: &Path) -> Result<Inode, BuildError> {
+        let target = fs::read_link(source)?;
+        let target_string = target.to_string_lossy();
+        let target_bytes = target_string.as_bytes();
+        if target_bytes.len() > INODE_INLINE_BYTES {
+            return Err(BuildError::Invalid(
+                "symlink target exceeds TwilightFS inline inode capacity",
+            ));
+        }
+        let mut inode = Inode {
+            mode: MODE_SYMLINK | 0o777,
+            size: target_bytes.len() as u64,
+            flags: IFLAG_INLINE_DATA,
+            ..Inode::default()
+        };
+        inode.inline_data[..target_bytes.len()].copy_from_slice(target_bytes);
         Ok(inode)
     }
 

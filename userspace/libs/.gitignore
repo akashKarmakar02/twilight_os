@@ -1,0 +1,4 @@
+# Downloaded upstream sources and build artifacts for third-party libs.
+# The Makefiles download pinned, sha256-verified release tarballs on demand.
+*/build/
+musl-cross.ini

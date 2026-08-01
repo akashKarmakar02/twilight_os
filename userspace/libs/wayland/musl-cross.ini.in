@@ -1,0 +1,18 @@
+# Meson cross-file for building wayland (and other musl libs) with musl-gcc.
+#
+# The cross pkg-config wrapper below restricts dependency resolution to the musl
+# sysroot inside the twilight_os rootfs, so meson finds the musl libffi (a cross
+# dependency) instead of the host glibc libffi. The host wayland-scanner is a
+# *native* build dependency and is resolved separately by meson's native machine
+# lookup (it falls back to the system PATH), so it is intentionally not listed
+# here.
+
+[binaries]
+c = 'musl-gcc'
+pkg-config = '@CROSSFILE_DIR@/musl-pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
