@@ -661,7 +661,7 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
             let start = match file_type {
                 FileType::File if append => node.metadata.size,
                 FileType::File | FileType::BlockDevice => seek,
-                FileType::Dir | FileType::CharDevice | FileType::Socket => 0,
+                FileType::Dir | FileType::CharDevice | FileType::Socket | FileType::Symlink => 0,
             };
             let end = start.saturating_add(buf.len());
 
@@ -2228,6 +2228,7 @@ fn dt_from_filetype(ft: FileType) -> u8 {
     match ft {
         FileType::Dir => 4,
         FileType::File => 8,
+        FileType::Symlink => 10,
         FileType::CharDevice => 2,
         FileType::BlockDevice => 6,
         FileType::Socket => 12,

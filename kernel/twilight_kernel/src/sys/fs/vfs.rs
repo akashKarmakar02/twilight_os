@@ -15,6 +15,7 @@ pub static mut VFS: RwLock<Vfs> = RwLock::new(Vfs::new());
 pub enum FileType {
     File,
     Dir,
+    Symlink,
     CharDevice,
     BlockDevice,
     Socket,

@@ -615,24 +615,70 @@ impl TwilightFs {
             return Ok(ino);
         }
 
-        let mut current_inode = 1;
+        // Walk the path component by component, following symlinks. `pending`
+        // holds the components left to resolve; when a component is a symlink
+        // its target is split into components and pushed to the front (relative
+        // targets continue from the current directory, absolute targets from
+        // root). `symlink_count` bounds recursion to break symlink loops.
+        const MAX_SYMLINKS: usize = 40;
+        let mut symlink_count = 0usize;
 
-        let path_parts = canonical.split('/').filter(|s| !s.is_empty());
+        let mut current_inode = 1u32; // root
         let mut prefix = String::from("/");
+        let mut pending: Vec<String> = canonical
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
 
-        for part in path_parts {
+        while let Some(part) = pending.first().cloned() {
             let next = self
-                .find_dir_entry(current_inode, part)
+                .find_dir_entry(current_inode, &part)
                 .map_err(|_| FsError::InvalidInode)?;
 
             let Some(inode) = next else {
                 return Err(FileNotFound);
             };
 
+            // Advance past this component.
+            pending.remove(0);
             if prefix.len() > 1 {
                 prefix.push('/');
             }
-            prefix.push_str(part);
+            prefix.push_str(&part);
+
+            // If it's a symlink, read the target and splice it in.
+            let inode_data = self.read_inode(inode).map_err(|_| FsError::InvalidInode)?;
+            if inode_data.is_symlink() {
+                symlink_count += 1;
+                if symlink_count > MAX_SYMLINKS {
+                    return Err(FsError::InvalidPath);
+                }
+                let target_bytes = inode_data.inline_data_bytes().to_vec();
+                let target = core::str::from_utf8(&target_bytes)
+                    .map_err(|_| FsError::InvalidPath)?;
+                if target.is_empty() {
+                    return Err(FsError::InvalidPath);
+                }
+                let target_parts: Vec<String> = target
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                if target.starts_with('/') {
+                    // Absolute target: restart from root.
+                    current_inode = 1;
+                    prefix.clear();
+                    prefix.push('/');
+                }
+                // Relative target: continue from the current directory, so
+                // `current_inode` stays as the directory we just walked into.
+                // Prepend the target components to the remaining work.
+                pending = target_parts.into_iter().chain(pending.into_iter()).collect();
+                self.shared.insert_lookup(prefix.clone(), inode);
+                continue;
+            }
+
             self.shared.insert_lookup(prefix.clone(), inode);
             current_inode = inode;
         }
@@ -1981,6 +2027,11 @@ impl TwilightFs {
     pub fn read_file(&mut self, inode_num: u32) -> Result<Vec<u8>, &'static str> {
         let inode = self.read_inode(inode_num)?;
 
+        // Inline data (symlink targets, small files) is stored in the inode.
+        if (inode.flags & inode::IFLAG_INLINE_DATA) != 0 {
+            return Ok(inode.inline_data_bytes().to_vec());
+        }
+
         let mut content = Vec::new();
         let mut remaining = inode.size as usize;
         let block_size = self.superblock.block_size as usize;
@@ -2262,6 +2313,8 @@ impl FileSystem for TwilightFs {
         if let Ok(inode) = self.read_inode(inode_no) {
             let file_type = if inode.is_dir() {
                 FileType::Dir
+            } else if inode.is_symlink() {
+                FileType::Symlink
             } else if inode.is_socket() {
                 FileType::Socket
             } else {

@@ -14,6 +14,7 @@ pub const MODE_TYPE_MASK: u16 = 0xF000;
 pub const MODE_PERM_MASK: u16 = 0x01FF; // rwxrwxrwx
 pub const MODE_DIR: u16 = 0o040000;
 pub const MODE_FILE: u16 = 0o100000;
+pub const MODE_SYMLINK: u16 = 0o120000;
 pub const MODE_SOCKET: u16 = 0o140000;
 
 pub type InodeFlags = u32;
@@ -132,6 +133,12 @@ impl Inode {
         Self::base(MODE_SOCKET | (perms & MODE_PERM_MASK), now)
     }
 
+    pub fn new_symlink(now: u64) -> Self {
+        let mut inode = Self::base(MODE_SYMLINK | 0o777, now);
+        inode.flags |= IFLAG_INLINE_DATA;
+        inode
+    }
+
     #[inline]
     pub fn is_dir(&self) -> bool {
         (self.mode & MODE_TYPE_MASK) == MODE_DIR
@@ -143,8 +150,21 @@ impl Inode {
     }
 
     #[inline]
+    pub fn is_symlink(&self) -> bool {
+        (self.mode & MODE_TYPE_MASK) == MODE_SYMLINK
+    }
+
+    #[inline]
     pub fn is_socket(&self) -> bool {
         (self.mode & MODE_TYPE_MASK) == MODE_SOCKET
+    }
+
+    /// The inline payload, valid when `IFLAG_INLINE_DATA` is set. For symlinks
+    /// this is the link target; for small files, the file body. Length is `size`.
+    #[inline]
+    pub fn inline_data_bytes(&self) -> &[u8] {
+        let len = (self.size as usize).min(INODE_INLINE_BYTES);
+        &self.inline_data[..len]
     }
 
     #[inline]
@@ -215,13 +235,21 @@ unsafe impl Sync for TFSVfsNode {}
 #[allow(dead_code)]
 impl VfsNodeOps for TFSVfsNode {
     fn read(&self, device: &mut BlockDev, lba: usize, buf: &mut [u8]) -> Result<usize, ()> {
-        let block_size = 2048;
         let file_size = self.inode.size as usize;
 
         if lba >= file_size {
             return Ok(0);
         }
 
+        // Inline data (symlink targets, small files) lives in the inode.
+        if (self.inode.flags & IFLAG_INLINE_DATA) != 0 {
+            let data = self.inode.inline_data_bytes();
+            let n = core::cmp::min(buf.len(), data.len().saturating_sub(lba));
+            buf[..n].copy_from_slice(&data[lba..lba + n]);
+            return Ok(n);
+        }
+
+        let block_size = 2048;
         let max_to_read = core::cmp::min(file_size - lba, buf.len());
 
         let should_cache = file_size > 0 && file_size <= super::FILE_CACHE_MAX_FILE_BYTES;
@@ -903,6 +931,13 @@ impl TFSVfsNode {
 impl TFSVfsNode {
     fn read_all_file(&self, device: &mut BlockDev) -> Result<Vec<u8>, ()> {
         let file_size = self.inode.size as usize;
+
+        // Inline data (symlink targets, small files) is stored in the inode
+        // itself — no data zones to read.
+        if (self.inode.flags & IFLAG_INLINE_DATA) != 0 {
+            return Ok(self.inode.inline_data_bytes().to_vec());
+        }
+
         let mut out = vec![0u8; file_size];
 
         let block_size = 2048;
