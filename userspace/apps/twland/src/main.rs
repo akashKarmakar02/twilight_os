@@ -7,6 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr;
 
+mod input;
 mod output;
 mod wire;
 use wire::{
@@ -71,8 +72,6 @@ const WL_POINTER_BUTTON_STATE_PRESSED: u32 = 1;
 const WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP: u32 = 0;
 const WL_KEYBOARD_KEY_STATE_RELEASED: u32 = 0;
 const WL_KEYBOARD_KEY_STATE_PRESSED: u32 = 1;
-const BTN_LEFT: u32 = 0x110;
-const KEY_SPACE: u32 = 57;
 const TWLAND_ALLOW_ROLELESS_DEBUG_SURFACES: bool = false;
 const TWLAND_DEBUG_INPUT: bool = true;
 const TWLAND_DEBUG_POINTER_MOTION: bool = false;
@@ -80,7 +79,6 @@ const TITLEBAR_HEIGHT: i32 = 24;
 const BORDER_WIDTH: i32 = 2;
 const CLOSE_BUTTON_SIZE: i32 = 18;
 const DESKTOP_BACKGROUND: u32 = 0xff101018;
-const WINDOW_TEST_APP_ID: &str = "twland-window-test";
 
 const FBIOGET_VSCREENINFO: u64 = 0x4600;
 const FBIOGET_FSCREENINFO: u64 = 0x4602;
@@ -176,6 +174,9 @@ struct Client {
     /// A single read may carry fds for several batched requests, so each
     /// fd-carrying request handler pops exactly the fds its signature requires.
     pending_fds: VecDeque<OwnedFdRaw>,
+    /// Real mouse reader (`/dev/input/mice`), opened non-blocking.  `None` when
+    /// no mouse is present, in which case `poll_input_events` produces nothing.
+    mouse: Option<input::Mouse>,
     input: InputState,
     compositor: CompositorState,
     next_serial: u32,
@@ -332,14 +333,18 @@ struct InputState {
     pointer_y: i32,
     buttons: u32,
     focused_surface: Option<u32>,
-    synthetic_sent: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum TwlandInputEvent {
     PointerMove { dx: i32, dy: i32 },
+    /// Not produced by the mouse reader, but kept for future absolute-pointer
+    /// devices (tablet/touch).  Dispatched in `dispatch_input_event`.
+    #[allow(dead_code)]
     PointerAbsolute { x: i32, y: i32 },
     PointerButton { button: u32, pressed: bool },
+    /// Produced by the keyboard reader (issue #50); dispatched already.
+    #[allow(dead_code)]
     Key { keycode: u32, pressed: bool },
 }
 
@@ -547,12 +552,25 @@ impl Client {
             queued_messages: VecDeque::new(),
             residual: Vec::new(),
             pending_fds: VecDeque::new(),
+            mouse: match input::Mouse::open() {
+                Ok(Some(mouse)) => {
+                    println!("twland: mouse opened on {}", input::MICE_PATH);
+                    Some(mouse)
+                }
+                Ok(None) => {
+                    println!("twland: no mouse at {}", input::MICE_PATH);
+                    None
+                }
+                Err(error) => {
+                    eprintln!("twland: failed to open mouse: {error}");
+                    None
+                }
+            },
             input: InputState {
                 pointer_x: 80,
                 pointer_y: 80,
                 buttons: 0,
                 focused_surface: None,
-                synthetic_sent: false,
             },
             compositor: CompositorState {
                 windows: Vec::new(),
@@ -617,14 +635,6 @@ impl Client {
                     .then_some(*keyboard_id)
             })
             .collect()
-    }
-
-    fn first_mapped_surface(&self) -> Option<u32> {
-        self.compositor
-            .windows
-            .iter()
-            .find(|window| window.mapped)
-            .map(|window| window.surface_id)
     }
 
     fn surface_size(&self, surface_id: u32) -> Option<(i32, i32)> {
@@ -1868,9 +1878,7 @@ fn send_close_for_surface(
 }
 
 fn poll_input_events(client: &mut Client) -> Vec<TwlandInputEvent> {
-    if client.input.synthetic_sent {
-        return Vec::new();
-    }
+    // Only forward input once a client has bound both pointer and keyboard.
     if !client
         .seats
         .values()
@@ -1879,103 +1887,27 @@ fn poll_input_events(client: &mut Client) -> Vec<TwlandInputEvent> {
         return Vec::new();
     }
 
-    if client
-        .compositor
-        .windows
-        .iter()
-        .any(|window| window.app_id == WINDOW_TEST_APP_ID)
-    {
-        if client.compositor.windows.len() < 2 {
+    let Some(mouse) = client.mouse.as_mut() else {
+        return Vec::new();
+    };
+
+    let raw_events = match mouse.poll() {
+        Ok(events) => events,
+        Err(error) => {
+            eprintln!("twland: mouse read error: {error}");
             return Vec::new();
         }
-        client.input.synthetic_sent = true;
-        let window = client.compositor.windows[0].clone();
-        let client_x = window.x + window.decoration.border_width + 12;
-        let client_y =
-            window.y + window.decoration.titlebar_height + window.decoration.border_width + 12;
-        let title_x = window.x + 24;
-        let title_y = window.y + window.decoration.border_width + 10;
-        let close_x = window.decoration.close_button_rect.x + CLOSE_BUTTON_SIZE / 2 + 40;
-        let close_y = window.decoration.close_button_rect.y + CLOSE_BUTTON_SIZE / 2 + 20;
-        return vec![
-            TwlandInputEvent::PointerAbsolute {
-                x: client_x,
-                y: client_y,
-            },
-            TwlandInputEvent::PointerButton {
-                button: BTN_LEFT,
-                pressed: true,
-            },
-            TwlandInputEvent::PointerButton {
-                button: BTN_LEFT,
-                pressed: false,
-            },
-            TwlandInputEvent::PointerAbsolute {
-                x: title_x,
-                y: title_y,
-            },
-            TwlandInputEvent::PointerButton {
-                button: BTN_LEFT,
-                pressed: true,
-            },
-            TwlandInputEvent::PointerMove { dx: 40, dy: 20 },
-            TwlandInputEvent::PointerButton {
-                button: BTN_LEFT,
-                pressed: false,
-            },
-            TwlandInputEvent::PointerAbsolute {
-                x: close_x,
-                y: close_y,
-            },
-            TwlandInputEvent::PointerButton {
-                button: BTN_LEFT,
-                pressed: true,
-            },
-            TwlandInputEvent::PointerButton {
-                button: BTN_LEFT,
-                pressed: false,
-            },
-            TwlandInputEvent::Key {
-                keycode: KEY_SPACE,
-                pressed: true,
-            },
-            TwlandInputEvent::Key {
-                keycode: KEY_SPACE,
-                pressed: false,
-            },
-        ];
-    }
-
-    let Some(surface_id) = client.first_mapped_surface() else {
-        return Vec::new();
-    };
-    let Some(window) = client.window_for_surface(surface_id).cloned() else {
-        return Vec::new();
     };
 
-    client.input.synthetic_sent = true;
-    let x = window.x + window.decoration.border_width + 24;
-    let y = window.y + window.decoration.titlebar_height + window.decoration.border_width + 24;
-    vec![
-        TwlandInputEvent::PointerAbsolute { x, y },
-        TwlandInputEvent::PointerMove { dx: 12, dy: 8 },
-        TwlandInputEvent::PointerButton {
-            button: BTN_LEFT,
-            pressed: true,
-        },
-        TwlandInputEvent::PointerButton {
-            button: BTN_LEFT,
-            pressed: false,
-        },
-        TwlandInputEvent::Key {
-            keycode: KEY_SPACE,
-            pressed: true,
-        },
-        TwlandInputEvent::Key {
-            keycode: KEY_SPACE,
-            pressed: false,
-        },
-    ]
+    raw_events
+        .into_iter()
+        .map(|event| match event {
+            input::MouseEvent::Motion { dx, dy } => TwlandInputEvent::PointerMove { dx, dy },
+            input::MouseEvent::Button { button, pressed } => {
+                TwlandInputEvent::PointerButton { button, pressed }
+            }
+        })
+        .collect()
 }
 
 fn dispatch_input_event(
