@@ -149,6 +149,8 @@ struct Client {
     xdg_surfaces: HashMap<u32, XdgSurfaceState>,
     xdg_toplevels: HashMap<u32, XdgToplevelState>,
     layer_shell: LayerShellState,
+    layer_layout_dirty: bool,
+    layer_layout_output: Geometry,
     queued_messages: VecDeque<ReceivedMessage>,
     /// Bytes from a read that did not contain a complete final frame; the next
     /// read appends to this and framing resumes.  AF_UNIX streams split frames
@@ -509,6 +511,12 @@ impl Client {
                 kind: WaylandObjectKind::Display,
             },
         );
+        let output_geometry = Geometry {
+            x: 0,
+            y: 0,
+            width: output_size.0,
+            height: output_size.1,
+        };
 
         Self {
             objects,
@@ -520,12 +528,9 @@ impl Client {
             keyboards: HashMap::new(),
             xdg_surfaces: HashMap::new(),
             xdg_toplevels: HashMap::new(),
-            layer_shell: LayerShellState::new(Geometry {
-                x: 0,
-                y: 0,
-                width: output_size.0,
-                height: output_size.1,
-            }),
+            layer_shell: LayerShellState::new(output_geometry),
+            layer_layout_dirty: true,
+            layer_layout_output: output_geometry,
             queued_messages: VecDeque::new(),
             residual: Vec::new(),
             pending_fds: VecDeque::new(),
@@ -722,7 +727,7 @@ fn dispatch_request(
         },
         WaylandObjectKind::Surface => match opcode {
             WL_SURFACE_DESTROY => {
-                handle_surface_destroy(client, output, object_id)?;
+                handle_surface_destroy(client, output, stream, object_id)?;
                 Ok(())
             }
             WL_SURFACE_ATTACH => handle_surface_attach(client, object_id, &message.payload),
@@ -802,6 +807,13 @@ fn apply_layer_dispatch_effects(
     stream: &mut UnixStream,
     effects: layer::DispatchEffects,
 ) -> io::Result<()> {
+    if effects.layer_layout_changed {
+        client.layer_layout_dirty = true;
+        ensure_layer_layout(client, output);
+    }
+    if effects.reconcile_pointer_focus {
+        reconcile_pointer_focus(client, stream)?;
+    }
     if effects.reconcile_keyboard_focus {
         reconcile_keyboard_focus(client, stream)?;
     }
@@ -1132,14 +1144,17 @@ fn handle_buffer_destroy(client: &mut Client, buffer_id: u32) {
 fn handle_surface_destroy(
     client: &mut Client,
     output: &mut Framebuffer,
+    stream: &mut UnixStream,
     surface_id: u32,
 ) -> io::Result<()> {
     client.objects.remove(&surface_id);
+    let mut layer_layout_changed = false;
     if let Some(surface) = client.surfaces.remove(&surface_id) {
         match surface.role {
             Some(SurfaceRole::Layer(layer_surface_id)) => {
                 client.objects.remove(&layer_surface_id);
                 client.layer_shell.remove(layer_surface_id);
+                layer_layout_changed = true;
             }
             Some(SurfaceRole::Xdg(xdg_surface_id)) => {
                 client.objects.remove(&xdg_surface_id);
@@ -1154,17 +1169,12 @@ fn handle_surface_destroy(
         }
     }
     remove_window_for_surface(client, surface_id);
-    if client.input.focused_surface == Some(surface_id) {
-        client.input.focused_surface = None;
+    if layer_layout_changed {
+        client.layer_layout_dirty = true;
+        ensure_layer_layout(client, output);
     }
-    for seat in client.seats.values_mut() {
-        if seat.pointer_focus == Some(surface_id) {
-            seat.pointer_focus = None;
-        }
-        if seat.keyboard_focus == Some(surface_id) {
-            seat.keyboard_focus = None;
-        }
-    }
+    reconcile_pointer_focus(client, stream)?;
+    reconcile_keyboard_focus(client, stream)?;
     println!("twland: wl_surface.destroy id={surface_id}");
     redraw_scene(client, output)?;
     Ok(())
@@ -1576,6 +1586,7 @@ fn handle_surface_commit(
             } else {
                 send_initial_layer_configure(client, output, stream, layer_surface_id)?;
             }
+            client.layer_layout_dirty |= should_redraw;
         }
         None => {
             if surface.attached_buffer.is_some() && !TWLAND_ALLOW_ROLELESS_DEBUG_SURFACES {
@@ -1815,7 +1826,7 @@ fn remove_window_for_surface(client: &mut Client, surface_id: u32) {
 }
 
 fn redraw_scene(client: &mut Client, output: &mut Framebuffer) -> io::Result<()> {
-    refresh_layer_layout(client, output);
+    ensure_layer_layout(client, output);
     let mut frame = output.begin_frame(DESKTOP_BACKGROUND)?;
 
     draw_layer(&mut frame, client, Layer::Background)?;
@@ -1842,6 +1853,12 @@ fn redraw_scene(client: &mut Client, output: &mut Framebuffer) -> io::Result<()>
     frame.present()
 }
 
+fn ensure_layer_layout(client: &mut Client, output: &Framebuffer) {
+    if client.layer_layout_dirty || client.layer_layout_output != framebuffer_geometry(output) {
+        refresh_layer_layout(client, output);
+    }
+}
+
 fn framebuffer_geometry(output: &Framebuffer) -> Geometry {
     Geometry {
         x: 0,
@@ -1852,6 +1869,7 @@ fn framebuffer_geometry(output: &Framebuffer) -> Geometry {
 }
 
 fn refresh_layer_layout(client: &mut Client, output: &Framebuffer) {
+    let output_geometry = framebuffer_geometry(output);
     let buffer_sizes = client
         .surfaces
         .iter()
@@ -1860,9 +1878,7 @@ fn refresh_layer_layout(client: &mut Client, output: &Framebuffer) {
             Some((*surface_id, (buffer.width, buffer.height)))
         })
         .collect::<HashMap<_, _>>();
-    client
-        .layer_shell
-        .arrange(framebuffer_geometry(output), &buffer_sizes);
+    client.layer_shell.arrange(output_geometry, &buffer_sizes);
 
     for layer in [Layer::Background, Layer::Bottom, Layer::Top, Layer::Overlay] {
         for surface_id in client.layer_shell.surface_ids_on(layer) {
@@ -1902,6 +1918,8 @@ fn refresh_layer_layout(client: &mut Client, output: &Framebuffer) {
     for surface_id in window_ids {
         sync_surface_to_window(client, surface_id);
     }
+    client.layer_layout_dirty = false;
+    client.layer_layout_output = output_geometry;
 }
 
 fn draw_layer(output: &mut Frame<'_>, client: &Client, layer: Layer) -> io::Result<()> {
@@ -2482,6 +2500,25 @@ fn update_pointer_focus(
 
     for seat in client.seats.values_mut() {
         seat.pointer_focus = new_focus;
+    }
+    Ok(())
+}
+
+fn reconcile_pointer_focus(client: &mut Client, stream: &mut UnixStream) -> io::Result<()> {
+    let focus = match hit_test(client, client.input.pointer_x, client.input.pointer_y) {
+        HitTest::ClientArea { surface_id } | HitTest::LayerSurface { surface_id } => {
+            Some(surface_id)
+        }
+        _ => None,
+    };
+    let focus_changed = client.input.focused_surface != focus
+        || client
+            .seats
+            .values()
+            .any(|seat| seat.pointer_focus != focus);
+    if focus_changed {
+        update_pointer_focus(client, stream, focus)?;
+        client.input.focused_surface = focus;
     }
     Ok(())
 }

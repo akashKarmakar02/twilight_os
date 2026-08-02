@@ -4,6 +4,7 @@
 //! compositor, while [`layout`] contains the pure placement policy. This is the
 //! same boundary Smithay uses, scaled down for twland's single-client server.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
 
@@ -22,6 +23,8 @@ use crate::{Client, SurfaceRole, WaylandObjectKind};
 pub struct DispatchEffects {
     pub redraw: bool,
     pub reconcile_keyboard_focus: bool,
+    pub reconcile_pointer_focus: bool,
+    pub layer_layout_changed: bool,
 }
 
 pub fn dispatch_shell_request(
@@ -168,6 +171,8 @@ pub fn dispatch_surface_request(
             return Ok(DispatchEffects {
                 redraw: true,
                 reconcile_keyboard_focus: true,
+                reconcile_pointer_focus: true,
+                layer_layout_changed: true,
             });
         }
         wire::SurfaceRequest::SetLayer(value) => {
@@ -370,8 +375,18 @@ impl LayerShellState {
 
     pub fn arrange(&mut self, output: Geometry, buffer_sizes: &HashMap<u32, (i32, i32)>) {
         let mut usable = output;
-        let exclusive = self.ordered_mapped_ids(true);
+        let mut exclusive = self.ordered_mapped_ids(true);
         let non_exclusive = self.ordered_mapped_ids(false);
+
+        exclusive.sort_by_key(|id| {
+            Reverse(
+                self.surfaces
+                    .get(id)
+                    .expect("ordered layer surface must exist")
+                    .current()
+                    .layer,
+            )
+        });
 
         for id in exclusive.into_iter().chain(non_exclusive) {
             let Some(surface) = self.surfaces.get_mut(&id) else {
@@ -559,5 +574,34 @@ mod tests {
                 height: 565,
             }
         );
+    }
+
+    #[test]
+    fn exclusive_surfaces_are_arranged_from_overlay_to_background() {
+        let mut state = LayerShellState::new(OUTPUT);
+
+        let mut bottom = LayerSurface::new(10, 20, None, Layer::Bottom, "bottom".into());
+        bottom.pending_mut().width = 800;
+        bottom.pending_mut().height = 20;
+        bottom.pending_mut().anchor = Anchor::from_bits(13).unwrap();
+        bottom.pending_mut().exclusive_zone = ExclusiveZone::Exclusive(20);
+        bottom.commit_pending().unwrap();
+        bottom.map();
+        state.insert(bottom);
+
+        let mut overlay = LayerSurface::new(11, 21, None, Layer::Overlay, "overlay".into());
+        overlay.pending_mut().width = 800;
+        overlay.pending_mut().height = 30;
+        overlay.pending_mut().anchor = Anchor::from_bits(13).unwrap();
+        overlay.pending_mut().exclusive_zone = ExclusiveZone::Exclusive(30);
+        overlay.commit_pending().unwrap();
+        overlay.map();
+        state.insert(overlay);
+
+        state.arrange(OUTPUT, &HashMap::from([(20, (800, 20)), (21, (800, 30))]));
+
+        assert_eq!(state.geometry_for_surface(21).unwrap().y, 0);
+        assert_eq!(state.geometry_for_surface(20).unwrap().y, 30);
+        assert_eq!(state.usable_area().y, 50);
     }
 }

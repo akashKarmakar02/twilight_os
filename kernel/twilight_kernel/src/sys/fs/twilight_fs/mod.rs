@@ -626,13 +626,13 @@ impl TwilightFs {
         let mut symlink_count = 0usize;
 
         let mut current_inode = 1u32; // root
-        let mut pending: Vec<String> = canonical
+        let mut pending: VecDeque<String> = canonical
             .split('/')
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+            .collect();
 
-        while let Some(part) = pending.first().cloned() {
+        while let Some(part) = pending.pop_front() {
             let next = self
                 .find_dir_entry(current_inode, &part)
                 .map_err(|_| FsError::InvalidInode)?;
@@ -641,8 +641,6 @@ impl TwilightFs {
                 return Err(FileNotFound);
             };
 
-            // Advance past this component.
-            pending.remove(0);
             // If it's a symlink, read the target and splice it in.
             let inode_data = self.read_inode(inode).map_err(|_| FsError::InvalidInode)?;
             if inode_data.is_symlink() {
@@ -668,10 +666,9 @@ impl TwilightFs {
                 // Relative target: continue from the current directory, so
                 // `current_inode` stays as the directory we just walked into.
                 // Prepend the target components to the remaining work.
-                pending = target_parts
-                    .into_iter()
-                    .chain(pending.into_iter())
-                    .collect();
+                for part in target_parts.into_iter().rev() {
+                    pending.push_front(part);
+                }
                 continue;
             }
 

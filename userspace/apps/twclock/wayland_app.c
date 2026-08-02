@@ -10,6 +10,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+enum { INITIAL_CONFIGURE_TIMEOUT_MS = 5000 };
+
+static int64_t monotonic_time_ms(void) {
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) {
+		return -1;
+	}
+	return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
 
 static uint32_t minimum_version(uint32_t advertised, uint32_t supported) {
 	return advertised < supported ? advertised : supported;
@@ -139,8 +150,22 @@ fail:
 }
 
 int wayland_app_wait_until_configured(struct wayland_app *app) {
+	int64_t now = monotonic_time_ms();
+	if (now < 0) {
+		return -1;
+	}
+	const int64_t deadline = now + INITIAL_CONFIGURE_TIMEOUT_MS;
+
 	while (!app->configured && !app->closed) {
-		if (wl_display_dispatch(app->display) < 0) {
+		now = monotonic_time_ms();
+		if (now < 0) {
+			return -1;
+		}
+		if (now >= deadline) {
+			fprintf(stderr, "twclock: initial configure timed out\n");
+			return -1;
+		}
+		if (wayland_app_dispatch(app, (int)(deadline - now)) < 0) {
 			return -1;
 		}
 	}

@@ -9,10 +9,10 @@ pub fn configured_size(properties: LayerProperties, source: Geometry) -> (u32, u
         .min(source.height)
         .max(0);
 
-    if properties.anchor.anchored_horizontally() {
+    if properties.width == 0 && properties.anchor.anchored_horizontally() {
         width = source.width;
     }
-    if properties.anchor.anchored_vertically() {
+    if properties.height == 0 && properties.anchor.anchored_vertically() {
         height = source.height;
     }
 
@@ -146,6 +146,15 @@ mod tests {
         let mut properties = LayerProperties::initial(Layer::Background);
         properties.anchor = Anchor::from_bits(15).unwrap();
         assert_eq!(configured_size(properties, OUTPUT), (800, 600));
+    }
+
+    #[test]
+    fn opposite_anchors_preserve_nonzero_requested_size() {
+        let mut properties = LayerProperties::initial(Layer::Top);
+        properties.width = 200;
+        properties.height = 40;
+        properties.anchor = Anchor::from_bits(15).unwrap();
+        assert_eq!(configured_size(properties, OUTPUT), (200, 40));
     }
 
     #[test]

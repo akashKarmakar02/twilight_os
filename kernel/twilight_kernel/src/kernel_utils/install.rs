@@ -242,13 +242,13 @@ fn collect_source_entries(
                     size: entry.size,
                 },
             }),
-            FileType::Symlink => {
-                let target = source.lock().read_symlink(entry.ino).map_err(|_| ())?;
-                files.push(SourceEntry {
+            FileType::Symlink => match source.lock().read_symlink(entry.ino) {
+                Ok(target) => files.push(SourceEntry {
                     path: child,
                     kind: SourceEntryKind::Symlink { target },
-                });
-            }
+                }),
+                Err(_) => println!("install: failed to read symlink {}", child),
+            },
             _ => {}
         }
     }
