@@ -1,6 +1,5 @@
 *.o
-twland_libwayland_client
-xdg-shell-client-protocol.h
-xdg-shell-protocol.c
+twclock
 wlr-layer-shell-unstable-v1-client-protocol.h
 wlr-layer-shell-unstable-v1-protocol.c
+xdg-shell-protocol.c

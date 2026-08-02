@@ -17,15 +17,21 @@ struct buffer {
 	int fd;
 };
 
+enum buffer_pattern {
+	BUFFER_PATTERN_LAYER,
+	BUFFER_PATTERN_WINDOW,
+};
+
 #define BUFFER_WIDTH 320
 #define BUFFER_HEIGHT 200
 #define BUFFER_STRIDE (BUFFER_WIDTH * 4)
 
 /*
  * Create a memfd-backed wl_shm pool + buffer of BUFFER_WIDTH x BUFFER_HEIGHT
- * and fill it with a test pattern.  Returns 0 on success, -1 on error.
+ * and fill it with a distinct test pattern. Returns 0 on success, -1 on error.
  */
-int buffer_create(struct buffer *b, struct wl_shm *shm);
+int buffer_create(struct buffer *b, struct wl_shm *shm,
+                  enum buffer_pattern pattern);
 
 void buffer_destroy(struct buffer *b);
 
