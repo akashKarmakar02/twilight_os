@@ -14,7 +14,9 @@ use crate::sys::fs::partition::{self, PartitionEntry, TWILIGHT_PARTITION_TYPE};
 use crate::sys::fs::twilight_fs::FsError::{
     FileAlreadyExists, FileNameTooLong, FileNotFound, InvalidInode,
 };
-use crate::sys::fs::twilight_fs::inode::{Inode, MODE_SOCKET, MODE_TYPE_MASK, TFSVfsNode};
+use crate::sys::fs::twilight_fs::inode::{
+    INODE_INLINE_BYTES, Inode, MODE_SOCKET, MODE_TYPE_MASK, TFSVfsNode,
+};
 use crate::sys::fs::twilight_fs::superblock::Superblock;
 use crate::sys::fs::vfs::{BlockDev, FileSystem, FileType, FsCtx, Metadata, VfsNode};
 use crate::sys::syscall::fs_attr::IFLAG_ENCRYPTED;
@@ -624,14 +626,13 @@ impl TwilightFs {
         let mut symlink_count = 0usize;
 
         let mut current_inode = 1u32; // root
-        let mut prefix = String::from("/");
-        let mut pending: Vec<String> = canonical
+        let mut pending: VecDeque<String> = canonical
             .split('/')
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+            .collect();
 
-        while let Some(part) = pending.first().cloned() {
+        while let Some(part) = pending.pop_front() {
             let next = self
                 .find_dir_entry(current_inode, &part)
                 .map_err(|_| FsError::InvalidInode)?;
@@ -639,13 +640,6 @@ impl TwilightFs {
             let Some(inode) = next else {
                 return Err(FileNotFound);
             };
-
-            // Advance past this component.
-            pending.remove(0);
-            if prefix.len() > 1 {
-                prefix.push('/');
-            }
-            prefix.push_str(&part);
 
             // If it's a symlink, read the target and splice it in.
             let inode_data = self.read_inode(inode).map_err(|_| FsError::InvalidInode)?;
@@ -655,8 +649,8 @@ impl TwilightFs {
                     return Err(FsError::InvalidPath);
                 }
                 let target_bytes = inode_data.inline_data_bytes().to_vec();
-                let target = core::str::from_utf8(&target_bytes)
-                    .map_err(|_| FsError::InvalidPath)?;
+                let target =
+                    core::str::from_utf8(&target_bytes).map_err(|_| FsError::InvalidPath)?;
                 if target.is_empty() {
                     return Err(FsError::InvalidPath);
                 }
@@ -668,21 +662,23 @@ impl TwilightFs {
                 if target.starts_with('/') {
                     // Absolute target: restart from root.
                     current_inode = 1;
-                    prefix.clear();
-                    prefix.push('/');
                 }
                 // Relative target: continue from the current directory, so
                 // `current_inode` stays as the directory we just walked into.
                 // Prepend the target components to the remaining work.
-                pending = target_parts.into_iter().chain(pending.into_iter()).collect();
-                self.shared.insert_lookup(prefix.clone(), inode);
+                for part in target_parts.into_iter().rev() {
+                    pending.push_front(part);
+                }
                 continue;
             }
 
-            self.shared.insert_lookup(prefix.clone(), inode);
             current_inode = inode;
         }
 
+        // Only cache the result after every symlink has been followed. Caching
+        // an intermediate component can bind a symlink path to the symlink
+        // inode itself, causing later opens to read its inline target bytes as
+        // though they were file contents.
         self.shared.insert_lookup(canonical, current_inode);
         Ok(current_inode)
     }
@@ -1328,6 +1324,50 @@ impl TwilightFs {
         self.create_file_with_mode(parent_inode_num, name, 0o777)
     }
 
+    pub fn create_symlink(
+        &mut self,
+        parent_inode_num: u32,
+        name: &str,
+        target: &str,
+    ) -> Result<u32, FsError> {
+        if name.len() > 60 {
+            return Err(FileNameTooLong);
+        }
+        if target.is_empty() || target.len() > INODE_INLINE_BYTES {
+            return Err(FsError::InvalidPath);
+        }
+
+        let parent_inode = self
+            .read_inode(parent_inode_num)
+            .map_err(|_| InvalidInode)?;
+        let dir_index = self.ensure_dir_index_entry(parent_inode_num, &parent_inode)?;
+        if dir_index.names.contains_key(name) {
+            return Err(FileAlreadyExists);
+        }
+
+        let new_inode_num = self.allocate_inode().map_err(|_| InvalidInode)? + 1;
+        let mut inode = Inode::new_symlink(CMOS::new().unix_time());
+        let target_bytes = target.as_bytes();
+        inode.size = target_bytes.len() as u64;
+        inode.inline_data[..target_bytes.len()].copy_from_slice(target_bytes);
+
+        self.write_inode(new_inode_num, &inode)
+            .map_err(|_| InvalidInode)?;
+        self.create_dir_entry(parent_inode_num, name, new_inode_num)
+            .map_err(|_| InvalidInode)?;
+        Ok(new_inode_num)
+    }
+
+    pub fn read_symlink(&mut self, inode_num: u32) -> Result<String, FsError> {
+        let inode = self.read_inode(inode_num).map_err(|_| InvalidInode)?;
+        if !inode.is_symlink() {
+            return Err(FsError::InvalidPath);
+        }
+        core::str::from_utf8(inode.inline_data_bytes())
+            .map(|target| target.to_string())
+            .map_err(|_| FsError::InvalidPath)
+    }
+
     fn create_file_with_mode(
         &mut self,
         parent_inode_num: u32,
@@ -1734,6 +1774,8 @@ impl TwilightFs {
 
                 let file_type = if inode.is_dir() {
                     FileType::Dir
+                } else if inode.is_symlink() {
+                    FileType::Symlink
                 } else if inode.is_socket() {
                     FileType::Socket
                 } else {

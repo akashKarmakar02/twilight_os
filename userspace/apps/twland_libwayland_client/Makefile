@@ -2,7 +2,7 @@
 #
 # Links the official libwayland-client.so (cross-built for musl by issue #57's
 # userspace/libs/wayland) and generates the xdg-shell bindings from the vendored
-# protocol XML with the host wayland-scanner.
+# protocol XML files with the host wayland-scanner.
 
 CC := musl-gcc
 CFLAGS ?= -O2 -Wall -Wextra -std=c11
@@ -14,16 +14,18 @@ LDLIBS ?= -lwayland-client
 # has typed static-inline request wrappers; the public-code C source defines the
 # interface structs (xdg_wm_base_interface, ...) the wrappers reference.
 WAYLAND_SCANNER ?= wayland-scanner
-PROTOCOL_DIR := protocol
-XDG_XML := $(PROTOCOL_DIR)/xdg-shell.xml
+XDG_XML := ../../protocols/xdg-shell.xml
 XDG_HEADER := xdg-shell-client-protocol.h
 XDG_SRC := xdg-shell-protocol.c
 XDG_OBJ := xdg-shell-protocol.o
+LAYER_XML := ../../protocols/wlr-layer-shell-unstable-v1.xml
+LAYER_HEADER := wlr-layer-shell-unstable-v1-client-protocol.h
+LAYER_SRC := wlr-layer-shell-unstable-v1-protocol.c
+LAYER_OBJ := wlr-layer-shell-unstable-v1-protocol.o
 
 BIN := twland_libwayland_client
-SRC_DIR := .
-SRCS := $(wildcard $(SRC_DIR)/*.c)
-OBJS := $(SRCS:.c=.o) $(XDG_OBJ)
+SRCS := main.c buffer.c registry.c
+OBJS := $(SRCS:.c=.o) $(XDG_OBJ) $(LAYER_OBJ)
 
 .PHONY: all clean
 
@@ -35,8 +37,14 @@ $(XDG_HEADER): $(XDG_XML)
 $(XDG_SRC): $(XDG_XML)
 	$(WAYLAND_SCANNER) public-code $< $@
 
-# App objects depend on the generated xdg-shell header.
-$(SRCS:.c=.o): $(XDG_HEADER)
+$(LAYER_HEADER): $(LAYER_XML)
+	$(WAYLAND_SCANNER) client-header $< $@
+
+$(LAYER_SRC): $(LAYER_XML)
+	$(WAYLAND_SCANNER) public-code $< $@
+
+# App objects depend on both generated shell protocol headers.
+$(SRCS:.c=.o): $(XDG_HEADER) $(LAYER_HEADER)
 
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -44,8 +52,11 @@ $(SRCS:.c=.o): $(XDG_HEADER)
 $(XDG_OBJ): $(XDG_SRC) $(XDG_HEADER)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $(XDG_SRC) -o $@
 
+$(LAYER_OBJ): $(LAYER_SRC) $(LAYER_HEADER)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $(LAYER_SRC) -o $@
+
 $(BIN): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 clean:
-	rm -f $(BIN) $(OBJS) $(XDG_HEADER) $(XDG_SRC)
+	rm -f $(BIN) $(OBJS) $(XDG_HEADER) $(XDG_SRC) $(LAYER_HEADER) $(LAYER_SRC)

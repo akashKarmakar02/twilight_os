@@ -32,10 +32,24 @@ struct TwilightPartitionLayout {
 }
 
 #[derive(Clone)]
+enum SourceEntryKind {
+    File { mode: u16, size: usize },
+    Symlink { target: String },
+}
+
+#[derive(Clone)]
 struct SourceEntry {
     path: String,
-    mode: u16,
-    size: usize,
+    kind: SourceEntryKind,
+}
+
+impl SourceEntry {
+    fn size(&self) -> usize {
+        match &self.kind {
+            SourceEntryKind::File { size, .. } => *size,
+            SourceEntryKind::Symlink { target } => target.len(),
+        }
+    }
 }
 
 pub fn main() {
@@ -54,7 +68,7 @@ pub fn main() {
     let total_files = source_entries.len() as u64;
     let total_bytes = source_entries
         .iter()
-        .map(|entry| entry.size as u64)
+        .map(|entry| entry.size() as u64)
         .sum::<u64>();
     if total_files == 0 {
         println!("install: live system image contains no files");
@@ -143,21 +157,30 @@ pub fn main() {
         render_progress(done_files, total_files, done_bytes, total_bytes, None);
 
         for entry in source_entries.drain(..) {
-            let mut node = match source.lock().open(&entry.path) {
-                Ok(node) => node,
-                Err(_) => {
-                    println!("install: failed to open {}", entry.path);
-                    continue;
+            let entry_size = entry.size();
+            match entry.kind {
+                SourceEntryKind::File { mode, size } => {
+                    let mut node = match source.lock().open(&entry.path) {
+                        Ok(node) => node,
+                        Err(_) => {
+                            println!("install: failed to open {}", entry.path);
+                            continue;
+                        }
+                    };
+                    let mut data = alloc::vec![0u8; size];
+                    if node.read_exact(0, &mut data).is_err() {
+                        println!("install: failed to read {}", entry.path);
+                        continue;
+                    }
+                    copy_file(&entry.path, &data, mode, false, &mut dir_cache);
                 }
-            };
-            let mut data = alloc::vec![0u8; entry.size];
-            if node.read_exact(0, &mut data).is_err() {
-                println!("install: failed to read {}", entry.path);
-                continue;
+                SourceEntryKind::Symlink { target } => {
+                    copy_symlink(&entry.path, &target, false, &mut dir_cache);
+                }
             }
 
             done_files += 1;
-            done_bytes += data.len() as u64;
+            done_bytes += entry_size as u64;
             render_progress(
                 done_files,
                 total_files,
@@ -165,7 +188,6 @@ pub fn main() {
                 total_bytes,
                 Some(&entry.path),
             );
-            copy_file(&entry.path, &data, entry.mode, false, &mut dir_cache);
         }
 
         render_progress(
@@ -215,9 +237,18 @@ fn collect_source_entries(
             FileType::Dir => collect_source_entries(source, &child, files)?,
             FileType::File => files.push(SourceEntry {
                 path: child,
-                mode: entry.mode,
-                size: entry.size,
+                kind: SourceEntryKind::File {
+                    mode: entry.mode,
+                    size: entry.size,
+                },
             }),
+            FileType::Symlink => match source.lock().read_symlink(entry.ino) {
+                Ok(target) => files.push(SourceEntry {
+                    path: child,
+                    kind: SourceEntryKind::Symlink { target },
+                }),
+                Err(_) => println!("install: failed to read symlink {}", child),
+            },
             _ => {}
         }
     }
@@ -448,62 +479,63 @@ fn align_up_u64(value: u64, align: u64) -> u64 {
     ((value + align - 1) / align) * align
 }
 
-fn copy_file(path: &str, data: &[u8], mode: u16, verbose: bool, cache: &mut Option<(String, u32)>) {
+fn destination_parent(
+    fs: &mut crate::fs::twilight_fs::TwilightFs,
+    path: &str,
+    cache: &mut Option<(String, u32)>,
+) -> Result<(u32, String), crate::sys::fs::twilight_fs::FsError> {
     use crate::sys::fs::twilight_fs::FsError;
 
-    let mut fs = unsafe { crate::fs::MFS.get_unchecked().lock() };
-
     let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
-
     if components.is_empty() {
-        println!("Invalid file path: {}", path);
-        return;
+        return Err(FsError::InvalidPath);
     }
 
-    let mut cur_inode = 1;
+    let mut parent_inode = 1;
     let mut start_idx = 0;
-
-    // Check cache
     if components.len() > 1 {
         let parent_path = components[..components.len() - 1].join("/");
         if let Some((cached_path, cached_inode)) = cache {
             if *cached_path == parent_path {
-                cur_inode = *cached_inode;
+                parent_inode = *cached_inode;
                 start_idx = components.len() - 1;
             }
         }
     }
 
-    for (i, &part) in components[..components.len() - 1].iter().enumerate() {
-        if i < start_idx {
+    for (index, part) in components[..components.len() - 1].iter().enumerate() {
+        if index < start_idx {
             continue;
         }
-        match fs.find_dir_entry(cur_inode, part) {
-            Ok(Some(inode)) => cur_inode = inode,
-            Ok(None) => match fs.create_dir(cur_inode, part) {
-                Ok(new_inode) => cur_inode = new_inode,
-                Err(e) => {
-                    println!("Failed to create dir '{}': {:?}", part, e);
-                    return;
-                }
-            },
-            Err(e) => {
-                println!("Failed to lookup '{}': {:?} {}", part, e, cur_inode);
-                return;
-            }
-        }
+        parent_inode = match fs.find_dir_entry(parent_inode, part) {
+            Ok(Some(inode)) => inode,
+            Ok(None) => fs.create_dir(parent_inode, part)?,
+            Err(_) => return Err(FsError::InvalidPath),
+        };
     }
 
-    // Update cache
     if components.len() > 1 {
         let parent_path = components[..components.len() - 1].join("/");
-        *cache = Some((parent_path, cur_inode));
+        *cache = Some((parent_path, parent_inode));
     }
 
-    let file_name = components.last().unwrap();
+    Ok((parent_inode, String::from(*components.last().unwrap())))
+}
+
+fn copy_file(path: &str, data: &[u8], mode: u16, verbose: bool, cache: &mut Option<(String, u32)>) {
+    use crate::sys::fs::twilight_fs::FsError;
+
+    let mut fs = unsafe { crate::fs::MFS.get_unchecked().lock() };
+    let (parent_inode, file_name) = match destination_parent(&mut fs, path, cache) {
+        Ok(destination) => destination,
+        Err(error) => {
+            println!("Failed to prepare '{}': {:?}", path, error);
+            return;
+        }
+    };
 
     // Create and write file
-    match fs.create_file(cur_inode, file_name) {
+    match fs.create_file(parent_inode, &file_name) {
         Ok(file_inode) => {
             set_file_mode(&mut fs, file_inode, mode);
             if let Err(e) = fs.write_file(file_inode, data) {
@@ -516,7 +548,7 @@ fn copy_file(path: &str, data: &[u8], mode: u16, verbose: bool, cache: &mut Opti
             }
         }
         Err(FsError::FileAlreadyExists) => {
-            if let Ok(Some(file_inode)) = fs.find_dir_entry(cur_inode, file_name) {
+            if let Ok(Some(file_inode)) = fs.find_dir_entry(parent_inode, &file_name) {
                 set_file_mode(&mut fs, file_inode, mode);
             }
             if verbose {
@@ -525,6 +557,35 @@ fn copy_file(path: &str, data: &[u8], mode: u16, verbose: bool, cache: &mut Opti
         }
         Err(e) => {
             println!("Failed to create file '{}': {:?}", path, e);
+        }
+    }
+}
+
+fn copy_symlink(path: &str, target: &str, verbose: bool, cache: &mut Option<(String, u32)>) {
+    use crate::sys::fs::twilight_fs::FsError;
+
+    let mut fs = unsafe { crate::fs::MFS.get_unchecked().lock() };
+    let (parent_inode, file_name) = match destination_parent(&mut fs, path, cache) {
+        Ok(destination) => destination,
+        Err(error) => {
+            println!("Failed to prepare '{}': {:?}", path, error);
+            return;
+        }
+    };
+
+    match fs.create_symlink(parent_inode, &file_name, target) {
+        Ok(_) => {
+            if verbose {
+                println!("copied symlink: {} -> {}", path, target);
+            }
+        }
+        Err(FsError::FileAlreadyExists) => {
+            if verbose {
+                println!("Skipped (exists) {}", path);
+            }
+        }
+        Err(error) => {
+            println!("Failed to create symlink '{}': {:?}", path, error);
         }
     }
 }

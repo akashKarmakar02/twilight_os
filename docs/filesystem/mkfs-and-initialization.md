@@ -39,13 +39,14 @@ The installer then creates a minimal base tree (under `/`), e.g.:
 This uses the in-kernel helpers:
 - `create_dir(parent_inode, name)`
 
-## Step 5: Copy initramfs files into the new FS
+## Step 5: Copy live-system entries into the new FS
 
-Finally, the installer iterates the initramfs CPIO archive and copies regular files into the new filesystem via `copy_file(path, data, verbose)`:
+Finally, the installer iterates the mounted live system image and preserves each
+entry's kind while populating the new filesystem:
 
 - creates intermediate directories if missing (`find_dir_entry` / `create_dir`)
-- creates the file inode (`create_file`)
-- writes the file contents (`write_file`)
+- creates regular file inodes and writes their contents (`create_file` / `write_file`)
+- recreates symbolic-link inodes with their original inline targets (`create_symlink`)
 
-This is why you’ll see both the “simple” helpers (`write_file`) and the VFS path (`TFSVfsNode`) coexist: the installer flow uses the helpers to bootstrap the initial disk image.
-
+Keeping regular files and symlinks as distinct installer entry variants prevents
+link-target length metadata from truncating a dereferenced file.

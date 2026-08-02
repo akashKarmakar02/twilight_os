@@ -9,8 +9,10 @@ use std::ptr;
 mod framebuffer;
 mod input;
 mod output;
+mod shell;
 mod wire;
 use framebuffer::{Frame, Framebuffer, Rect};
+use shell::layer::{self, Geometry, KeyboardInteractivity, Layer, LayerShellState};
 use wire::{
     create_empty_memfd, parse_chunk, push_fixed, push_i32, push_u32, push_wayland_string,
     read_i32, read_u32, read_wayland_string, recv_raw, send_message, OwnedFdRaw,
@@ -114,6 +116,12 @@ const GLOBALS: &[Global] = &[
         version: 6,
         kind: WaylandObjectKind::XdgWmBase,
     },
+    Global {
+        name: 6,
+        interface: layer::wire::INTERFACE,
+        version: layer::wire::VERSION,
+        kind: WaylandObjectKind::LayerShell,
+    },
 ];
 
 unsafe extern "C" {
@@ -140,6 +148,9 @@ struct Client {
     keyboards: HashMap<u32, KeyboardState>,
     xdg_surfaces: HashMap<u32, XdgSurfaceState>,
     xdg_toplevels: HashMap<u32, XdgToplevelState>,
+    layer_shell: LayerShellState,
+    layer_layout_dirty: bool,
+    layer_layout_output: Geometry,
     queued_messages: VecDeque<ReceivedMessage>,
     /// Bytes from a read that did not contain a complete final frame; the next
     /// read appends to this and framing resumes.  AF_UNIX streams split frames
@@ -184,6 +195,8 @@ enum WaylandObjectKind {
     XdgWmBase,
     XdgSurface,
     XdgToplevel,
+    LayerShell,
+    LayerSurface,
 }
 
 impl WaylandObjectKind {
@@ -205,6 +218,8 @@ impl WaylandObjectKind {
             WaylandObjectKind::XdgWmBase => "xdg_wm_base",
             WaylandObjectKind::XdgSurface => "xdg_surface",
             WaylandObjectKind::XdgToplevel => "xdg_toplevel",
+            WaylandObjectKind::LayerShell => "zwlr_layer_shell_v1",
+            WaylandObjectKind::LayerSurface => "zwlr_layer_surface_v1",
         }
     }
 }
@@ -229,15 +244,24 @@ struct BufferState {
 #[derive(Debug, Clone)]
 struct SurfaceState {
     attached_buffer: Option<u32>,
-    pending_buffer: Option<u32>,
+    /// `None` means no attach request is pending; `Some(None)` represents
+    /// `wl_surface.attach(NULL)` and therefore an explicit unmap.
+    pending_buffer: Option<Option<u32>>,
     damage: Option<Rect>,
     x: i32,
     y: i32,
     attach_x: i32,
     attach_y: i32,
-    xdg_surface_id: Option<u32>,
+    role: Option<SurfaceRole>,
+    has_committed: bool,
     frame_callbacks: Vec<u32>,
     mapped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceRole {
+    Xdg(u32),
+    Layer(u32),
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +305,7 @@ struct DragState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HitTest {
     None,
+    LayerSurface { surface_id: u32 },
     ClientArea { surface_id: u32 },
     Titlebar { surface_id: u32 },
     CloseButton { surface_id: u32 },
@@ -420,7 +445,7 @@ fn ensure_dir(path: &str) -> io::Result<()> {
 }
 
 fn handle_client(mut stream: UnixStream, output: &mut Framebuffer) -> io::Result<()> {
-    let mut client = Client::new();
+    let mut client = Client::new(output.geometry());
 
     loop {
         let mut handled_request = false;
@@ -478,7 +503,7 @@ fn compositor_idle() {
 }
 
 impl Client {
-    fn new() -> Self {
+    fn new(output_size: (i32, i32)) -> Self {
         let mut objects = HashMap::new();
         objects.insert(
             1,
@@ -486,6 +511,12 @@ impl Client {
                 kind: WaylandObjectKind::Display,
             },
         );
+        let output_geometry = Geometry {
+            x: 0,
+            y: 0,
+            width: output_size.0,
+            height: output_size.1,
+        };
 
         Self {
             objects,
@@ -497,6 +528,9 @@ impl Client {
             keyboards: HashMap::new(),
             xdg_surfaces: HashMap::new(),
             xdg_toplevels: HashMap::new(),
+            layer_shell: LayerShellState::new(output_geometry),
+            layer_layout_dirty: true,
+            layer_layout_output: output_geometry,
             queued_messages: VecDeque::new(),
             residual: Vec::new(),
             pending_fds: VecDeque::new(),
@@ -601,7 +635,9 @@ impl Client {
 
     fn surface_size(&self, surface_id: u32) -> Option<(i32, i32)> {
         let surface = self.surfaces.get(&surface_id)?;
-        let buffer_id = surface.attached_buffer.or(surface.pending_buffer)?;
+        let buffer_id = surface
+            .attached_buffer
+            .or(surface.pending_buffer.flatten())?;
         let buffer = self.buffers.get(&buffer_id)?;
         Some((buffer.width, buffer.height))
     }
@@ -621,7 +657,9 @@ impl Client {
     }
 
     fn xdg_ids_for_surface(&self, surface_id: u32) -> Option<(u32, u32)> {
-        let xdg_surface_id = self.surfaces.get(&surface_id)?.xdg_surface_id?;
+        let SurfaceRole::Xdg(xdg_surface_id) = self.surfaces.get(&surface_id)?.role? else {
+            return None;
+        };
         let role = self.xdg_surfaces.get(&xdg_surface_id)?.role?;
         let XdgRole::Toplevel(toplevel_id) = role;
         Some((xdg_surface_id, toplevel_id))
@@ -689,7 +727,7 @@ fn dispatch_request(
         },
         WaylandObjectKind::Surface => match opcode {
             WL_SURFACE_DESTROY => {
-                handle_surface_destroy(client, output, object_id)?;
+                handle_surface_destroy(client, output, stream, object_id)?;
                 Ok(())
             }
             WL_SURFACE_ATTACH => handle_surface_attach(client, object_id, &message.payload),
@@ -743,6 +781,16 @@ fn dispatch_request(
             // move(4), resize(5), set_min/max_size, set_maximized, etc.: optional, ignored.
             other => ignore_unimplemented("xdg_toplevel", other, object_id),
         },
+        WaylandObjectKind::LayerShell => {
+            let effects =
+                layer::dispatch_shell_request(client, object_id, opcode, &message.payload)?;
+            apply_layer_dispatch_effects(client, output, stream, effects)
+        }
+        WaylandObjectKind::LayerSurface => {
+            let effects =
+                layer::dispatch_surface_request(client, object_id, opcode, &message.payload)?;
+            apply_layer_dispatch_effects(client, output, stream, effects)
+        }
         // These objects emit only events; clients never send requests to them.
         WaylandObjectKind::Callback
         | WaylandObjectKind::Pointer
@@ -751,6 +799,28 @@ fn dispatch_request(
             ignore_unimplemented(object.kind.as_str(), opcode, object_id)
         }
     }
+}
+
+fn apply_layer_dispatch_effects(
+    client: &mut Client,
+    output: &mut Framebuffer,
+    stream: &mut UnixStream,
+    effects: layer::DispatchEffects,
+) -> io::Result<()> {
+    if effects.layer_layout_changed {
+        client.layer_layout_dirty = true;
+        ensure_layer_layout(client, output);
+    }
+    if effects.reconcile_pointer_focus {
+        reconcile_pointer_focus(client, stream)?;
+    }
+    if effects.reconcile_keyboard_focus {
+        reconcile_keyboard_focus(client, stream)?;
+    }
+    if effects.redraw {
+        redraw_scene(client, output)?;
+    }
+    Ok(())
 }
 
 /// Log and discard an optional request this compositor does not implement.
@@ -827,6 +897,15 @@ fn handle_registry_bind(
             ),
         ));
     };
+    if version == 0 || version > global.version {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "cannot bind {} at version {version}; supported version is {}",
+                global.interface, global.version
+            ),
+        ));
+    }
 
     client.insert_object(new_id, global.kind)?;
 
@@ -881,7 +960,8 @@ fn handle_compositor_create_surface(client: &mut Client, payload: &[u8]) -> io::
             y: 40,
             attach_x: 0,
             attach_y: 0,
-            xdg_surface_id: None,
+            role: None,
+            has_committed: false,
             frame_callbacks: Vec::new(),
             mapped: false,
         },
@@ -1064,22 +1144,37 @@ fn handle_buffer_destroy(client: &mut Client, buffer_id: u32) {
 fn handle_surface_destroy(
     client: &mut Client,
     output: &mut Framebuffer,
+    stream: &mut UnixStream,
     surface_id: u32,
 ) -> io::Result<()> {
     client.objects.remove(&surface_id);
-    client.surfaces.remove(&surface_id);
+    let mut layer_layout_changed = false;
+    if let Some(surface) = client.surfaces.remove(&surface_id) {
+        match surface.role {
+            Some(SurfaceRole::Layer(layer_surface_id)) => {
+                client.objects.remove(&layer_surface_id);
+                client.layer_shell.remove(layer_surface_id);
+                layer_layout_changed = true;
+            }
+            Some(SurfaceRole::Xdg(xdg_surface_id)) => {
+                client.objects.remove(&xdg_surface_id);
+                if let Some(xdg_surface) = client.xdg_surfaces.remove(&xdg_surface_id)
+                    && let Some(XdgRole::Toplevel(toplevel_id)) = xdg_surface.role
+                {
+                    client.objects.remove(&toplevel_id);
+                    client.xdg_toplevels.remove(&toplevel_id);
+                }
+            }
+            None => {}
+        }
+    }
     remove_window_for_surface(client, surface_id);
-    if client.input.focused_surface == Some(surface_id) {
-        client.input.focused_surface = None;
+    if layer_layout_changed {
+        client.layer_layout_dirty = true;
+        ensure_layer_layout(client, output);
     }
-    for seat in client.seats.values_mut() {
-        if seat.pointer_focus == Some(surface_id) {
-            seat.pointer_focus = None;
-        }
-        if seat.keyboard_focus == Some(surface_id) {
-            seat.keyboard_focus = None;
-        }
-    }
+    reconcile_pointer_focus(client, stream)?;
+    reconcile_keyboard_focus(client, stream)?;
     println!("twland: wl_surface.destroy id={surface_id}");
     redraw_scene(client, output)?;
     Ok(())
@@ -1101,7 +1196,7 @@ fn handle_surface_attach(client: &mut Client, surface_id: u32, payload: &[u8]) -
         .surfaces
         .get_mut(&surface_id)
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "unknown surface"))?;
-    surface.pending_buffer = (buffer_id != 0).then_some(buffer_id);
+    surface.pending_buffer = Some((buffer_id != 0).then_some(buffer_id));
     surface.attach_x = x;
     surface.attach_y = y;
 
@@ -1158,14 +1253,20 @@ fn handle_xdg_wm_base_get_xdg_surface(
         .surfaces
         .get_mut(&wl_surface_id)
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "unknown wl_surface"))?;
-    if surface.xdg_surface_id.is_some() {
+    if surface.role.is_some() {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
-            "wl_surface already has an xdg role",
+            "wl_surface already has a role",
+        ));
+    }
+    if surface.has_committed {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "xdg role assigned after wl_surface was committed",
         ));
     }
 
-    surface.xdg_surface_id = Some(xdg_surface_id);
+    surface.role = Some(SurfaceRole::Xdg(xdg_surface_id));
     client.insert_object(xdg_surface_id, WaylandObjectKind::XdgSurface)?;
     client.xdg_surfaces.insert(
         xdg_surface_id,
@@ -1319,8 +1420,11 @@ fn handle_xdg_surface_destroy(
             client.objects.remove(&toplevel_id);
             client.xdg_toplevels.remove(&toplevel_id);
         }
-        if let Some(surface) = client.surfaces.get_mut(&xdg_surface.wl_surface_id) {
-            surface.xdg_surface_id = None;
+        if let Some(surface) = client.surfaces.get_mut(&xdg_surface.wl_surface_id)
+            && surface.role == Some(SurfaceRole::Xdg(xdg_surface_id))
+        {
+            surface.role = None;
+            surface.mapped = false;
         }
         remove_window_for_surface(client, xdg_surface.wl_surface_id);
         println!(
@@ -1366,74 +1470,149 @@ fn handle_surface_commit(
         .get(&surface_id)
         .cloned()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "unknown surface"))?;
-
-    if surface.pending_buffer.is_none() && surface.attached_buffer.is_none() {
-        if let Some(xdg_surface_id) = surface.xdg_surface_id {
-            handle_initial_xdg_empty_commit(client, stream, surface_id, xdg_surface_id)?;
-        } else {
-            println!("twland: wl_surface.commit surface={surface_id} no-buffer");
-        }
-        client.surfaces.insert(surface_id, surface);
-        return Ok(());
+    let had_buffer = surface.attached_buffer.is_some();
+    let had_assignment = surface.pending_buffer.is_some();
+    if let Some(assignment) = surface.pending_buffer.take() {
+        surface.attached_buffer = assignment;
     }
+    surface.has_committed = true;
 
-    if surface.pending_buffer.is_some() {
-        surface.attached_buffer = surface.pending_buffer;
-        surface.pending_buffer = None;
-    }
+    let mut should_redraw = false;
+    let mut should_reconcile_focus = false;
+    let mut committed_buffer = None;
 
-    let Some(buffer_id) = surface.attached_buffer else {
-        client.surfaces.insert(surface_id, surface);
-        println!("twland: wl_surface.commit surface={surface_id} no-buffer");
-        return Ok(());
-    };
+    match surface.role {
+        Some(SurfaceRole::Xdg(xdg_surface_id)) => {
+            if let Some(buffer_id) = surface.attached_buffer {
+                let xdg_surface = client.xdg_surfaces.get(&xdg_surface_id).ok_or_else(|| {
+                    io::Error::new(ErrorKind::InvalidData, "unknown xdg_surface")
+                })?;
+                if !xdg_surface.configured {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "xdg_surface buffer committed before ack_configure",
+                    ));
+                }
+                let Some(XdgRole::Toplevel(toplevel_id)) = xdg_surface.role else {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "xdg_surface committed a buffer before assigning a role",
+                    ));
+                };
+                let buffer = client.buffers.get(&buffer_id).cloned().ok_or_else(|| {
+                    io::Error::new(ErrorKind::InvalidData, "commit references unknown buffer")
+                })?;
 
-    let xdg_info = if let Some(xdg_surface_id) = surface.xdg_surface_id {
-        let xdg_surface = client
-            .xdg_surfaces
-            .get(&xdg_surface_id)
-            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "unknown xdg_surface"))?;
-        if !xdg_surface.configured {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "xdg_surface buffer committed before ack_configure",
-            ));
-        }
-        xdg_surface.role
-    } else {
-        if !TWLAND_ALLOW_ROLELESS_DEBUG_SURFACES {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "roleless wl_surface commit is disabled; use xdg-shell",
-            ));
-        }
-        None
-    };
-
-    let buffer = client.buffers.get(&buffer_id).cloned().ok_or_else(|| {
-        io::Error::new(ErrorKind::InvalidData, "commit references unknown buffer")
-    })?;
-
-    if let Some(XdgRole::Toplevel(toplevel_id)) = xdg_info {
-        if !surface.mapped {
-            if let Some(toplevel) = client.xdg_toplevels.get(&toplevel_id) {
-                println!(
-                    "twland: mapped xdg_toplevel title=\"{}\" app_id=\"{}\"",
-                    toplevel.title, toplevel.app_id
-                );
+                let newly_mapped = !surface.mapped;
+                if newly_mapped {
+                    if let Some(toplevel) = client.xdg_toplevels.get(&toplevel_id) {
+                        println!(
+                            "twland: mapped xdg_toplevel title=\"{}\" app_id=\"{}\"",
+                            toplevel.title, toplevel.app_id
+                        );
+                    }
+                    surface.mapped = true;
+                }
+                map_or_update_window(client, surface_id, toplevel_id, &buffer);
+                committed_buffer = Some((buffer_id, buffer));
+                should_redraw = true;
+                should_reconcile_focus = newly_mapped;
+            } else if had_buffer && had_assignment {
+                surface.mapped = false;
+                if let Some(xdg_surface) = client.xdg_surfaces.get_mut(&xdg_surface_id) {
+                    xdg_surface.configured = false;
+                    xdg_surface.pending_configure_serial = None;
+                    xdg_surface.last_acked_configure_serial = None;
+                }
+                remove_window_for_surface(client, surface_id);
+                should_redraw = true;
+                should_reconcile_focus = true;
+                println!("twland: unmapped xdg_surface={xdg_surface_id}");
+            } else {
+                let needs_initial_configure = client
+                    .xdg_surfaces
+                    .get(&xdg_surface_id)
+                    .is_some_and(|xdg| !xdg.configured && xdg.pending_configure_serial.is_none());
+                if needs_initial_configure {
+                    handle_initial_xdg_empty_commit(
+                        client,
+                        stream,
+                        surface_id,
+                        xdg_surface_id,
+                    )?;
+                }
             }
-            surface.mapped = true;
         }
-        map_or_update_window(client, surface_id, toplevel_id, &buffer);
-    } else if TWLAND_ALLOW_ROLELESS_DEBUG_SURFACES {
-        surface.mapped = true;
+        Some(SurfaceRole::Layer(layer_surface_id)) => {
+            client
+                .layer_shell
+                .get_mut(layer_surface_id)
+                .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "unknown layer surface"))?
+                .commit_pending()
+                .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+
+            if let Some(buffer_id) = surface.attached_buffer {
+                if !client
+                    .layer_shell
+                    .get(layer_surface_id)
+                    .is_some_and(|layer_surface| layer_surface.can_map())
+                {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "layer surface attached a buffer before acking its initial configure",
+                    ));
+                }
+                let buffer = client.buffers.get(&buffer_id).cloned().ok_or_else(|| {
+                    io::Error::new(ErrorKind::InvalidData, "commit references unknown buffer")
+                })?;
+                if let Some(layer_surface) = client.layer_shell.get_mut(layer_surface_id) {
+                    layer_surface.map();
+                }
+                surface.mapped = true;
+                committed_buffer = Some((buffer_id, buffer));
+                should_redraw = true;
+                should_reconcile_focus = true;
+                println!(
+                    "twland: mapped zwlr_layer_surface_v1 id={layer_surface_id} surface={surface_id}"
+                );
+            } else if had_buffer && had_assignment {
+                if let Some(layer_surface) = client.layer_shell.get_mut(layer_surface_id) {
+                    layer_surface.unmap();
+                }
+                surface.mapped = false;
+                should_redraw = true;
+                should_reconcile_focus = true;
+                println!("twland: unmapped zwlr_layer_surface_v1 id={layer_surface_id}");
+            } else {
+                send_initial_layer_configure(client, output, stream, layer_surface_id)?;
+            }
+            client.layer_layout_dirty |= should_redraw;
+        }
+        None => {
+            if surface.attached_buffer.is_some() && !TWLAND_ALLOW_ROLELESS_DEBUG_SURFACES {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "roleless wl_surface commit is disabled; use a shell protocol",
+                ));
+            }
+            surface.mapped = surface.attached_buffer.is_some();
+            should_redraw = surface.mapped;
+        }
     }
 
     surface.damage = None;
     let callbacks = std::mem::take(&mut surface.frame_callbacks);
     client.surfaces.insert(surface_id, surface);
-    redraw_scene(client, output)?;
-    send_message(stream, buffer_id, WL_BUFFER_RELEASE, &[])?;
+
+    if should_reconcile_focus {
+        reconcile_keyboard_focus(client, stream)?;
+    }
+    if should_redraw {
+        redraw_scene(client, output)?;
+    }
+    if let Some((buffer_id, _)) = committed_buffer.as_ref() {
+        send_message(stream, *buffer_id, WL_BUFFER_RELEASE, &[])?;
+    }
 
     for callback_id in callbacks {
         let mut payload = Vec::new();
@@ -1442,9 +1621,47 @@ fn handle_surface_commit(
         client.objects.remove(&callback_id);
     }
 
+    if let Some((buffer_id, buffer)) = committed_buffer {
+        println!(
+            "twland: wl_surface.commit surface={surface_id} buffer={buffer_id} redraw={}x{}",
+            buffer.width, buffer.height
+        );
+    } else {
+        println!("twland: wl_surface.commit surface={surface_id} no-buffer");
+    }
+    Ok(())
+}
+
+fn send_initial_layer_configure(
+    client: &mut Client,
+    output: &Framebuffer,
+    stream: &mut UnixStream,
+    layer_surface_id: u32,
+) -> io::Result<()> {
+    if !client
+        .layer_shell
+        .get(layer_surface_id)
+        .is_some_and(|surface| surface.needs_initial_configure())
+    {
+        return Ok(());
+    }
+
+    let output_geometry = framebuffer_geometry(output);
+    let (width, height) = client
+        .layer_shell
+        .configure_size(layer_surface_id, output_geometry)
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "unknown layer surface"))?;
+    let serial = client.next_serial();
+    layer::wire::send_configure(stream, layer_surface_id, serial, width, height)?;
+    if let Some(surface) = client.layer_shell.get_mut(layer_surface_id) {
+        surface.record_configure(layer::Configure {
+            serial,
+            width,
+            height,
+        });
+    }
     println!(
-        "twland: wl_surface.commit surface={surface_id} buffer={buffer_id} redraw={}x{}",
-        buffer.width, buffer.height
+        "twland: sent zwlr_layer_surface_v1.configure id={layer_surface_id} serial={serial} size={width}x{height}"
     );
     Ok(())
 }
@@ -1609,20 +1826,16 @@ fn remove_window_for_surface(client: &mut Client, surface_id: u32) {
 }
 
 fn redraw_scene(client: &mut Client, output: &mut Framebuffer) -> io::Result<()> {
+    ensure_layer_layout(client, output);
     let mut frame = output.begin_frame(DESKTOP_BACKGROUND)?;
+
+    draw_layer(&mut frame, client, Layer::Background)?;
+    draw_layer(&mut frame, client, Layer::Bottom)?;
+
     let windows = client.compositor.windows.clone();
     for window in windows.iter().filter(|window| window.mapped) {
         draw_window_decoration(&mut frame, window)?;
         let Some(surface) = client.surfaces.get(&window.surface_id).cloned() else {
-            continue;
-        };
-        let Some(buffer_id) = surface.attached_buffer else {
-            continue;
-        };
-        let Some(buffer) = client.buffers.get(&buffer_id).cloned() else {
-            continue;
-        };
-        let Some(pool) = client.pools.get(&buffer.pool_id) else {
             continue;
         };
         let mut draw_surface = surface;
@@ -1631,16 +1844,116 @@ fn redraw_scene(client: &mut Client, output: &mut Framebuffer) -> io::Result<()>
             window.y + window.decoration.titlebar_height + window.decoration.border_width;
         draw_surface.attach_x = 0;
         draw_surface.attach_y = 0;
-        let damage = Rect {
-            x: 0,
-            y: 0,
-            width: buffer.width,
-            height: buffer.height,
-        };
-        blit_shm_buffer_to_output(&mut frame, pool, &buffer, &draw_surface, damage)?;
+        draw_surface_buffer(&mut frame, client, &draw_surface)?;
     }
+
+    draw_layer(&mut frame, client, Layer::Top)?;
+    draw_layer(&mut frame, client, Layer::Overlay)?;
     draw_cursor(&mut frame, client.input.pointer_x, client.input.pointer_y)?;
     frame.present()
+}
+
+fn ensure_layer_layout(client: &mut Client, output: &Framebuffer) {
+    if client.layer_layout_dirty || client.layer_layout_output != framebuffer_geometry(output) {
+        refresh_layer_layout(client, output);
+    }
+}
+
+fn framebuffer_geometry(output: &Framebuffer) -> Geometry {
+    Geometry {
+        x: 0,
+        y: 0,
+        width: output.width() as i32,
+        height: output.height() as i32,
+    }
+}
+
+fn refresh_layer_layout(client: &mut Client, output: &Framebuffer) {
+    let output_geometry = framebuffer_geometry(output);
+    let buffer_sizes = client
+        .surfaces
+        .iter()
+        .filter_map(|(surface_id, surface)| {
+            let buffer = client.buffers.get(&surface.attached_buffer?)?;
+            Some((*surface_id, (buffer.width, buffer.height)))
+        })
+        .collect::<HashMap<_, _>>();
+    client.layer_shell.arrange(output_geometry, &buffer_sizes);
+
+    for layer in [Layer::Background, Layer::Bottom, Layer::Top, Layer::Overlay] {
+        for surface_id in client.layer_shell.surface_ids_on(layer) {
+            let Some(geometry) = client.layer_shell.geometry_for_surface(surface_id) else {
+                continue;
+            };
+            if let Some(surface) = client.surfaces.get_mut(&surface_id) {
+                surface.x = geometry.x;
+                surface.y = geometry.y;
+                surface.attach_x = 0;
+                surface.attach_y = 0;
+            }
+        }
+    }
+
+    let usable = client.layer_shell.usable_area();
+    for window in &mut client.compositor.windows {
+        let outer_width = window.width + window.decoration.border_width * 2;
+        let outer_height =
+            window.height + window.decoration.titlebar_height + window.decoration.border_width * 2;
+        let max_x = usable
+            .x
+            .saturating_add(usable.width.saturating_sub(outer_width).max(0));
+        let max_y = usable
+            .y
+            .saturating_add(usable.height.saturating_sub(outer_height).max(0));
+        window.x = window.x.clamp(usable.x, max_x);
+        window.y = window.y.clamp(usable.y, max_y);
+        window.decoration = decoration_for_window(window.x, window.y, window.width);
+    }
+    let window_ids = client
+        .compositor
+        .windows
+        .iter()
+        .map(|window| window.surface_id)
+        .collect::<Vec<_>>();
+    for surface_id in window_ids {
+        sync_surface_to_window(client, surface_id);
+    }
+    client.layer_layout_dirty = false;
+    client.layer_layout_output = output_geometry;
+}
+
+fn draw_layer(output: &mut Frame<'_>, client: &Client, layer: Layer) -> io::Result<()> {
+    for surface_id in client.layer_shell.surface_ids_on(layer) {
+        let Some(surface) = client.surfaces.get(&surface_id) else {
+            continue;
+        };
+        draw_surface_buffer(output, client, surface)?;
+    }
+    Ok(())
+}
+
+fn draw_surface_buffer(
+    output: &mut Frame<'_>,
+    client: &Client,
+    surface: &SurfaceState,
+) -> io::Result<()> {
+    let Some(buffer_id) = surface.attached_buffer else {
+        return Ok(());
+    };
+    let Some(buffer) = client.buffers.get(&buffer_id) else {
+        return Ok(());
+    };
+    let Some(pool) = client.pools.get(&buffer.pool_id) else {
+        return Ok(());
+    };
+    let damage = Rect {
+        x: 0,
+        y: 0,
+        width: buffer.width,
+        height: buffer.height,
+    };
+    blit_shm_buffer_to_output(output, pool, buffer, surface, damage)?;
+    Ok(())
 }
 
 /// Draw an X-shaped cursor at the pointer position.  The compositor owns the
@@ -1748,7 +2061,27 @@ fn draw_close_glyph(output: &mut Frame<'_>, rect: Rect) -> io::Result<()> {
     Ok(())
 }
 
-fn hit_test(state: &CompositorState, x: i32, y: i32) -> HitTest {
+fn hit_test(client: &Client, x: i32, y: i32) -> HitTest {
+    for layer in [Layer::Overlay, Layer::Top] {
+        if let Some(surface_id) = client.layer_shell.topmost_at_on(layer, x, y) {
+            return HitTest::LayerSurface { surface_id };
+        }
+    }
+
+    let window_hit = hit_test_window(&client.compositor, x, y);
+    if window_hit != HitTest::None {
+        return window_hit;
+    }
+
+    for layer in [Layer::Bottom, Layer::Background] {
+        if let Some(surface_id) = client.layer_shell.topmost_at_on(layer, x, y) {
+            return HitTest::LayerSurface { surface_id };
+        }
+    }
+    HitTest::None
+}
+
+fn hit_test_window(state: &CompositorState, x: i32, y: i32) -> HitTest {
     for window in state.windows.iter().rev().filter(|window| window.mapped) {
         let border = window.decoration.border_width;
         let titlebar = window.decoration.titlebar_height;
@@ -1830,7 +2163,11 @@ fn focus_window(
         window.focused = window.surface_id == surface_id;
     }
 
-    update_keyboard_focus(client, stream, Some(surface_id))?;
+    let keyboard_focus = client
+        .layer_shell
+        .exclusive_keyboard_focus()
+        .or(Some(surface_id));
+    update_keyboard_focus(client, stream, keyboard_focus)?;
     if send_configure {
         if let Some(old) = old_focus {
             send_focus_configure(client, stream, old, false)?;
@@ -1953,13 +2290,11 @@ fn dispatch_pointer_position(
         return Ok(());
     }
 
-    let hit = hit_test(
-        &client.compositor,
-        client.input.pointer_x,
-        client.input.pointer_y,
-    );
+    let hit = hit_test(client, client.input.pointer_x, client.input.pointer_y);
     let client_focus = match hit {
-        HitTest::ClientArea { surface_id } => Some(surface_id),
+        HitTest::ClientArea { surface_id } | HitTest::LayerSurface { surface_id } => {
+            Some(surface_id)
+        }
         _ => None,
     };
     if client.input.focused_surface != client_focus {
@@ -2014,11 +2349,7 @@ fn dispatch_pointer_button(
         return Ok(());
     }
 
-    let hit = hit_test(
-        &client.compositor,
-        client.input.pointer_x,
-        client.input.pointer_y,
-    );
+    let hit = hit_test(client, client.input.pointer_x, client.input.pointer_y);
     if pressed {
         match hit {
             HitTest::CloseButton { surface_id } => {
@@ -2052,6 +2383,19 @@ fn dispatch_pointer_button(
                     client.input.focused_surface = Some(surface_id);
                 }
             }
+            HitTest::LayerSurface { surface_id } => {
+                if client.input.focused_surface != Some(surface_id) {
+                    update_pointer_focus(client, stream, Some(surface_id))?;
+                    client.input.focused_surface = Some(surface_id);
+                }
+                if client
+                    .layer_shell
+                    .keyboard_interactivity_for_surface(surface_id)
+                    .is_some_and(|mode| mode != KeyboardInteractivity::None)
+                {
+                    update_keyboard_focus(client, stream, Some(surface_id))?;
+                }
+            }
             HitTest::None => {
                 if client.input.focused_surface.is_some() {
                     update_pointer_focus(client, stream, None)?;
@@ -2060,7 +2404,10 @@ fn dispatch_pointer_button(
                 return Ok(());
             }
         }
-    } else if !matches!(hit, HitTest::ClientArea { .. }) {
+    } else if !matches!(
+        hit,
+        HitTest::ClientArea { .. } | HitTest::LayerSurface { .. }
+    ) {
         return Ok(());
     }
 
@@ -2087,7 +2434,11 @@ fn dispatch_keyboard_key(
     keycode: u32,
     pressed: bool,
 ) -> io::Result<()> {
-    if client.compositor.focused_surface.is_none() {
+    if client
+        .seats
+        .values()
+        .all(|seat| seat.keyboard_focus.is_none())
+    {
         return Ok(());
     }
 
@@ -2153,6 +2504,25 @@ fn update_pointer_focus(
     Ok(())
 }
 
+fn reconcile_pointer_focus(client: &mut Client, stream: &mut UnixStream) -> io::Result<()> {
+    let focus = match hit_test(client, client.input.pointer_x, client.input.pointer_y) {
+        HitTest::ClientArea { surface_id } | HitTest::LayerSurface { surface_id } => {
+            Some(surface_id)
+        }
+        _ => None,
+    };
+    let focus_changed = client.input.focused_surface != focus
+        || client
+            .seats
+            .values()
+            .any(|seat| seat.pointer_focus != focus);
+    if focus_changed {
+        update_pointer_focus(client, stream, focus)?;
+        client.input.focused_surface = focus;
+    }
+    Ok(())
+}
+
 fn update_keyboard_focus(
     client: &mut Client,
     stream: &mut UnixStream,
@@ -2186,6 +2556,20 @@ fn update_keyboard_focus(
         seat.keyboard_focus = new_focus;
     }
     Ok(())
+}
+
+fn reconcile_keyboard_focus(client: &mut Client, stream: &mut UnixStream) -> io::Result<()> {
+    let current_layer_focus = client
+        .seats
+        .values()
+        .find_map(|seat| seat.keyboard_focus)
+        .filter(|surface_id| client.layer_shell.can_keep_keyboard_focus(*surface_id));
+    let focus = client
+        .layer_shell
+        .exclusive_keyboard_focus()
+        .or(current_layer_focus)
+        .or(client.compositor.focused_surface);
+    update_keyboard_focus(client, stream, focus)
 }
 
 fn surface_relative_position(client: &Client, surface_id: u32, x: i32, y: i32) -> (i32, i32) {

@@ -15,13 +15,17 @@
 /* XRGB8888 in Wayland's native byte order (0x00RRGGBB on little-endian). */
 #define SHM_FORMAT_XRGB8888 1
 
-static void fill_pattern(uint32_t *pixels) {
+static void fill_pattern(uint32_t *pixels, enum buffer_pattern pattern) {
 	for (int y = 0; y < BUFFER_HEIGHT; y++) {
 		for (int x = 0; x < BUFFER_WIDTH; x++) {
-			uint32_t color = 0xff3366ccu; /* soft blue */
+			uint32_t color = pattern == BUFFER_PATTERN_LAYER
+			                     ? 0xff243447u /* dark slate */
+			                     : 0xff3366ccu; /* soft blue */
 			if (x < 6 || y < 6 || x >= BUFFER_WIDTH - 6 ||
 			    y >= BUFFER_HEIGHT - 6) {
-				color = 0xffcc6633u; /* orange border */
+				color = pattern == BUFFER_PATTERN_LAYER
+				            ? 0xff38b2acu /* teal border */
+				            : 0xffcc6633u; /* orange border */
 			}
 			/* a diagonal accent so the window is unmistakably rendered */
 			if (x == (y * BUFFER_WIDTH) / BUFFER_HEIGHT ||
@@ -33,7 +37,8 @@ static void fill_pattern(uint32_t *pixels) {
 	}
 }
 
-int buffer_create(struct buffer *b, struct wl_shm *shm) {
+int buffer_create(struct buffer *b, struct wl_shm *shm,
+                  enum buffer_pattern pattern) {
 	memset(b, 0, sizeof(*b));
 	b->size = (size_t)BUFFER_STRIDE * BUFFER_HEIGHT;
 
@@ -55,7 +60,7 @@ int buffer_create(struct buffer *b, struct wl_shm *shm) {
 		close(b->fd);
 		return -1;
 	}
-	fill_pattern(b->pixels);
+	fill_pattern(b->pixels, pattern);
 
 	b->pool = wl_shm_create_pool(shm, b->fd, (int32_t)b->size);
 	if (!b->pool) {
