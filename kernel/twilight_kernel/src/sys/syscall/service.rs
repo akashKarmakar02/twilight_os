@@ -1,6 +1,6 @@
 use crate::arch::x86_64::io::{IA32_FS_BASE, rdmsr, wrmsr};
 use crate::driver::disk::ata::IO;
-use crate::driver::timer::pit::uptime;
+use crate::driver::time::uptime_secs_f64 as uptime;
 use crate::sys::fs::memfd::MemFd;
 use crate::sys::fs::pipe::make_pipe_ends;
 use crate::sys::fs::vfs::{FileType, VFS};
@@ -4995,7 +4995,7 @@ pub fn sysinfo(info_ptr: usize) -> i64 {
         return -(EFAULT as i64);
     }
 
-    let uptime_secs = crate::driver::timer::pit::uptime() as i64;
+    let uptime_secs = crate::driver::time::uptime_secs_f64() as i64;
 
     let total_pages: usize;
     let free_pages: usize;

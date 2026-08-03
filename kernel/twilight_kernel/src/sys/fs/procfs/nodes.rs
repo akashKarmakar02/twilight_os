@@ -1,4 +1,4 @@
-use crate::driver::timer::pit;
+use crate::driver::time;
 use crate::sys::fs::vfs::BlockDev;
 use crate::sys::fs::vfs::VfsNodeOps;
 use alloc::format;
@@ -101,7 +101,7 @@ fn build_meminfo() -> String {
 }
 
 fn build_uptime() -> String {
-    let up = pit::uptime();
+    let up = time::uptime_secs_f64();
     // Linux: "<uptime_seconds> <idle_seconds>\n"
     // We don't track idle time yet -> 0.00.
     format!("{:.2} {:.2}\n", up, 0.00)

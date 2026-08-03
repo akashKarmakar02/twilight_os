@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::arch::x86_64::halt;
-use crate::driver::timer::pit::uptime;
+use crate::driver::time::uptime_secs_f64 as uptime;
 use crate::sys::console::put_char_in_tty;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
 use alloc::collections::VecDeque;

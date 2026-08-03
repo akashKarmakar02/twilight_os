@@ -238,10 +238,22 @@ pub fn init(
     arch::x86_64::syscall::init();
 
     x86_64::instructions::interrupts::enable();
+
+    // Initialize the clocksource before anything that reads time or calibrates
+    // against it. The TSC clocksource is detected from CPUID (no IRQs needed)
+    // and publishes the TSC frequency used by `timer::wait` and LAPIC
+    // calibration below. This must precede `timer::init` and `lapic::init`.
+    driver::time::init();
+
     driver::timer::init();
 
-    // Switch to APIC timer
+    // Switch to APIC timer. Calibration busy-waits on the TSC, not on the
+    // interrupt-count clock, so it is correct under KVM (#62).
     driver::apic::lapic::init();
+
+    // Establish the realtime epoch from the CMOS RTC. The RTC defines the
+    // wall-clock origin; elapsed time thereafter comes from the TSC clocksource.
+    driver::time::init_realtime_offset_from_cmos();
 
     // Mask PIT (IRQ0) to prevent double ticks
     unsafe {
@@ -257,7 +269,7 @@ pub fn init(
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => ({
-        let time = $crate::driver::timer::pit::uptime();
+        let time = $crate::driver::time::uptime_secs_f64();
         $crate::sys::kmsg::push_log(format_args!("[{:.6}] {}", time, format_args!($($arg)*)));
         $crate::serial_println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
     });
@@ -266,7 +278,7 @@ macro_rules! log {
 #[macro_export]
 macro_rules! logger {
     ($($arg:tt)*) => ({
-        let time = $crate::driver::timer::pit::uptime();
+        let time = $crate::driver::time::uptime_secs_f64();
         $crate::sys::kmsg::push_log(format_args!("[{:.6}] {}", time, format_args!($($arg)*)));
         $crate::serial_println!("\x1b[93m[{:.6}]\x1b[0m {}", time, format_args!($($arg)*));
     });

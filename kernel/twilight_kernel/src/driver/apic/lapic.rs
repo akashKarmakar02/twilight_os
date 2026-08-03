@@ -67,19 +67,19 @@ pub fn init() {
 }
 
 fn calibrate_timer() {
-    // 1. Setup PIT for 10ms wait
-    // We'll trust our existing pit::sleep_ns or just busy wait on it.
-    // However, we need to handle the case where we might be running inside an interrupt context or similar logic?
-    // Actually, init() is called early in main(), interrupts enabled?
-    // We should assume interrupts are potentially enabled, or we can just spin poll the PIT.
+    // Calibrate the LAPIC timer interval against the TSC clocksource, not the
+    // interrupt-count clock. The old code called `pit::sleep_ns(10ms)`, which
+    // counted delivered timer interrupts; under KVM those can be coalesced,
+    // producing an interval that is too long and a clock that runs slow for the
+    // whole boot (#62). Busy-waiting on the TSC measures real elapsed time.
 
     unsafe {
         // One shot mode, large value
         write_reg(TICR_REG, 0xFFFFFFFF);
     }
 
-    // Wait 10ms
-    crate::driver::timer::pit::sleep_ns(10_000_000);
+    // Wait 10 ms of real time using the TSC.
+    crate::driver::timer::wait(10_000_000);
 
     let ticks_in_10ms = unsafe {
         let current = read_reg(TCCR_REG);

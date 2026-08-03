@@ -232,7 +232,7 @@ pub extern "sysv64" fn syscall_handler(
                     };
                 }
 
-                match crate::driver::timer::pit::sleep_timespec(req) {
+                match crate::driver::time::sleep_timespec(req) {
                     Ok(()) => 0i64,
                     Err(e) => e, // negative errno
                 }
@@ -252,7 +252,7 @@ pub extern "sysv64" fn syscall_handler(
         SYS_SETTID_ADDR => crate::sys::proc::id() as i64,
         SYS_CLOCK_GETTIME => {
             let timespec_ptr = arg2 as *mut Timespec;
-            crate::driver::timer::pit::sys_clock_gettime(arg1 as i32, timespec_ptr)
+            crate::driver::time::sys_clock_gettime(arg1 as i32, timespec_ptr)
         }
         SYS_CLOCK_NANOSLEEP => {
             const TIMER_ABSTIME: i32 = 1;
@@ -290,13 +290,13 @@ pub extern "sysv64" fn syscall_handler(
                     }
 
                     if flags & TIMER_ABSTIME == 0 {
-                        match crate::driver::timer::pit::sleep_timespec(&req) {
+                        match crate::driver::time::sleep_timespec(&req) {
                             Ok(()) => 0,
                             Err(errno) => errno,
                         }
                     } else {
                         let mut now = Timespec::default();
-                        let now_res = crate::driver::timer::pit::sys_clock_gettime(
+                        let now_res = crate::driver::time::sys_clock_gettime(
                             clockid,
                             &mut now as *mut Timespec,
                         );
@@ -312,7 +312,7 @@ pub extern "sysv64" fn syscall_handler(
                             if req_ns <= now_ns {
                                 0
                             } else {
-                                crate::driver::timer::pit::sleep_ns(
+                                crate::driver::time::sleep_ns(
                                     core::cmp::min(
                                         (req_ns - now_ns) as u128,
                                         u64::MAX as u128,

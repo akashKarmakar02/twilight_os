@@ -2,7 +2,7 @@ use crate::log;
 
 use crate::driver::disk::ata::{FileIO, IO};
 use crate::driver::timer::cmos::CMOS;
-use crate::driver::timer::pit::uptime;
+use crate::driver::time::uptime_secs_f64 as uptime;
 use lazy_static::lazy_static;
 use rand::{RngCore, SeedableRng};
 use rand_hc::Hc128Rng;
