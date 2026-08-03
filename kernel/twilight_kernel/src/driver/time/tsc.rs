@@ -10,7 +10,7 @@
 //! This is the root-cause fix for #62: elapsed time is read from the TSC, not
 //! from a count of delivered timer interrupts.
 
-use raw_cpuid::CpuId;
+use raw_cpuid::{CpuId, Hypervisor};
 
 use super::clocksource::{compute_mult_shift, ClockSource};
 
@@ -25,6 +25,11 @@ pub struct TscClock {
     freq_source: &'static str,
     /// Whether CPUID advertised an invariant TSC.
     invariant: bool,
+    /// Whether the TSC is usable as the system clocksource. False under QEMU
+    /// TCG, where the TSC advances at host real time while LAPIC/PIT advance at
+    /// QEMU virtual time. The frequency is still calibrated (for `timer::wait`
+    /// and LAPIC calibration) even when this is false.
+    usable_as_clocksource: bool,
 }
 
 impl TscClock {
@@ -42,6 +47,12 @@ impl TscClock {
 
     pub fn is_invariant(&self) -> bool {
         self.invariant
+    }
+
+    /// Whether the TSC should be used as the system clocksource. False under
+    /// TCG; the caller falls back to the interrupt-count clocksource.
+    pub fn usable_as_clocksource(&self) -> bool {
+        self.usable_as_clocksource
     }
 
     /// Consume the backend, yielding the calibrated clocksource for storage.
@@ -134,8 +145,26 @@ fn has_rdtscp() -> bool {
 /// Returns `None` only if no frequency could be determined. On the reported KVM
 /// `-cpu host` configuration the TSC is invariant and CPUID.15h is available, so
 /// path 1 is taken.
+///
+/// Returns `None` only if no frequency could be determined. Even under QEMU
+/// TCG (where the TSC is not usable as the system clocksource) the frequency is
+/// still calibrated and returned, because `timer::wait` and LAPIC calibration
+/// need a TSC frequency for short busy-waits. The caller checks
+/// `usable_as_clocksource()` to decide whether to use the TSC as the clocksource
+/// or fall back to the interrupt-count clocksource.
 pub fn detect() -> Option<TscClock> {
     let cpuid = CpuId::new();
+
+    // Under QEMU TCG (no KVM), the TSC advances at host real time while the
+    // LAPIC/PIT advance at QEMU virtual time. During `hlt` (idle), the virtual
+    // clock pauses but the host TSC keeps going, so the TSC-based clock would
+    // run fast. TCG delivers every interrupt (no coalescing), so the interrupt
+    // count is a valid clocksource there. We still calibrate the TSC frequency
+    // (for timer::wait and LAPIC calibration) but mark it unusable as clocksource.
+    let is_tcg = cpuid
+        .get_hypervisor_info()
+        .map(|h| matches!(h.identify(), Hypervisor::QEMU))
+        .unwrap_or(false);
 
     // Probe rdtscp once and cache it for the hot read path.
     let rdtscp = cpuid
@@ -186,6 +215,7 @@ pub fn detect() -> Option<TscClock> {
         source,
         freq_source,
         invariant,
+        usable_as_clocksource: !is_tcg,
     })
 }
 

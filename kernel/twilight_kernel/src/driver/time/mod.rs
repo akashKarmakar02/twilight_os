@@ -28,9 +28,14 @@ use crate::task::executor::halt;
 
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
-/// The selected hardware clocksource. `OnceCell` because it is initialized once
-/// at boot and read on every time read; reads are lock-free after init.
+/// The TSC clocksource, when available. `None` (and `TSC_AVAILABLE = false`)
+/// on QEMU TCG, where the TSC is not a valid clocksource.
 static CLOCKSOURCE: OnceCell<clocksource::ClockSource> = OnceCell::uninit();
+
+/// Whether the TSC clocksource was successfully initialized. When false,
+/// `monotonic_ns()` falls back to the interrupt-count clocksource.
+static TSC_AVAILABLE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Boot-time offset such that `CLOCK_REALTIME = offset + CLOCK_MONOTONIC`.
 /// Established once from the CMOS RTC; the RTC is used only for the epoch, never
@@ -38,60 +43,86 @@ static CLOCKSOURCE: OnceCell<clocksource::ClockSource> = OnceCell::uninit();
 static REALTIME_OFFSET_NS: AtomicU64 = AtomicU64::new(0);
 static OFFSET_INITED: AtomicU64 = AtomicU64::new(0); // 0 = no, 1 = yes
 
-/// Diagnostic counter of delivered timer events. **Not** the timeline. Kept
-/// only so boot diagnostics can compare IRQ count against clocksource elapsed
-/// time; never used to derive `CLOCK_MONOTONIC`.
+/// Counter of delivered timer events. Under KVM/bare metal this is diagnostic
+/// only; the TSC is the clocksource. Under QEMU TCG this counter **is** the
+/// clocksource, because TCG delivers every scheduled interrupt (no coalescing)
+/// so one event == one tick period.
 static TIMER_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Nanoseconds per timer event (tick period). The LAPIC timer is calibrated to
+/// 1 kHz, so each event represents 1 ms. Used by the TCG fallback clocksource.
+const NS_PER_TIMER_EVENT: u64 = 1_000_000;
 
 /// Initialize the clocksource. Must run once during boot, before any time read.
 ///
-/// On x86_64 this detects the invariant TSC and calibrates it. Failing to
-/// initialize is fatal because every consumer (logs, sleeps, scheduler,
-/// syscalls) depends on a working timeline.
+/// On x86_64 this tries the invariant TSC first. Under QEMU TCG (no KVM) the
+/// TSC is not a valid clocksource (it advances at host real time while the
+/// LAPIC/PIT advance at QEMU virtual time, so the two diverge during idle); in
+/// that case we fall back to the interrupt-count clocksource, which is correct
+/// under TCG because TCG delivers every interrupt.
 pub fn init() {
-    let tsc = tsc::detect().expect("no usable clocksource: TSC frequency unavailable");
+    match tsc::detect() {
+        Some(tsc) => {
+            let invariant = tsc.is_invariant();
+            let freq = tsc.frequency_hz();
+            let freq_source = tsc.frequency_source();
+            let usable = tsc.usable_as_clocksource();
 
-    let invariant = tsc.is_invariant();
-    let freq = tsc.frequency_hz();
-    let freq_source = tsc.frequency_source();
+            // Always publish the TSC frequency for timer::wait and LAPIC
+            // calibration, even when the TSC is not usable as the clocksource.
+            tsc::publish_frequency(freq);
 
-    if invariant {
-        crate::serial_println!(
-            "\x1b[93m[time]\x1b[0m clocksource=tsc invariant=true freq={} Hz source={}",
-            freq,
-            freq_source,
-        );
-    } else {
-        // The TSC is usable but CPUID did not advertise it as invariant. On
-        // real hardware this means the TSC may stop in deep C-states; under
-        // software emulation (TCG) there are no real C-states so it is correct.
-        crate::serial_println!(
-            "\x1b[93m[time]\x1b[0m clocksource=tsc invariant=false freq={} Hz source={} \
-             (warning: TSC not advertised invariant; time may drift in deep sleep on bare metal)",
-            freq,
-            freq_source,
-        );
+            if usable {
+                if invariant {
+                    crate::serial_println!(
+                        "\x1b[93m[time]\x1b[0m clocksource=tsc invariant=true freq={} Hz source={}",
+                        freq,
+                        freq_source,
+                    );
+                } else {
+                    crate::serial_println!(
+                        "\x1b[93m[time]\x1b[0m clocksource=tsc invariant=false freq={} Hz source={} \
+                         (warning: TSC not advertised invariant; time may drift in deep sleep on bare metal)",
+                        freq,
+                        freq_source,
+                    );
+                }
+                let _ = CLOCKSOURCE.try_init_once(|| tsc.into_source());
+                TSC_AVAILABLE.store(true, Ordering::Release);
+            } else {
+                // TCG: TSC frequency is calibrated for timer::wait/LAPIC, but
+                // the TSC is not the clocksource. Fall back to interrupt count.
+                crate::serial_println!(
+                    "\x1b[93m[time]\x1b[0m clocksource=tick freq={} Hz source={} \
+                     (TCG: TSC calibrated for delays but not usable as clocksource; using interrupt-count)",
+                    freq,
+                    freq_source,
+                );
+            }
+        }
+        None => {
+            // No TSC frequency at all. Fall back to the interrupt-count clocksource.
+            crate::serial_println!(
+                "\x1b[93m[time]\x1b[0m clocksource=tick (TSC unavailable; using interrupt-count fallback)"
+            );
+        }
     }
-
-    tsc::publish_frequency(freq);
-
-    // `detect()` already captured the epoch at calibration time; store that
-    // ClockSource as-is so elapsed_ns is near-zero at boot.
-    let _ = CLOCKSOURCE.try_init_once(|| tsc.into_source());
 }
 
 /// Continuously advancing monotonic nanoseconds since boot.
 ///
-/// Lock-free, allocation-free, and safe to call from any context including the
-/// timer ISR. Does not depend on interrupt delivery.
+/// Under KVM/bare metal this reads the TSC clocksource and does not depend on
+/// interrupt delivery. Under QEMU TCG it falls back to counting delivered timer
+/// events (correct there because TCG does not coalesce interrupts).
 #[inline]
 pub fn monotonic_ns() -> u64 {
-    let Some(cs) = CLOCKSOURCE.get() else {
-        // Before init: no time has elapsed. Returning 0 keeps early-boot
-        // consumers (e.g. the log macro) functional.
-        return 0;
-    };
-    cs.elapsed_ns(tsc::read_cycles())
+    if TSC_AVAILABLE.load(Ordering::Acquire) {
+        if let Some(cs) = CLOCKSOURCE.get() {
+            return cs.elapsed_ns(tsc::read_cycles());
+        }
+    }
+    // TCG fallback: each delivered timer event is one tick period.
+    TIMER_EVENTS.load(Ordering::Relaxed) * NS_PER_TIMER_EVENT
 }
 
 /// Wall-clock nanoseconds since the Unix epoch (`CLOCK_REALTIME`).
