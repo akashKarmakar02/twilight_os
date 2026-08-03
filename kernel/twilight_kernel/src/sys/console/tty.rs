@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::driver::keyboard::KeyboardListener;
-use crate::driver::timer::pit::uptime_duration;
+use crate::driver::time::uptime_duration;
 use crate::sys::console::TTY;
 use crate::sys::console::framebuffer::FramebufferTerminal;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};

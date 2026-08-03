@@ -1897,8 +1897,9 @@ fn switch_by_index_guarded(
 }
 
 fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
-    // need_resched is already set by on_timer_tick() (called via pit_tick_isr
-    // before this function). The logic below decides whether to act on it now.
+    // need_resched is already set by on_timer_tick() (called via
+    // driver::time::handle_timer_event before this function). The logic below
+    // decides whether to act on it now.
 
     // Existing safe path: interrupted userspace → schedule immediately.
     if from_user != 0 {
@@ -1931,7 +1932,7 @@ fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut Preemp
 
 pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
     crate::sys::preempt::irq_enter();
-    crate::driver::timer::pit::pit_tick_isr();
+    crate::driver::time::handle_timer_event();
 
     // EOI for IRQ0 (PIC timer)
     unsafe {
@@ -1949,7 +1950,7 @@ pub extern "C" fn apic_timer_preempt(
     from_user: u64,
 ) -> *mut PreemptFrame {
     crate::sys::preempt::irq_enter();
-    crate::driver::timer::pit::pit_tick_isr();
+    crate::driver::time::handle_timer_event();
 
     // EOI for Local APIC
     crate::driver::apic::lapic::end_of_interrupt();

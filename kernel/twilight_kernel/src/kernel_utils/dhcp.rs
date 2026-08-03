@@ -1,5 +1,5 @@
 use crate::driver::timer::cmos::CMOS;
-use crate::driver::timer::pit::uptime;
+use crate::driver::time::uptime_secs_f64 as uptime;
 use crate::println;
 use crate::sys::net::socket::SOCKETS;
 use crate::task::executor::sleep;

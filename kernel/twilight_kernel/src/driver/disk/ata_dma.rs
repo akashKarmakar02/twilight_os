@@ -1236,7 +1236,7 @@ lazy_static! {
 fn maybe_log_perf() {
     #[cfg(debug_assertions)]
     {
-        let now = crate::driver::timer::pit::uptime();
+        let now = crate::driver::time::uptime_secs_f64();
         let mut st = PERF_LOG_STATE.lock();
         if st.last_ts == 0.0 {
             st.last_ts = now;
@@ -1454,7 +1454,7 @@ pub fn init() {
         ));
     }
 
-    let time = crate::driver::timer::pit::uptime();
+    let time = crate::driver::time::uptime_secs_f64();
     println!(
         "\x1b[93m[{:.6}]\x1b[0m ATA-DMA mode queue={} dma_buf={}KiB",
         time,

@@ -1,5 +1,5 @@
 use crate::arch::x86_64::io::delay;
-use crate::driver::timer::pit::uptime;
+use crate::driver::time::uptime_secs_f64 as uptime;
 use crate::sys::fs::vfs::{BlockDev, VfsNodeOps};
 use crate::sys::memory::map_kernel_buffer;
 use crate::sys::proc::mem::{PAGE, align_up};

@@ -27,7 +27,7 @@ pub fn init_smp(mp_response: &'static MpResponse) {
     let bsp_id = mp_response.bsp_lapic_id();
     CPU_COUNT.store(smp.cpus().len(), Ordering::Relaxed);
 
-    let time = driver::timer::pit::uptime();
+    let time = driver::time::uptime_secs_f64();
 
     for i in 0..smp.cpus().len() {
         let cpu = smp.cpus().get(i).unwrap();
@@ -54,7 +54,7 @@ pub const IA32_KERNEL_GS_BASE: u32 = 0xc0000102;
 
 pub fn init(mp_response: &'static MpResponse) {
     let cpuid = CpuId::new();
-    let time = driver::timer::pit::uptime();
+    let time = driver::time::uptime_secs_f64();
 
     let name = if let Some(cpu) = cpuid.get_processor_brand_string() {
         String::from(cpu.as_str())

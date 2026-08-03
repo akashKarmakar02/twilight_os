@@ -6,6 +6,7 @@ pub mod keyboard;
 pub mod mouse;
 pub mod nic;
 pub mod pci_device_driver;
+pub mod time;
 pub mod timer;
 pub mod uart;
 pub mod usb;

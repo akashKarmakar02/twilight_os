@@ -1,5 +1,5 @@
 use crate::driver::keyboard::keyboard_interrupt;
-use crate::driver::timer::pit::monotonic_ns_u64;
+use crate::driver::time::monotonic_ns as monotonic_ns_u64;
 use crate::driver::usb::interfaces::{
     HostController, InterruptTransfer, UsbDevice, UsbDriver, UsbError,
 };

@@ -152,9 +152,9 @@ impl Bus {
     }
 
     fn poll(&mut self, bit: Status, val: bool) -> Result<(), ()> {
-        let start = crate::driver::timer::pit::uptime();
+        let start = crate::driver::time::uptime_secs_f64();
         while self.status().get_bit(bit as usize) != val {
-            if crate::driver::timer::pit::uptime() - start > 1.0 {
+            if crate::driver::time::uptime_secs_f64() - start > 1.0 {
                 println!("ATA hanged while polling {:?} bit in status register", bit);
                 self.debug();
                 return Err(());
@@ -406,7 +406,7 @@ fn ensure_buses() {
 pub fn init() {
     ensure_buses();
 
-    let time = crate::driver::timer::pit::uptime();
+    let time = crate::driver::time::uptime_secs_f64();
     let drives = list();
 
     for drive in drives {

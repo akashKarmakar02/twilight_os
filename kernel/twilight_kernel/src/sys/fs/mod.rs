@@ -49,7 +49,7 @@ pub enum VfsError {
 }
 
 pub fn init(show_log: bool) {
-    let uptime = crate::driver::timer::pit::uptime();
+    let uptime = crate::driver::time::uptime_secs_f64();
     for _ in 0..16 {
         #[allow(static_mut_refs)]
         let usb_ready = unsafe { USB_BLOCK_DEVICE.is_some() };
@@ -174,7 +174,7 @@ fn try_init_usb_storage(show_log: bool) -> bool {
             if show_log {
                 println!(
                     "\x1b[93m[{:.6}]\x1b[0m USB media left unchanged: {}",
-                    crate::driver::timer::pit::uptime(),
+                    crate::driver::time::uptime_secs_f64(),
                     err
                 );
             }
@@ -207,7 +207,7 @@ fn try_init_usb_storage(show_log: bool) -> bool {
         if show_log {
             println!(
                 "\x1b[93m[{:.6}]\x1b[0m USB storage mounted at /mnt/usb",
-                crate::driver::timer::pit::uptime()
+                crate::driver::time::uptime_secs_f64()
             );
         }
     };
@@ -291,7 +291,7 @@ fn try_mount_live_image(
     if show_log {
         println!(
             "\x1b[93m[{:.6}]\x1b[0m Live system mounted from {}",
-            crate::driver::timer::pit::uptime(),
+            crate::driver::time::uptime_secs_f64(),
             source
         );
     }
@@ -336,7 +336,7 @@ fn try_mount_boot(bus: u8, dsk: u8, show_log: bool) -> bool {
             if show_log {
                 println!(
                     "\x1b[93m[{:.6}]\x1b[0m FAT32 partition mounted at /boot from ATA {}:{} (LBA {})",
-                    crate::driver::timer::pit::uptime(),
+                    crate::driver::time::uptime_secs_f64(),
                     bus,
                     dsk,
                     entry_lba
@@ -356,7 +356,7 @@ fn try_mount_boot(bus: u8, dsk: u8, show_log: bool) -> bool {
             if show_log {
                 println!(
                     "\x1b[93m[{:.6}]\x1b[0m FAT16 partition mounted at /boot from ATA {}:{} (LBA {})",
-                    crate::driver::timer::pit::uptime(),
+                    crate::driver::time::uptime_secs_f64(),
                     bus,
                     dsk,
                     entry_lba

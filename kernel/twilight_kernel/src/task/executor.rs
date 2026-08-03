@@ -16,8 +16,8 @@ pub fn init_executor() {
 }
 
 pub fn sleep(duration: f64) {
-    let start = crate::driver::timer::pit::uptime();
-    while crate::driver::timer::pit::uptime() - start < duration {
+    let start = crate::driver::time::uptime_secs_f64();
+    while crate::driver::time::uptime_secs_f64() - start < duration {
         halt();
     }
 }
