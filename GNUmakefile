@@ -346,6 +346,11 @@ ifeq ($(KARCH),loongarch64)
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine/BOOTLOONGARCH64.EFI ::/EFI/BOOT
 endif
 
+.PHONY: test-time
+test-time: $(IMAGE_NAME).iso
+	# Non-destructive: boots the live ISO headless, never touches hdd.img.
+	tools/time-regression/run.sh $(IMAGE_NAME).iso
+
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel/twilight_kernel clean

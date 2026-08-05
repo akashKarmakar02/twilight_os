@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# tools/time-regression/run.sh — host/guest timing regression matrix for #64.
+#
+# Boots the Twilight OS live ISO headless under several QEMU configurations,
+# drives the `clockcheck` guest probe over serial, and correlates guest
+# CLOCK_MONOTONIC samples against host wall time. Non-destructive: it never
+# touches the developer's hdd.img — it boots the ISO + initramfs with no disk.
+#
+# Usage:
+#   tools/time-regression/run.sh [twilight-os.iso]
+#
+# Environment:
+#   TIME_REGRESSION_ITERS   iterations per short duration (default 100)
+#   TIME_REGRESSION_KVM     "auto"|"1"|"0" (default auto)
+#   TIME_REGRESSION_CELLS   space-separated "accel|cpu|smp" cells (default: all)
+#   TIME_REGRESSION_TIMEOUT per-cell clean-shutdown timeout, seconds (default 60)
+#
+# Output: RESULT/META lines on stdout; raw serial logs under logs/.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LOG_DIR="$SCRIPT_DIR/logs"
+mkdir -p "$LOG_DIR"
+
+ITERS="${TIME_REGRESSION_ITERS:-100}"
+KVM_MODE="${TIME_REGRESSION_KVM:-auto}"
+CELL_TIMEOUT="${TIME_REGRESSION_TIMEOUT:-60}"
+
+ISO="${1:-$REPO_ROOT/twilight-os.iso}"
+if [ ! -f "$ISO" ]; then
+    echo "error: ISO not found: $ISO" >&2
+    echo "hint: run 'make' first to build twilight-os.iso" >&2
+    exit 2
+fi
+
+ISO_SHA="$(sha256sum "$ISO" | awk '{print $1}')"
+QEMU_BIN="qemu-system-x86_64"
+if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
+    echo "error: $QEMU_BIN not found on PATH" >&2
+    exit 2
+fi
+QEMU_VERSION="$("$QEMU_BIN" --version | head -1)"
+COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+DIRTY="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+[ -z "$DIRTY" ] && DIRTY=0
+
+# Durations from the issue (nanoseconds).
+DURATIONS=(10000 100000 500000 1000000 2000000 5000000 16666667 100000000 1000000000)
+MODES=(rel abs read poll load)
+
+build_cells() {
+    local cells=()
+    cells+=("tcg|core2duo|1")
+    cells+=("tcg|core2duo|4")
+    cells+=("tcg|qemu64|1")
+    cells+=("tcg|max|1")
+    if [ "$KVM_MODE" = "1" ] || { [ "$KVM_MODE" = "auto" ] && [ -w /dev/kvm ]; }; then
+        cells+=("kvm|host|1")
+        cells+=("kvm|host|4")
+    else
+        echo "META note=kvm_skipped reason=/dev/kvm_unavailable_or_disabled" >&2
+    fi
+    echo "${cells[@]}"
+}
+
+if [ -n "${TIME_REGRESSION_CELLS:-}" ]; then
+    read -ra CELLS <<<"$TIME_REGRESSION_CELLS"
+else
+    read -ra CELLS <<<"$(build_cells)"
+fi
+
+# --- QEMU lifecycle --------------------------------------------------------
+
+QEMU_PID=""
+IN_FIFO=""
+
+cleanup_qemu() {
+    if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+        local i
+        for i in $(seq 1 20); do
+            kill -0 "$QEMU_PID" 2>/dev/null || break
+            sleep 0.2
+        done
+        kill -9 "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+    fi
+    [ -n "$IN_FIFO" ] && [ -e "$IN_FIFO" ] && rm -f "$IN_FIFO"
+}
+trap cleanup_qemu EXIT INT TERM
+
+# accel_args <accel> <cpu>
+accel_args() {
+    case "$1" in
+        kvm) echo "-enable-kvm -cpu $2" ;;
+        tcg) echo "-accel tcg -cpu $2" ;;
+        *)   echo "-accel $1 -cpu $2" ;;
+    esac
+}
+
+# Wait until `marker` appears in `file`, polling at 0.2s.
+wait_for_marker() {
+    local file="$1" marker="$2" timeout="${3:-10}"
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if grep -qF "$marker" "$file" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.2
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+wait_for_prompt() {
+    local serial="$1" timeout="${2:-40}"
+    # oksh root prompt is "# ". Also accept a generic "# " line end.
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if grep -qE '#[[:space:]]*$' "$serial" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
+# --- per-cell runner -------------------------------------------------------
+
+run_cell() {
+    local accel="$1" cpu="$2" smp="$3"
+    local tag="${accel}-${cpu}-smp${smp}"
+    local raw="$LOG_DIR/raw-${tag}.log"
+    : > "$raw"
+
+    echo "META qemu=$QEMU_VERSION machine=q35 commit=$COMMIT dirty=$DIRTY iso_sha=$ISO_SHA accel=$accel cpu=$cpu smp=$smp"
+
+    IN_FIFO="$(mktemp -u "$LOG_DIR/in.${tag}.XXXXXX.fifo")"
+    mkfifo "$IN_FIFO"
+    # Hold fd 3 open for writing so QEMU's stdin never sees EOF.
+    exec 3>"$IN_FIFO"
+
+    "$QEMU_BIN" \
+        -M q35 \
+        $(accel_args "$accel" "$cpu") \
+        -smp "$smp" \
+        -m 1024 \
+        -cdrom "$ISO" \
+        -boot d \
+        -serial stdio \
+        -monitor none \
+        -display none \
+        -no-reboot \
+        <"$IN_FIFO" >"$raw" 2>&1 &
+    QEMU_PID=$!
+
+    if ! wait_for_prompt "$raw" 40; then
+        echo "RESULT accel=$accel cpu=$cpu smp=$smp status=boot_timeout" >&2
+        exec 3>&-
+        cleanup_qemu
+        return 1
+    fi
+
+    # Marker-overhead calibration: 1-iteration batch, host timestamps
+    # BATCH_START..BATCH_END receipt.
+    local calib_start calib_end calib_delta
+    : > "$raw"
+    echo "" >&3
+    echo "clockcheck rel 1 1" >&3
+    calib_start="$(date +%s%N)"
+    wait_for_marker "$raw" "BATCH_START" 10 && calib_start="$(date +%s%N)"
+    wait_for_marker "$raw" "BATCH_END" 15 && calib_end="$(date +%s%N)"
+    wait_for_marker "$raw" "DONE" 10
+    calib_delta=$((calib_end - calib_start))
+    echo "META cell=$tag marker_overhead_ns=$calib_delta"
+
+    local mode dur iters extra
+    for mode in "${MODES[@]}"; do
+        for dur in "${DURATIONS[@]}"; do
+            case "$dur" in
+                1000000000) iters=5 ;;
+                100000000)  iters=10 ;;
+                16666667)   iters=20 ;;
+                *)          iters="$ITERS" ;;
+            esac
+            extra=0
+            [ "$mode" = "load" ] && extra=2
+
+            # Truncate the log so per-run record extraction is unambiguous.
+            : > "$raw"
+            echo "clockcheck $mode $dur $iters $extra" >&3
+
+            local batch_start="" batch_end=""
+            if [ "$dur" -le 500000 ]; then
+                wait_for_marker "$raw" "BATCH_START" 10 && batch_start="$(date +%s%N)"
+                wait_for_marker "$raw" "BATCH_END" 15 && batch_end="$(date +%s%N)"
+            fi
+            if ! wait_for_marker "$raw" "DONE" 30; then
+                echo "RESULT accel=$accel cpu=$cpu smp=$smp mode=$mode req_ns=$dur status=timeout" >&2
+                continue
+            fi
+
+            local host_batch_ns=0 host_rate_ns_per_op=0
+            if [ -n "$batch_start" ] && [ -n "$batch_end" ]; then
+                host_batch_ns=$((batch_end - batch_start))
+                [ "$iters" -gt 0 ] && host_rate_ns_per_op=$((host_batch_ns / iters))
+            fi
+
+            local summary
+            summary="$(awk -v mode="$mode" -v req="$dur" -f "$SCRIPT_DIR/parse.awk" "$raw")"
+            echo "RESULT accel=$accel cpu=$cpu smp=$smp mode=$mode req_ns=$dur iters=$iters \
+host_batch_ns=$host_batch_ns host_batch_overhead_ns=$calib_delta \
+host_rate_ns_per_op=$host_rate_ns_per_op $summary"
+        done
+    done
+
+    # QMP stop/resume semantics test: with -monitor none we cannot exercise the
+    # monitor from the host. Record as not-run; the cleanup path uses process
+    # signals instead. A dedicated QMP test can be added when a monitor socket
+    # is wired in.
+    echo "META cell=$tag qmp_stop_resume=not_run reason=monitor_disabled_for_bidir_serial"
+
+    # Clean shutdown.
+    echo "poweroff" >&3
+    local i
+    for i in $(seq 1 "$CELL_TIMEOUT"); do
+        kill -0 "$QEMU_PID" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$QEMU_PID" 2>/dev/null; then
+        echo "RESULT accel=$accel cpu=$cpu smp=$smp status=shutdown_timeout" >&2
+    fi
+    exec 3>&-
+    cleanup_qemu
+    return 0
+}
+
+# --- main ------------------------------------------------------------------
+
+echo "META harness=time-regression iso=$ISO iso_sha=$ISO_SHA iters=$ITERS"
+echo "META qemu_version=$QEMU_VERSION"
+echo "META commit=$COMMIT dirty=$DIRTY"
+echo "META cells=${CELLS[*]}"
+
+failures=0
+for cell in "${CELLS[@]}"; do
+    IFS='|' read -r accel cpu smp <<<"$cell"
+    if ! run_cell "$accel" "$cpu" "$smp"; then
+        failures=$((failures + 1))
+    fi
+done
+
+echo "META done failures=$failures"
+exit "$failures"
