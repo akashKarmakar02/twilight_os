@@ -52,7 +52,17 @@ BATCH_THRESHOLD_NS=500000
 # (space-separated nanosecond values) to test a subset, e.g. only short delays:
 #   TIME_REGRESSION_DURATIONS="10000 100000 500000" make test-time
 if [ -n "${TIME_REGRESSION_DURATIONS:-}" ]; then
-    read -ra DURATIONS <<<"$TIME_REGRESSION_DURATIONS"
+    IFS=$' \t' read -r -a DURATIONS <<<"$TIME_REGRESSION_DURATIONS"
+    if [ "${#DURATIONS[@]}" -eq 0 ]; then
+        echo "error: TIME_REGRESSION_DURATIONS must contain at least one duration" >&2
+        exit 2
+    fi
+    for dur in "${DURATIONS[@]}"; do
+        if ! [[ "$dur" =~ ^[1-9][0-9]*$ ]]; then
+            echo "error: invalid duration (must be a positive integer nanosecond value): $dur" >&2
+            exit 2
+        fi
+    done
 else
     DURATIONS=(10000 100000 500000 1000000 2000000 5000000 16666667 100000000 1000000000)
 fi
@@ -126,9 +136,10 @@ wait_for_prompt() {
     local serial="$1" timeout="${2:-90}"
     local elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
-        # oksh prints "# " or "$ " as a prompt; also detect the uart init line
-        # as a sign that userspace is up.
-        if grep -qE '#[[:space:]]*$|\$[[:space:]]*$|serial input enabled' "$serial" 2>/dev/null; then
+        # oksh prints "twilight# " (hostname + "# ") when the shell is ready
+        # for commands. Match the literal prompt; it may be followed by more
+        # output from services that crash-loop during boot.
+        if grep -qE 'twilight#' "$serial" 2>/dev/null; then
             return 0
         fi
         sleep 1
@@ -187,15 +198,28 @@ run_cell() {
         return 1
     fi
 
-    # Configure the PTY for raw mode and start draining it into the raw log.
+    # Configure the PTY for raw mode. We start/stop a `cat` reader around each
+    # run instead of leaving one running and truncating the file (truncation
+    # while cat holds the file open creates NUL-filled holes).
     stty -F "$PTY_DEV" raw -echo 2>/dev/null || true
-    cat "$PTY_DEV" >"$raw" &
-    local cat_pid=$!
 
+    # Drain PTY output into a file for the duration of a phase.
+    # Sets $cat_pid to the background cat process.
+    start_reader() {
+        : > "$1"
+        cat "$PTY_DEV" >"$1" &
+        cat_pid=$!
+    }
+    stop_reader() {
+        kill "$cat_pid" 2>/dev/null || true
+        wait "$cat_pid" 2>/dev/null || true
+    }
+
+    start_reader "$raw"
     if ! wait_for_prompt "$raw" 90; then
         echo "RESULT accel=$accel cpu=$cpu smp=$smp status=boot_timeout" >&2
         cat "$raw" >>"$transcript"
-        kill "$cat_pid" 2>/dev/null || true
+        stop_reader
         cleanup_qemu
         return 1
     fi
@@ -208,12 +232,14 @@ run_cell() {
     # Marker-overhead calibration: 1-iteration batch, host timestamps
     # BATCH_START..BATCH_END receipt.
     local calib_start="" calib_end="" calib_delta=0
+    stop_reader
     cat "$raw" >>"$transcript"
-    : > "$raw"
+    start_reader "$raw"
     send_guest "$PTY_DEV" "clockcheck rel 1 1"
     wait_for_marker "$raw" "BATCH_START" 10 && calib_start="$(date +%s%N)"
     wait_for_marker "$raw" "BATCH_END" 15 && calib_end="$(date +%s%N)"
     wait_for_marker "$raw" "DONE" 10
+    stop_reader
     cat "$raw" >>"$transcript"
     if [ -n "$calib_end" ] && [ -n "$calib_start" ]; then
         calib_delta=$((calib_end - calib_start))
@@ -235,7 +261,7 @@ run_cell() {
             extra=0
             [ "$mode" = "load" ] && extra=2
 
-            : > "$raw"
+            start_reader "$raw"
             send_guest "$PTY_DEV" "clockcheck $mode $dur $iters $extra"
 
             local batch_start="" batch_end=""
@@ -245,10 +271,12 @@ run_cell() {
             fi
             if ! wait_for_marker "$raw" "DONE" 30; then
                 echo "RESULT accel=$accel cpu=$cpu smp=$smp mode=$mode req_ns=$dur status=timeout" >&2
+                stop_reader
                 cat "$raw" >>"$transcript"
                 cell_failures=$((cell_failures + 1))
                 continue
             fi
+            stop_reader
 
             local host_batch_ns=0 host_rate_ns_per_op=0
             if [ -n "$batch_start" ] && [ -n "$batch_end" ]; then
@@ -258,8 +286,15 @@ run_cell() {
 
             local summary
             summary="$(awk -v mode="$mode" -v req="$dur" -f "$SCRIPT_DIR/parse.awk" "$raw")"
-            [ -z "$summary" ] && summary="SUMMARY mode=$mode req_ns=$dur iters=0 missing=1"
-            echo "RESULT accel=$accel cpu=$cpu smp=$smp mode=$mode req_ns=$dur iters=$iters \
+            if [ -z "$summary" ]; then
+                summary="SUMMARY mode=$mode req_ns=$dur iters=0 missing=1"
+                cell_failures=$((cell_failures + 1))
+                echo "GATE_VIOLATION accel=$accel cpu=$cpu smp=$smp mode=$mode req_ns=$dur reason=no_records" >&2
+            fi
+            # Parse the actual iteration count from the summary.
+            local actual_iters
+            actual_iters="$(printf '%s' "$summary" | sed -n 's/.*iters=\([0-9]*\).*/\1/p')"
+            echo "RESULT accel=$accel cpu=$cpu smp=$smp mode=$mode req_ns=$dur iters=${actual_iters:-0} \
 host_batch_ns=$host_batch_ns host_batch_overhead_ns=$calib_delta \
 host_rate_ns_per_op=$host_rate_ns_per_op $summary"
 
@@ -282,7 +317,9 @@ host_rate_ns_per_op=$host_rate_ns_per_op $summary"
     # is wired in.
     echo "META cell=$tag qmp_stop_resume=not_run reason=monitor_disabled_for_bidir_serial"
 
-    # Clean shutdown.
+    # Clean shutdown. Restart the reader so the PTY doesn't block on a full
+    # output buffer while the guest processes poweroff.
+    start_reader "$raw"
     send_guest "$PTY_DEV" "poweroff"
     local i
     for i in $(seq 1 "$CELL_TIMEOUT"); do
@@ -293,7 +330,8 @@ host_rate_ns_per_op=$host_rate_ns_per_op $summary"
         echo "RESULT accel=$accel cpu=$cpu smp=$smp status=shutdown_timeout" >&2
         cell_failures=$((cell_failures + 1))
     fi
-    kill "$cat_pid" 2>/dev/null || true
+    stop_reader
+    cat "$raw" >>"$transcript"
     cleanup_qemu
     return "$cell_failures"
 }
