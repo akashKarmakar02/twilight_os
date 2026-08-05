@@ -48,8 +48,14 @@ DIRTY="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
 # Must track the guest's BATCH_THRESHOLD_NS in userspace/apps/clockcheck/src/main.c.
 BATCH_THRESHOLD_NS=500000
 
-# Durations from the issue (nanoseconds).
-DURATIONS=(10000 100000 500000 1000000 2000000 5000000 16666667 100000000 1000000000)
+# Durations from the issue (nanoseconds). Override with TIME_REGRESSION_DURATIONS
+# (space-separated nanosecond values) to test a subset, e.g. only short delays:
+#   TIME_REGRESSION_DURATIONS="10000 100000 500000" make test-time
+if [ -n "${TIME_REGRESSION_DURATIONS:-}" ]; then
+    read -ra DURATIONS <<<"$TIME_REGRESSION_DURATIONS"
+else
+    DURATIONS=(10000 100000 500000 1000000 2000000 5000000 16666667 100000000 1000000000)
+fi
 MODES=(rel abs read poll load)
 
 build_cells() {
