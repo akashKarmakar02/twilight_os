@@ -65,12 +65,17 @@ struct rec {
     int result;
 };
 
-static uint64_t now_ns(void) {
+/* Read CLOCK_MONOTONIC. Returns 1 on success and writes ns to *out; returns
+ * 0 on failure. On failure the caller must emit a clock_error record and abort
+ * the mode rather than recording a zero timestamp, which would be misclassified
+ * as a backward-clock violation. */
+static int now_ns(uint64_t *out) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         return 0;
     }
-    return (uint64_t)ts.tv_sec * NS_PER_SEC + (uint64_t)ts.tv_nsec;
+    *out = (uint64_t)ts.tv_sec * NS_PER_SEC + (uint64_t)ts.tv_nsec;
+    return 1;
 }
 
 static long parse_long(const char *s) {
@@ -134,16 +139,28 @@ static void flush_recs(const char *mode, uint64_t req,
 
 /* --- modes ---------------------------------------------------------------- */
 
+/* Emit a clock_error record and return 1 from the caller to abort the mode.
+ * A failed clock read must not be recorded as a zero timestamp, since that
+ * would be misclassified as a backward-clock hard-gate violation. */
+#define CLOCK_ERROR(mode) do { \
+    printf("clock_error mode=%s errno=%d\n", (mode), errno); \
+    fflush(stdout); \
+} while (0)
+
 static void do_rel(uint64_t req, unsigned iters, int batch,
                    struct rec *recs) {
     struct timespec ts;
     ns_to_timespec(req, &ts);
     for (unsigned i = 0; i < iters; i++) {
-        uint64_t s = now_ns();
-        nanosleep(&ts, NULL);
-        uint64_t e = now_ns();
+        uint64_t s, e;
+        if (!now_ns(&s)) { CLOCK_ERROR("rel"); continue; }
+        int rc = nanosleep(&ts, NULL);
+        if (!now_ns(&e)) { CLOCK_ERROR("rel"); continue; }
+        /* rc != 0 means the sleep was interrupted (EINTR); do not gate an
+         * interrupted sleep as an early wakeup. */
+        int is_sleep = (rc == 0);
         struct rec r = { s, e, e - s, (int64_t)(e - s) - (int64_t)req,
-                         classify(s, e, req, 1) };
+                         classify(s, e, req, is_sleep) };
         if (batch) recs[i] = r; else print_rec("rel", req, &r);
     }
 }
@@ -151,14 +168,17 @@ static void do_rel(uint64_t req, unsigned iters, int batch,
 static void do_abs(uint64_t req, unsigned iters, int batch,
                    struct rec *recs) {
     for (unsigned i = 0; i < iters; i++) {
-        uint64_t s = now_ns();
+        uint64_t s, e;
+        if (!now_ns(&s)) { CLOCK_ERROR("abs"); continue; }
         uint64_t deadline = s + req;
         struct timespec dl;
         ns_to_timespec(deadline, &dl);
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &dl, NULL);
-        uint64_t e = now_ns();
+        /* clock_nanosleep returns the error number directly (not via errno). */
+        int rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &dl, NULL);
+        if (!now_ns(&e)) { CLOCK_ERROR("abs"); continue; }
+        int is_sleep = (rc == 0);
         struct rec r = { s, e, e - s, (int64_t)(e - s) - (int64_t)req,
-                         classify(s, e, req, 1) };
+                         classify(s, e, req, is_sleep) };
         if (batch) recs[i] = r; else print_rec("abs", req, &r);
     }
 }
@@ -168,19 +188,20 @@ static void do_read(uint64_t req, unsigned iters, int batch,
     /* Sample CLOCK_MONOTONIC rapidly during ~req of CPU work. Assert
      * non-decrease across all samples in the iteration. */
     for (unsigned i = 0; i < iters; i++) {
-        uint64_t s = now_ns();
+        uint64_t s, e;
+        if (!now_ns(&s)) { CLOCK_ERROR("read"); continue; }
         uint64_t prev = s;
         int backward = 0;
         volatile uint64_t sink = 0;
         uint64_t samples = 0;
-        while (now_ns() - s < req) {
-            uint64_t cur = now_ns();
+        uint64_t cur;
+        while (now_ns(&cur) && cur - s < req) {
             if (cur < prev) backward = 1;
             prev = cur;
             sink += samples;
             samples++;
         }
-        uint64_t e = now_ns();
+        if (!now_ns(&e)) { CLOCK_ERROR("read"); continue; }
         struct rec r = { s, e, e - s, (int64_t)(e - s) - (int64_t)req,
                          backward ? RES_BACKWARD : RES_OK };
         (void)samples;
@@ -199,13 +220,22 @@ static void do_poll(uint64_t req, unsigned iters, int batch,
         return;
     }
     int timeout_ms = (int)(req / 1000000ULL);
+    /* Sub-ms requests cannot be expressed as a poll timeout; do not gate them
+     * as early wakeups, since the immediate return is a granularity artifact
+     * rather than a missed deadline. */
+    int gate_early = (timeout_ms > 0);
     for (unsigned i = 0; i < iters; i++) {
         struct pollfd pf = { .fd = pfd[0], .events = POLLIN };
-        uint64_t s = now_ns();
-        poll(&pf, 1, timeout_ms);
-        uint64_t e = now_ns();
+        uint64_t s, e;
+        if (!now_ns(&s)) { CLOCK_ERROR("poll"); continue; }
+        int rc = poll(&pf, 1, timeout_ms);
+        if (!now_ns(&e)) { CLOCK_ERROR("poll"); continue; }
+        /* rc == 0 means the timeout elapsed (successful wait). rc > 0 means a
+         * fd was ready (unexpected here). rc < 0 is EINTR. Only a clean
+         * timeout (rc == 0) is gated as a sleep. */
+        int is_sleep = (rc == 0) && gate_early;
         struct rec r = { s, e, e - s, (int64_t)(e - s) - (int64_t)req,
-                         classify(s, e, req, 1) };
+                         classify(s, e, req, is_sleep) };
         if (batch) recs[i] = r; else print_rec("poll", req, &r);
     }
     close(pfd[0]);
@@ -217,6 +247,7 @@ static void do_load(uint64_t req, unsigned iters, int batch,
     /* Fork `workers` children that spin on CPU. Parent runs rel sleeps under
      * contention, then reaps the children. */
     pid_t pids[256];
+    unsigned spawned = 0;
     if (workers > 256) workers = 256;
     for (unsigned w = 0; w < workers; w++) {
         pid_t pid = fork();
@@ -224,20 +255,24 @@ static void do_load(uint64_t req, unsigned iters, int batch,
             volatile uint64_t spin = 0;
             while (1) spin++;
         } else if (pid > 0) {
-            pids[w] = pid;
+            pids[spawned++] = pid;
+        } else {
+            printf("load fork_error errno=%d\n", errno);
         }
     }
     struct timespec ts;
     ns_to_timespec(req, &ts);
     for (unsigned i = 0; i < iters; i++) {
-        uint64_t s = now_ns();
-        nanosleep(&ts, NULL);
-        uint64_t e = now_ns();
+        uint64_t s, e;
+        if (!now_ns(&s)) { CLOCK_ERROR("load"); continue; }
+        int rc = nanosleep(&ts, NULL);
+        if (!now_ns(&e)) { CLOCK_ERROR("load"); continue; }
+        int is_sleep = (rc == 0);
         struct rec r = { s, e, e - s, (int64_t)(e - s) - (int64_t)req,
-                         classify(s, e, req, 1) };
+                         classify(s, e, req, is_sleep) };
         if (batch) recs[i] = r; else print_rec("load", req, &r);
     }
-    for (unsigned w = 0; w < workers; w++) {
+    for (unsigned w = 0; w < spawned; w++) {
         kill(pids[w], SIGKILL);
         waitpid(pids[w], NULL, 0);
     }
@@ -256,11 +291,24 @@ static int is_all_digits(const char *s) {
 
 static int run_protocol(const char *mode, uint64_t req, unsigned iters,
                         unsigned extra) {
-    int batch = (req <= BATCH_THRESHOLD_NS) && iters <= MAX_ITERS;
     static struct rec recs[MAX_ITERS];
 
     if (iters > MAX_ITERS) iters = MAX_ITERS;
     if (iters == 0) iters = 1;
+
+    /* Validate the mode before emitting BATCH_START so an unknown mode does not
+     * leave the host waiting for a BATCH_END that never arrives. */
+    int valid_mode = (strcmp(mode, "rel") == 0 || strcmp(mode, "abs") == 0 ||
+                      strcmp(mode, "read") == 0 || strcmp(mode, "poll") == 0 ||
+                      strcmp(mode, "load") == 0);
+    if (!valid_mode) {
+        printf("error unknown_mode=%s\n", mode);
+        printf("DONE\n");
+        fflush(stdout);
+        return 1;
+    }
+
+    int batch = (req <= BATCH_THRESHOLD_NS);
 
     if (batch) {
         printf("BATCH_START mode=%s req_ns=%llu iters=%u\n",
@@ -278,11 +326,6 @@ static int run_protocol(const char *mode, uint64_t req, unsigned iters,
         do_poll(req, iters, batch, recs);
     } else if (strcmp(mode, "load") == 0) {
         do_load(req, iters, batch, recs, extra);
-    } else {
-        printf("error unknown_mode=%s\n", mode);
-        printf("DONE\n");
-        fflush(stdout);
-        return 1;
     }
 
     if (batch) {
@@ -302,11 +345,18 @@ static int run_protocol(const char *mode, uint64_t req, unsigned iters,
 static int run_legacy(long sleep_ms) {
     uint64_t req_ns = (uint64_t)sleep_ms * 1000000ULL;
 
-    uint64_t t0 = now_ns();
+    uint64_t t0, t1;
+    if (!now_ns(&t0)) {
+        printf("clock_error errno=%d\n", errno);
+        return 1;
+    }
     struct timespec req = { .tv_sec = sleep_ms / 1000,
                             .tv_nsec = (sleep_ms % 1000) * 1000000L };
     nanosleep(&req, NULL);
-    uint64_t t1 = now_ns();
+    if (!now_ns(&t1)) {
+        printf("clock_error errno=%d\n", errno);
+        return 1;
+    }
     uint64_t meas_ns = t1 - t0;
 
     /* drift in parts per million, positive = clock slow (measured > requested).
@@ -318,8 +368,9 @@ static int run_legacy(long sleep_ms) {
            (unsigned long long)req_ns, (unsigned long long)meas_ns,
            (long long)drift_ppm);
 
-    uint64_t a = now_ns();
-    uint64_t b = now_ns();
+    uint64_t a, b;
+    if (!now_ns(&a)) { printf("clock_error errno=%d\n", errno); return 1; }
+    if (!now_ns(&b)) { printf("clock_error errno=%d\n", errno); return 1; }
     if (b < a) {
         printf("monotonicity FAIL a=%llu b=%llu\n",
                (unsigned long long)a, (unsigned long long)b);
@@ -327,13 +378,14 @@ static int run_legacy(long sleep_ms) {
     }
     printf("monotonicity OK\n");
 
-    uint64_t w0 = now_ns();
+    uint64_t w0, w1, cur;
+    if (!now_ns(&w0)) { printf("clock_error errno=%d\n", errno); return 1; }
     volatile uint64_t sink = 0;
     uint64_t target = 200 * 1000000ULL;
-    while (now_ns() - w0 < target) {
+    while (now_ns(&cur) && cur - w0 < target) {
         for (int i = 0; i < 1000; i++) sink += i;
     }
-    uint64_t w1 = now_ns();
+    if (!now_ns(&w1)) { printf("clock_error errno=%d\n", errno); return 1; }
     printf("busy req_ns=%llu meas_ns=%llu\n",
            (unsigned long long)target, (unsigned long long)(w1 - w0));
 

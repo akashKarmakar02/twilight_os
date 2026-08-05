@@ -8,10 +8,9 @@
 #     lateness_p50_ns=.. lateness_p95_ns=.. lateness_p99_ns=.. lateness_max_ns=.. \
 #     early=<e> backward=<b>
 #
-# Percentiles are computed by sorting the samples. Sorting is done in awk by
-# inserting into an array and emitting to `sort -n` via a coprocess; this keeps
-# the parser deterministic and free of floating point. lateness is signed; its
-# percentiles are computed on the signed values (sort -n handles negatives).
+# Percentiles are computed by sorting the samples with an in-awk insertion
+# sort; this keeps the parser deterministic and free of external processes.
+# lateness is signed; its percentiles are computed on the signed values.
 #
 # Usage:
 #   awk -f tools/time-regression/parse.awk < serial.log

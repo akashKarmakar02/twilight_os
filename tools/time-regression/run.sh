@@ -75,8 +75,13 @@ fi
 QEMU_PID=""
 IN_FIFO=""
 
+# Must track the guest's BATCH_THRESHOLD_NS in userspace/apps/clockcheck/src/main.c.
+BATCH_THRESHOLD_NS=500000
+
 cleanup_qemu() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+        # SIGTERM first so QEMU can flush serial output, then escalate.
+        kill -TERM "$QEMU_PID" 2>/dev/null || true
         local i
         for i in $(seq 1 20); do
             kill -0 "$QEMU_PID" 2>/dev/null || break
@@ -85,29 +90,31 @@ cleanup_qemu() {
         kill -9 "$QEMU_PID" 2>/dev/null || true
         wait "$QEMU_PID" 2>/dev/null || true
     fi
+    QEMU_PID=""
     [ -n "$IN_FIFO" ] && [ -e "$IN_FIFO" ] && rm -f "$IN_FIFO"
 }
 trap cleanup_qemu EXIT INT TERM
 
-# accel_args <accel> <cpu>
+# accel_args <accel> <cpu> — result in the ACCEL_ARGS array.
 accel_args() {
     case "$1" in
-        kvm) echo "-enable-kvm -cpu $2" ;;
-        tcg) echo "-accel tcg -cpu $2" ;;
-        *)   echo "-accel $1 -cpu $2" ;;
+        kvm) ACCEL_ARGS=(-enable-kvm -cpu "$2") ;;
+        tcg) ACCEL_ARGS=(-accel tcg -cpu "$2") ;;
+        *)   ACCEL_ARGS=(-accel "$1" -cpu "$2") ;;
     esac
 }
 
-# Wait until `marker` appears in `file`, polling at 0.2s.
+# Wait until `marker` appears in `file`, polling at 0.2s. `timeout` is seconds.
 wait_for_marker() {
     local file="$1" marker="$2" timeout="${3:-10}"
-    local elapsed=0
-    while [ "$elapsed" -lt "$timeout" ]; do
+    # 0.2s polling granularity: 5 ticks per second.
+    local ticks=0 max_ticks=$((timeout * 5))
+    while [ "$ticks" -lt "$max_ticks" ]; do
         if grep -qF "$marker" "$file" 2>/dev/null; then
             return 0
         fi
         sleep 0.2
-        elapsed=$((elapsed + 1))
+        ticks=$((ticks + 1))
     done
     return 1
 }
@@ -132,7 +139,9 @@ run_cell() {
     local accel="$1" cpu="$2" smp="$3"
     local tag="${accel}-${cpu}-smp${smp}"
     local raw="$LOG_DIR/raw-${tag}.log"
+    local transcript="$LOG_DIR/transcript-${tag}.log"
     : > "$raw"
+    : > "$transcript"
 
     echo "META qemu=$QEMU_VERSION machine=q35 commit=$COMMIT dirty=$DIRTY iso_sha=$ISO_SHA accel=$accel cpu=$cpu smp=$smp"
 
@@ -141,9 +150,10 @@ run_cell() {
     # Hold fd 3 open for writing so QEMU's stdin never sees EOF.
     exec 3>"$IN_FIFO"
 
+    accel_args "$accel" "$cpu"
     "$QEMU_BIN" \
         -M q35 \
-        $(accel_args "$accel" "$cpu") \
+        "${ACCEL_ARGS[@]}" \
         -smp "$smp" \
         -m 1024 \
         -cdrom "$ISO" \
@@ -157,6 +167,7 @@ run_cell() {
 
     if ! wait_for_prompt "$raw" 40; then
         echo "RESULT accel=$accel cpu=$cpu smp=$smp status=boot_timeout" >&2
+        cat "$raw" >>"$transcript"
         exec 3>&-
         cleanup_qemu
         return 1
@@ -164,17 +175,23 @@ run_cell() {
 
     # Marker-overhead calibration: 1-iteration batch, host timestamps
     # BATCH_START..BATCH_END receipt.
-    local calib_start calib_end calib_delta
+    local calib_start="" calib_end="" calib_delta=0
+    cat "$raw" >>"$transcript"
     : > "$raw"
     echo "" >&3
     echo "clockcheck rel 1 1" >&3
-    calib_start="$(date +%s%N)"
     wait_for_marker "$raw" "BATCH_START" 10 && calib_start="$(date +%s%N)"
     wait_for_marker "$raw" "BATCH_END" 15 && calib_end="$(date +%s%N)"
     wait_for_marker "$raw" "DONE" 10
-    calib_delta=$((calib_end - calib_start))
-    echo "META cell=$tag marker_overhead_ns=$calib_delta"
+    cat "$raw" >>"$transcript"
+    if [ -n "$calib_end" ] && [ -n "$calib_start" ]; then
+        calib_delta=$((calib_end - calib_start))
+        echo "META cell=$tag marker_overhead_ns=$calib_delta"
+    else
+        echo "META cell=$tag marker_overhead_ns=unavailable reason=no_batch_end" >&2
+    fi
 
+    local cell_failures=0
     local mode dur iters extra
     for mode in "${MODES[@]}"; do
         for dur in "${DURATIONS[@]}"; do
@@ -187,17 +204,20 @@ run_cell() {
             extra=0
             [ "$mode" = "load" ] && extra=2
 
-            # Truncate the log so per-run record extraction is unambiguous.
+            # Per-run log so record extraction is unambiguous; preserve the
+            # full serial transcript across runs for diagnostics.
             : > "$raw"
             echo "clockcheck $mode $dur $iters $extra" >&3
 
             local batch_start="" batch_end=""
-            if [ "$dur" -le 500000 ]; then
+            if [ "$dur" -le "$BATCH_THRESHOLD_NS" ]; then
                 wait_for_marker "$raw" "BATCH_START" 10 && batch_start="$(date +%s%N)"
                 wait_for_marker "$raw" "BATCH_END" 15 && batch_end="$(date +%s%N)"
             fi
             if ! wait_for_marker "$raw" "DONE" 30; then
                 echo "RESULT accel=$accel cpu=$cpu smp=$smp mode=$mode req_ns=$dur status=timeout" >&2
+                cat "$raw" >>"$transcript"
+                cell_failures=$((cell_failures + 1))
                 continue
             fi
 
@@ -209,9 +229,21 @@ run_cell() {
 
             local summary
             summary="$(awk -v mode="$mode" -v req="$dur" -f "$SCRIPT_DIR/parse.awk" "$raw")"
+            [ -z "$summary" ] && summary="SUMMARY mode=$mode req_ns=$dur iters=0 missing=1"
             echo "RESULT accel=$accel cpu=$cpu smp=$smp mode=$mode req_ns=$dur iters=$iters \
 host_batch_ns=$host_batch_ns host_batch_overhead_ns=$calib_delta \
 host_rate_ns_per_op=$host_rate_ns_per_op $summary"
+
+            # Evaluate hard gates: never early, monotonic non-decrease.
+            local early backward
+            early="$(printf '%s' "$summary" | sed -n 's/.* early=\([0-9]*\).*/\1/p')"
+            backward="$(printf '%s' "$summary" | sed -n 's/.* backward=\([0-9]*\).*/\1/p')"
+            if [ "${early:-0}" -ne 0 ] || [ "${backward:-0}" -ne 0 ]; then
+                cell_failures=$((cell_failures + 1))
+                echo "GATE_VIOLATION accel=$accel cpu=$cpu smp=$smp mode=$mode req_ns=$dur early=${early:-0} backward=${backward:-0}" >&2
+            fi
+
+            cat "$raw" >>"$transcript"
         done
     done
 
@@ -230,10 +262,11 @@ host_rate_ns_per_op=$host_rate_ns_per_op $summary"
     done
     if kill -0 "$QEMU_PID" 2>/dev/null; then
         echo "RESULT accel=$accel cpu=$cpu smp=$smp status=shutdown_timeout" >&2
+        cell_failures=$((cell_failures + 1))
     fi
     exec 3>&-
     cleanup_qemu
-    return 0
+    return "$cell_failures"
 }
 
 # --- main ------------------------------------------------------------------
@@ -246,10 +279,11 @@ echo "META cells=${CELLS[*]}"
 failures=0
 for cell in "${CELLS[@]}"; do
     IFS='|' read -r accel cpu smp <<<"$cell"
-    if ! run_cell "$accel" "$cpu" "$smp"; then
-        failures=$((failures + 1))
-    fi
+    run_cell "$accel" "$cpu" "$smp"
+    failures=$((failures + $?))
 done
 
 echo "META done failures=$failures"
+# Cap exit code at 255 (shell limit); anything nonzero signals failure.
+[ "$failures" -gt 255 ] && failures=255
 exit "$failures"

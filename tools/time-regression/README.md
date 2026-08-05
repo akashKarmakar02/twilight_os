@@ -86,7 +86,7 @@ Test durations (ns): `10000`, `100000`, `500000`, `1000000`, `2000000`,
 
 ### Per-iteration record
 
-```
+```text
 iter mode=<m> req_ns=<r> start_ns=<s> end_ns=<e> delta_ns=<d> lateness_ns=<l> result=<ok|early|backward>
 ```
 
@@ -119,7 +119,7 @@ is negligible relative to the sleep).
 Each run emits `META` lines (environment/metadata) and one `RESULT` line per
 (mode × duration × cell):
 
-```
+```text
 META qemu=... machine=q35 commit=<sha> dirty=<n> iso_sha=<sha> accel=<a> cpu=<c> smp=<n>
 RESULT accel=<a> cpu=<c> smp=<n> mode=<m> req_ns=<r> iters=<n> \
   host_batch_ns=<ns> host_batch_overhead_ns=<ns> host_rate_ns_per_op=<ns> \
@@ -160,9 +160,9 @@ qemu-system-x86_64 -M q35 -accel tcg -cpu core2duo -smp 1 -m 1024 \
   -cdrom twilight-os.iso -boot d -serial stdio -display none
 ```
 
-At the `# ` prompt:
+At the `#` prompt:
 
-```
+```sh
 clockcheck rel 10000 100
 clockcheck abs 16666667 20
 clockcheck read 50000000 10
