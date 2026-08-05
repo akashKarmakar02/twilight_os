@@ -16,6 +16,16 @@ use twilight_common::syscall::types::{EFAULT, EINVAL};
 /// Wait queue for processes blocked on TTY keyboard input.
 static INPUT_WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
+/// Mirror console output to the serial port so headless test harnesses
+/// (tools/time-regression/run.sh) can read process output over serial.
+fn mirror_to_serial(data: &[u8]) {
+    for &b in data {
+        // serial_print! filters non-printable bytes; send directly via the UART
+        // so newlines and control chars pass through unchanged.
+        crate::driver::uart::send_byte(b);
+    }
+}
+
 // x86_64/musl
 const IOCTL_TIOCGWINSZ: u64 = 0x5413;
 const IOCTL_TCGETS: u64 = 0x5401;
@@ -947,8 +957,12 @@ impl VfsNodeOps for Tty {
                 prev_cr = b == b'\r';
             }
             self.write_bytes_ansi(expanded.as_slice());
+            // Mirror console output to the serial port so headless test
+            // harnesses (tools/time-regression/run.sh) can read process output.
+            mirror_to_serial(expanded.as_slice());
         } else {
             self.write_bytes_ansi(data);
+            mirror_to_serial(data);
         }
         self.flush_output();
         Ok(())

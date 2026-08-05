@@ -202,6 +202,10 @@ pub fn init(
     arch::x86_64::idt::init();
     arch::x86_64::idt::init_pics();
 
+    // Now that the IDT and PICs are ready, wire COM1 receive interrupts into
+    // the TTY so the host can drive the guest over serial.
+    driver::uart::init_input_irq();
+
     memory::init(phys_mem_offset, memory_map_response.entries());
 
     init_framebuffer(fb);
