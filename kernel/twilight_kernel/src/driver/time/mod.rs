@@ -171,12 +171,37 @@ pub fn timer_event_count() -> u64 {
 
 /// Block the current task until `nanoseconds` of monotonic time have elapsed.
 ///
-/// This still uses a `sti; hlt` loop keyed on [`monotonic_ns`], which is now
-/// correct because the deadline is measured against the TSC. Replacing this with
-/// a deadline-ordered timer wait queue (so a sleeping task is not woken once per
-/// intermediate tick) is tracked as a separate follow-up in #62 (Phase 3).
+/// Two strategies are used, selected by duration:
+///
+/// * **Short sleeps** (below [`SHORT_SLEEP_THRESHOLD_NS`]) busy-wait on the TSC
+///   via [`crate::driver::timer::wait`]. This is necessary because under QEMU TCG
+///   the fallback clocksource ([`monotonic_ns`]) has 1 ms granularity (one tick
+///   per delivered LAPIC interrupt), so an `hlt`-based sleep of less than 1 ms
+///   rounds up to the next tick — up to a ~100× overshoot for a 10 µs sleep. The
+///   TSC advances per executed cycle even under TCG, so a TSC busy-wait is precise
+///   for short intervals and never stalls (it spins rather than halting, so it is
+///   immune to TCG virtual-clock-during-hlt behavior). The CPU cost is bounded by
+///   the short duration. This mirrors how Linux (`udelay`/`ndelay`) and FreeBSD
+///   (`DELAY`) realize sub-tick delays.
+///
+/// * **Long sleeps** (at/above the threshold) use a `sti; hlt` loop keyed on
+///   [`monotonic_ns`], which is efficient (the CPU halts while waiting) and for
+///   which 1 ms tick quantization is negligible.
+///
+/// Under KVM/bare metal the TSC is the clocksource, so both paths are precise;
+/// the threshold only selects between busy-waiting and halting. A deadline-
+/// ordered timer wheel that blocks sleeping tasks across tick boundaries (so a
+/// long sleep is not woken once per tick) remains a tracked follow-up in #62.
 pub fn sleep_ns(nanoseconds: u64) {
     if nanoseconds == 0 {
+        return;
+    }
+
+    // Below the tick quantization, busy-wait on the TSC for precision. The
+    // threshold is a few tick periods: any sleep that would suffer large
+    // relative error from 1 ms rounding takes the precise busy-wait path.
+    if nanoseconds < SHORT_SLEEP_THRESHOLD_NS {
+        crate::driver::timer::wait(nanoseconds);
         return;
     }
 
@@ -188,6 +213,12 @@ pub fn sleep_ns(nanoseconds: u64) {
         crate::sys::preempt::cond_resched();
     }
 }
+
+/// Durations below this are realized as a TSC busy-wait rather than an `hlt`
+/// loop. Chosen as a small multiple of [`NS_PER_TIMER_EVENT`] (the 1 ms tick
+/// period under the TCG fallback clocksource) so that any sleep whose accuracy
+/// would be dominated by tick quantization takes the precise busy-wait path.
+const SHORT_SLEEP_THRESHOLD_NS: u64 = NS_PER_TIMER_EVENT * 2;
 
 /// Validate and execute a relative `nanosleep`/`clock_nanosleep` request.
 pub fn sleep_timespec(req: &Timespec) -> Result<(), i64> {
