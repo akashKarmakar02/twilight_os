@@ -45,6 +45,9 @@ COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 DIRTY="$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 [ -z "$DIRTY" ] && DIRTY=0
 
+# Must track the guest's BATCH_THRESHOLD_NS in userspace/apps/clockcheck/src/main.c.
+BATCH_THRESHOLD_NS=500000
+
 # Durations from the issue (nanoseconds).
 DURATIONS=(10000 100000 500000 1000000 2000000 5000000 16666667 100000000 1000000000)
 MODES=(rel abs read poll load)
@@ -73,14 +76,10 @@ fi
 # --- QEMU lifecycle --------------------------------------------------------
 
 QEMU_PID=""
-IN_FIFO=""
-
-# Must track the guest's BATCH_THRESHOLD_NS in userspace/apps/clockcheck/src/main.c.
-BATCH_THRESHOLD_NS=500000
+PTY_DEV=""
 
 cleanup_qemu() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
-        # SIGTERM first so QEMU can flush serial output, then escalate.
         kill -TERM "$QEMU_PID" 2>/dev/null || true
         local i
         for i in $(seq 1 20); do
@@ -91,7 +90,6 @@ cleanup_qemu() {
         wait "$QEMU_PID" 2>/dev/null || true
     fi
     QEMU_PID=""
-    [ -n "$IN_FIFO" ] && [ -e "$IN_FIFO" ] && rm -f "$IN_FIFO"
 }
 trap cleanup_qemu EXIT INT TERM
 
@@ -107,7 +105,6 @@ accel_args() {
 # Wait until `marker` appears in `file`, polling at 0.2s. `timeout` is seconds.
 wait_for_marker() {
     local file="$1" marker="$2" timeout="${3:-10}"
-    # 0.2s polling granularity: 5 ticks per second.
     local ticks=0 max_ticks=$((timeout * 5))
     while [ "$ticks" -lt "$max_ticks" ]; do
         if grep -qF "$marker" "$file" 2>/dev/null; then
@@ -120,17 +117,23 @@ wait_for_marker() {
 }
 
 wait_for_prompt() {
-    local serial="$1" timeout="${2:-40}"
-    # oksh root prompt is "# ". Also accept a generic "# " line end.
+    local serial="$1" timeout="${2:-90}"
     local elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
-        if grep -qE '#[[:space:]]*$' "$serial" 2>/dev/null; then
+        # oksh prints "# " or "$ " as a prompt; also detect the uart init line
+        # as a sign that userspace is up.
+        if grep -qE '#[[:space:]]*$|\$[[:space:]]*$|serial input enabled' "$serial" 2>/dev/null; then
             return 0
         fi
         sleep 1
         elapsed=$((elapsed + 1))
     done
     return 1
+}
+
+# send_guest <pty> <string>
+send_guest() {
+    printf '%s\r\n' "$2" >"$1"
 }
 
 # --- per-cell runner -------------------------------------------------------
@@ -143,43 +146,65 @@ run_cell() {
     : > "$raw"
     : > "$transcript"
 
-    echo "META qemu=$QEMU_VERSION machine=q35 commit=$COMMIT dirty=$DIRTY iso_sha=$ISO_SHA accel=$accel cpu=$cpu smp=$smp"
-
-    IN_FIFO="$(mktemp -u "$LOG_DIR/in.${tag}.XXXXXX.fifo")"
-    mkfifo "$IN_FIFO"
-    # Hold fd 3 open for writing so QEMU's stdin never sees EOF.
-    exec 3>"$IN_FIFO"
+    echo "META qemu=$QEMU_VERSION machine=pc commit=$COMMIT dirty=$DIRTY iso_sha=$ISO_SHA accel=$accel cpu=$cpu smp=$smp"
 
     accel_args "$accel" "$cpu"
+    # Use -serial pty for bidirectional communication. QEMU prints the PTY
+    # device path on stderr. Use the default machine (pc/i440FX) — q35 hangs
+    # under TCG on this kernel.
     "$QEMU_BIN" \
-        -M q35 \
+        -M pc \
         "${ACCEL_ARGS[@]}" \
         -smp "$smp" \
         -m 1024 \
         -cdrom "$ISO" \
         -boot d \
-        -serial stdio \
+        -serial pty \
         -monitor none \
         -display none \
         -no-reboot \
-        <"$IN_FIFO" >"$raw" 2>&1 &
+        >"$LOG_DIR/qemu-stderr-${tag}.log" 2>&1 &
     QEMU_PID=$!
 
-    if ! wait_for_prompt "$raw" 40; then
-        echo "RESULT accel=$accel cpu=$cpu smp=$smp status=boot_timeout" >&2
-        cat "$raw" >>"$transcript"
-        exec 3>&-
+    # Wait for QEMU to print the PTY device path.
+    local pty_wait=0
+    while [ "$pty_wait" -lt 30 ]; do
+        PTY_DEV="$(grep -oE '/dev/pts/[0-9]+' "$LOG_DIR/qemu-stderr-${tag}.log" 2>/dev/null | head -1)"
+        [ -n "$PTY_DEV" ] && break
+        sleep 0.5
+        pty_wait=$((pty_wait + 1))
+    done
+
+    if [ -z "$PTY_DEV" ]; then
+        echo "RESULT accel=$accel cpu=$cpu smp=$smp status=no_pty" >&2
         cleanup_qemu
         return 1
     fi
+
+    # Configure the PTY for raw mode and start draining it into the raw log.
+    stty -F "$PTY_DEV" raw -echo 2>/dev/null || true
+    cat "$PTY_DEV" >"$raw" &
+    local cat_pid=$!
+
+    if ! wait_for_prompt "$raw" 90; then
+        echo "RESULT accel=$accel cpu=$cpu smp=$smp status=boot_timeout" >&2
+        cat "$raw" >>"$transcript"
+        kill "$cat_pid" 2>/dev/null || true
+        cleanup_qemu
+        return 1
+    fi
+
+    # Give the shell a moment to initialize after the prompt appears.
+    sleep 2
+    send_guest "$PTY_DEV" ""
+    sleep 1
 
     # Marker-overhead calibration: 1-iteration batch, host timestamps
     # BATCH_START..BATCH_END receipt.
     local calib_start="" calib_end="" calib_delta=0
     cat "$raw" >>"$transcript"
     : > "$raw"
-    echo "" >&3
-    echo "clockcheck rel 1 1" >&3
+    send_guest "$PTY_DEV" "clockcheck rel 1 1"
     wait_for_marker "$raw" "BATCH_START" 10 && calib_start="$(date +%s%N)"
     wait_for_marker "$raw" "BATCH_END" 15 && calib_end="$(date +%s%N)"
     wait_for_marker "$raw" "DONE" 10
@@ -204,10 +229,8 @@ run_cell() {
             extra=0
             [ "$mode" = "load" ] && extra=2
 
-            # Per-run log so record extraction is unambiguous; preserve the
-            # full serial transcript across runs for diagnostics.
             : > "$raw"
-            echo "clockcheck $mode $dur $iters $extra" >&3
+            send_guest "$PTY_DEV" "clockcheck $mode $dur $iters $extra"
 
             local batch_start="" batch_end=""
             if [ "$dur" -le "$BATCH_THRESHOLD_NS" ]; then
@@ -254,7 +277,7 @@ host_rate_ns_per_op=$host_rate_ns_per_op $summary"
     echo "META cell=$tag qmp_stop_resume=not_run reason=monitor_disabled_for_bidir_serial"
 
     # Clean shutdown.
-    echo "poweroff" >&3
+    send_guest "$PTY_DEV" "poweroff"
     local i
     for i in $(seq 1 "$CELL_TIMEOUT"); do
         kill -0 "$QEMU_PID" 2>/dev/null || break
@@ -264,7 +287,7 @@ host_rate_ns_per_op=$host_rate_ns_per_op $summary"
         echo "RESULT accel=$accel cpu=$cpu smp=$smp status=shutdown_timeout" >&2
         cell_failures=$((cell_failures + 1))
     fi
-    exec 3>&-
+    kill "$cat_pid" 2>/dev/null || true
     cleanup_qemu
     return "$cell_failures"
 }
@@ -284,6 +307,5 @@ for cell in "${CELLS[@]}"; do
 done
 
 echo "META done failures=$failures"
-# Cap exit code at 255 (shell limit); anything nonzero signals failure.
 [ "$failures" -gt 255 ] && failures=255
 exit "$failures"
