@@ -11,3 +11,4 @@ pub mod preempt;
 pub mod proc;
 pub mod rng;
 pub mod syscall;
+pub mod timer;

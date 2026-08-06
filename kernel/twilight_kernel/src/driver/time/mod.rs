@@ -29,7 +29,6 @@ use conquer_once::spin::OnceCell;
 use twilight_common::syscall::types::{EFAULT, EINVAL, Timespec};
 
 use crate::driver::timer::cmos::CMOS;
-use crate::task::executor::halt;
 
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
@@ -174,6 +173,11 @@ pub fn init_realtime_offset_from_cmos() {
 pub fn handle_timer_event() {
     TIMER_EVENTS.fetch_add(1, Ordering::Relaxed);
     crate::sys::proc::on_timer_tick();
+    // Expire deadline-blocked sleepers. The timeline is read from the
+    // clocksource on demand, so this uses monotonic_ns(), not the event count.
+    // Bounded hard-IRQ batch; overflow is drained post-irq_exit by
+    // sys::timer::process_deferred_expiry().
+    crate::sys::timer::expire_due(monotonic_ns());
 }
 
 /// Diagnostic: number of timer events delivered since boot. Used by the
@@ -200,14 +204,11 @@ pub fn timer_event_count() -> u64 {
 ///   negligible.) This mirrors how Linux (`udelay`/`ndelay`) and FreeBSD
 ///   (`DELAY`) realize sub-tick delays.
 ///
-/// * **Long sleeps** (at/above the threshold) use a `sti; hlt` loop keyed on
-///   [`monotonic_ns`], which is efficient (the CPU halts while waiting) and
-///   precise because `monotonic_ns` reads the continuous clocksource (TSC or
-///   HPET), not the tick count.
-///
-/// A deadline-ordered timer wheel that blocks sleeping tasks across tick
-/// boundaries (so a long sleep is not woken once per tick) remains a tracked
-/// follow-up in #62.
+/// * **Long sleeps** (at/above the threshold) block on the deadline-ordered
+///   timer queue ([`crate::sys::timer::block_current_until`]). The caller is
+///   moved to `Sleeping` and selected by the runnable scan only after its
+///   deadline expires, so it is not woken once per tick and does not suffer a
+///   runnable-queue delay after expiry. The CPU halts while waiting.
 pub fn sleep_ns(nanoseconds: u64) {
     if nanoseconds == 0 {
         return;
@@ -221,13 +222,11 @@ pub fn sleep_ns(nanoseconds: u64) {
         return;
     }
 
-    let start = monotonic_ns();
-    let deadline = start.saturating_add(nanoseconds);
-
-    while monotonic_ns() < deadline {
-        halt();
-        crate::sys::preempt::cond_resched();
-    }
+    let deadline = monotonic_ns().saturating_add(nanoseconds);
+    // Block on the deadline queue. The wake reason is ignored here: plain
+    // nanosleep is not interruptible by signals yet (that is the POSIX syscall
+    // ticket's concern). A Deadline reason means the absolute time arrived.
+    let _reason = crate::sys::timer::block_current_until(deadline);
 }
 
 /// Durations below this are realized as a TSC busy-wait rather than an `hlt`
