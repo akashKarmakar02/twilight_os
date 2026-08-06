@@ -7,10 +7,12 @@
 //! the correct virtualized clocksource: it advances with real elapsed time even
 //! when the vCPU is descheduled and periodic LAPIC interrupts are coalesced.
 //!
-//! This is the root-cause fix for #62: elapsed time is read from the TSC, not
-//! from a count of delivered timer interrupts.
+//! The TSC is selected as the clocksource only when validated as stable: either
+//! CPUID advertises an invariant TSC, or a paravirtual KVM TSC frequency is
+//! present. Calibration alone is not a stability guarantee. When the TSC is not
+//! usable (e.g. under QEMU TCG), the HPET backend is used instead (#65).
 
-use raw_cpuid::{CpuId, Hypervisor};
+use raw_cpuid::CpuId;
 
 use super::clocksource::{compute_mult_shift, ClockSource};
 
@@ -25,10 +27,11 @@ pub struct TscClock {
     freq_source: &'static str,
     /// Whether CPUID advertised an invariant TSC.
     invariant: bool,
-    /// Whether the TSC is usable as the system clocksource. False under QEMU
-    /// TCG, where the TSC advances at host real time while LAPIC/PIT advance at
-    /// QEMU virtual time. The frequency is still calibrated (for `timer::wait`
-    /// and LAPIC calibration) even when this is false.
+    /// Whether the TSC is usable as the system clocksource. True only when the
+    /// TSC is validated as stable (invariant flag, or a paravirtual KVM TSC
+    /// frequency). Calibration alone is not a stability guarantee. False under
+    /// QEMU TCG, where the TSC advances at host real time while LAPIC/PIT advance
+    /// at QEMU virtual time; the caller falls back to HPET.
     usable_as_clocksource: bool,
 }
 
@@ -49,8 +52,11 @@ impl TscClock {
         self.invariant
     }
 
-    /// Whether the TSC should be used as the system clocksource. False under
-    /// TCG; the caller falls back to the interrupt-count clocksource.
+    /// Whether the TSC should be used as the system clocksource. True only when
+    /// the TSC is validated as a stable, continuously advancing counter: either
+    /// CPUID advertises an invariant TSC, or a paravirtual KVM TSC frequency is
+    /// present. Calibration alone is **not** a stability guarantee. The caller
+    /// falls back to HPET when this is false.
     pub fn usable_as_clocksource(&self) -> bool {
         self.usable_as_clocksource
     }
@@ -129,42 +135,25 @@ fn has_rdtscp() -> bool {
 
 /// Detect and calibrate a TSC clocksource.
 ///
-/// The TSC is used whenever a frequency can be determined. The CPUID "invariant
-/// TSC" flag is a *quality* guarantee (the TSC does not stop in deep C-states),
-/// not a usability requirement: under software emulation (TCG) there are no real
-/// C-states, so the TSC advances correctly even when the flag is absent. We
-/// therefore do not refuse to boot when the flag is unset; we only log a warning
-/// so the operator knows the clock may drift on real hardware that lacks it.
+/// The TSC frequency is always resolved when possible, because `timer::wait`
+/// and LAPIC calibration need a TSC frequency for short busy-waits even when
+/// the TSC is not usable as the system clocksource.
 ///
 /// Frequency is resolved, in order of preference, by:
-///  1. CPUID leaf 0x15 (`TscInfo::tsc_frequency()`) — exact, no measurement.
-///  2. CPUID leaf 0x16 processor base frequency (MHz → Hz).
-///  3. PIT-calibrated measurement against a known wall interval (cycle count,
+///  1. Hypervisor paravirtual TSC frequency (KVM leaf 0x40000010, exact kHz).
+///     Also a stability signal: KVM guarantees TSC continuity across deschedule.
+///  2. CPUID leaf 0x15 (`TscInfo::tsc_frequency()`) — exact, no measurement.
+///  3. CPUID leaf 0x16 processor base frequency (MHz → Hz).
+///  4. PIT-calibrated measurement against a known wall interval (cycle count,
 ///     **not** interrupt count).
 ///
-/// Returns `None` only if no frequency could be determined. On the reported KVM
-/// `-cpu host` configuration the TSC is invariant and CPUID.15h is available, so
-/// path 1 is taken.
-///
-/// Returns `None` only if no frequency could be determined. Even under QEMU
-/// TCG (where the TSC is not usable as the system clocksource) the frequency is
-/// still calibrated and returned, because `timer::wait` and LAPIC calibration
-/// need a TSC frequency for short busy-waits. The caller checks
-/// `usable_as_clocksource()` to decide whether to use the TSC as the clocksource
-/// or fall back to the interrupt-count clocksource.
+/// Returns `None` if no frequency can be determined. Otherwise the caller checks
+/// [`TscClock::usable_as_clocksource`] to decide whether to use the TSC as the
+/// clocksource or fall back to HPET (#65). The TSC is usable only when validated
+/// as stable (invariant flag or paravirtual frequency); calibration alone is not
+/// a stability guarantee.
 pub fn detect() -> Option<TscClock> {
     let cpuid = CpuId::new();
-
-    // Under QEMU TCG (no KVM), the TSC advances at host real time while the
-    // LAPIC/PIT advance at QEMU virtual time. During `hlt` (idle), the virtual
-    // clock pauses but the host TSC keeps going, so the TSC-based clock would
-    // run fast. TCG delivers every interrupt (no coalescing), so the interrupt
-    // count is a valid clocksource there. We still calibrate the TSC frequency
-    // (for timer::wait and LAPIC calibration) but mark it unusable as clocksource.
-    let is_tcg = cpuid
-        .get_hypervisor_info()
-        .map(|h| matches!(h.identify(), Hypervisor::QEMU))
-        .unwrap_or(false);
 
     // Probe rdtscp once and cache it for the hot read path.
     let rdtscp = cpuid
@@ -185,23 +174,28 @@ pub fn detect() -> Option<TscClock> {
     //  2. CPUID leaf 0x15 (TscInfo::tsc_frequency()) — exact, no measurement.
     //  3. CPUID leaf 0x16 processor base frequency (MHz → Hz).
     //  4. PIT-calibrated measurement (fallback; see calibrate_with_pit).
-    let (freq_hz, freq_source) = cpuid
+    //
+    // A paravirtual KVM TSC frequency (source 1) is also a *stability* signal:
+    // KVM guarantees the TSC advances with real elapsed time even when the vCPU
+    // is descheduled, so it is a valid clocksource regardless of the invariant
+    // flag. We track whether we used it.
+    let (freq_hz, freq_source, paravirtual) = cpuid
         .get_hypervisor_info()
         .and_then(|h| h.tsc_frequency())
         .filter(|&khz| khz > 0)
-        .map(|khz| (khz as u64 * 1_000, "kvm.0x40000010"))
+        .map(|khz| (khz as u64 * 1_000, "kvm.0x40000010", true))
         .or_else(|| {
             cpuid
                 .get_tsc_info()
                 .and_then(|t| t.tsc_frequency())
-                .map(|f| (f, "cpuid.0x15"))
+                .map(|f| (f, "cpuid.0x15", false))
         })
         .or_else(|| {
             cpuid
                 .get_processor_frequency_info()
-                .map(|p| (p.processor_base_frequency() as u64 * 1_000_000, "cpuid.0x16"))
+                .map(|p| (p.processor_base_frequency() as u64 * 1_000_000, "cpuid.0x16", false))
         })
-        .unwrap_or_else(|| (calibrate_with_pit(), "pit-calibration"));
+        .unwrap_or_else(|| (calibrate_with_pit(), "pit-calibration", false));
 
     if freq_hz < MIN_FREQ_HZ {
         return None;
@@ -211,11 +205,21 @@ pub fn detect() -> Option<TscClock> {
     let epoch = read_cycles();
     let source = ClockSource::new(epoch, mult, shift, freq_hz);
 
+    // The TSC is a valid clocksource only when validated as stable: either the
+    // CPUID invariant-TSC flag is set, or a paravirtual KVM TSC frequency was
+    // provided (KVM guarantees TSC continuity across deschedule). Calibration
+    // alone (PIT/0x16) is NOT a stability guarantee — under QEMU TCG the TSC
+    // advances at host real time while LAPIC/PIT advance at QEMU virtual time,
+    // so a calibrated-only TSC diverges during `hlt`. The hypervisor vendor is
+    // explicitly not used as a clock-quality test (#65): a stable/invariant or
+    // paravirtual TSC is accepted on any hypervisor that advertises one.
+    let usable_as_clocksource = invariant || paravirtual;
+
     Some(TscClock {
         source,
         freq_source,
         invariant,
-        usable_as_clocksource: !is_tcg,
+        usable_as_clocksource,
     })
 }
 

@@ -1,19 +1,24 @@
 //! Kernel timekeeping: the system timeline, decoupled from interrupt delivery.
 //!
 //! This module owns `CLOCK_MONOTONIC` and `CLOCK_REALTIME`. The monotonic
-//! timeline is read from a continuously advancing hardware clocksource (the
-//! invariant TSC on x86_64), **not** from a count of delivered timer interrupts.
+//! timeline is read from a continuously advancing hardware clocksource — a
+//! validated invariant/paravirtual TSC, or an HPET main counter — **never** from
+//! a count of delivered timer interrupts.
 //!
-//! This is the root-cause fix for #62: under KVM, periodic LAPIC interrupts can
-//! be delayed or coalesced while the vCPU is descheduled, so an interrupt-count
-//! clock permanently loses elapsed time. Reading the TSC instead means host
-//! descheduling no longer erases guest time.
+//! This is the root-cause fix for #65 (and its predecessor #62). Under QEMU TCG,
+//! periodic LAPIC interrupts can be delayed or coalesced while the vCPU is
+//! descheduled, so an interrupt-count clock permanently loses elapsed time. The
+//! previous TCG fallback (`delivered_timer_events * 1ms`) is removed; under TCG
+//! we now read the HPET main counter, which advances at a fixed hardware rate
+//! independent of interrupt delivery.
 //!
-//! Timer interrupts are now pure *clock events*: they drive scheduler ticks and
+//! Timer interrupts are pure *clock events*: they drive scheduler ticks and
 //! deadline expiry via [`handle_timer_event`], but they do not advance the
 //! timeline. The two responsibilities are separated, as Linux and FreeBSD do.
 
 pub mod clocksource;
+pub mod hpet;
+pub mod source;
 pub mod tsc;
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -28,14 +33,10 @@ use crate::task::executor::halt;
 
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
-/// The TSC clocksource, when available. `None` (and `TSC_AVAILABLE = false`)
-/// on QEMU TCG, where the TSC is not a valid clocksource.
-static CLOCKSOURCE: OnceCell<clocksource::ClockSource> = OnceCell::uninit();
-
-/// Whether the TSC clocksource was successfully initialized. When false,
-/// `monotonic_ns()` falls back to the interrupt-count clocksource.
-static TSC_AVAILABLE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+/// The selected continuously readable clocksource backend. `None` only before
+/// [`init`] has run; if [`init`] cannot select any backend it panics rather than
+/// leaving this unset.
+static CLOCKSOURCE: OnceCell<source::SelectedClocksource> = OnceCell::uninit();
 
 /// Boot-time offset such that `CLOCK_REALTIME = offset + CLOCK_MONOTONIC`.
 /// Established once from the CMOS RTC; the RTC is used only for the epoch, never
@@ -43,36 +44,33 @@ static TSC_AVAILABLE: core::sync::atomic::AtomicBool =
 static REALTIME_OFFSET_NS: AtomicU64 = AtomicU64::new(0);
 static OFFSET_INITED: AtomicU64 = AtomicU64::new(0); // 0 = no, 1 = yes
 
-/// Counter of delivered timer events. Under KVM/bare metal this is diagnostic
-/// only; the TSC is the clocksource. Under QEMU TCG this counter **is** the
-/// clocksource, because TCG delivers every scheduled interrupt (no coalescing)
-/// so one event == one tick period.
+/// Counter of delivered timer events, diagnostic only. The timeline is read from
+/// [`CLOCKSOURCE`]; this counter exists so [`timer_event_count`] can report how
+/// many clock-event IRQs were delivered (used by the regression harness to prove
+/// that delivered-event count can diverge without affecting monotonic time).
 static TIMER_EVENTS: AtomicU64 = AtomicU64::new(0);
 
-/// Nanoseconds per timer event (tick period). The LAPIC timer is calibrated to
-/// 1 kHz, so each event represents 1 ms. Used by the TCG fallback clocksource.
-const NS_PER_TIMER_EVENT: u64 = 1_000_000;
-
-/// Initialize the clocksource. Must run once during boot, before any time read.
+/// Initialize the clocksource. Must run once during boot, before any time read
+/// and before interrupts are enabled.
 ///
-/// On x86_64 this tries the invariant TSC first. Under QEMU TCG (no KVM) the
-/// TSC is not a valid clocksource (it advances at host real time while the
-/// LAPIC/PIT advance at QEMU virtual time, so the two diverge during idle); in
-/// that case we fall back to the interrupt-count clocksource, which is correct
-/// under TCG because TCG delivers every interrupt.
+/// Selection policy (see #65):
+///  1. Validated invariant/paravirtual TSC — correct under KVM `-cpu host` on an
+///     invariant host, or when a paravirtual KVM TSC frequency is advertised.
+///  2. HPET — discovered via ACPI, mapped device/uncached, validated to advance.
+///  3. If neither validates: panic with an explicit message. There is no silent
+///     interrupt-count fallback.
 pub fn init() {
-    match tsc::detect() {
+    // Always try the TSC first. `detect()` calibrates the TSC frequency even when
+    // the TSC is not usable as the clocksource, because `timer::wait` and LAPIC
+    // calibration need a TSC frequency for short busy-waits.
+    let selected = match tsc::detect() {
         Some(tsc) => {
-            let invariant = tsc.is_invariant();
             let freq = tsc.frequency_hz();
             let freq_source = tsc.frequency_source();
-            let usable = tsc.usable_as_clocksource();
-
-            // Always publish the TSC frequency for timer::wait and LAPIC
-            // calibration, even when the TSC is not usable as the clocksource.
             tsc::publish_frequency(freq);
 
-            if usable {
+            if tsc.usable_as_clocksource() {
+                let invariant = tsc.is_invariant();
                 if invariant {
                     crate::serial_println!(
                         "\x1b[93m[time]\x1b[0m clocksource=tsc invariant=true freq={} Hz source={}",
@@ -82,47 +80,65 @@ pub fn init() {
                 } else {
                     crate::serial_println!(
                         "\x1b[93m[time]\x1b[0m clocksource=tsc invariant=false freq={} Hz source={} \
-                         (warning: TSC not advertised invariant; time may drift in deep sleep on bare metal)",
+                         (paravirtual TSC frequency; valid clocksource)",
                         freq,
                         freq_source,
                     );
                 }
-                let _ = CLOCKSOURCE.try_init_once(|| tsc.into_source());
-                TSC_AVAILABLE.store(true, Ordering::Release);
+                source::SelectedClocksource::Tsc(tsc.into_source())
             } else {
-                // TCG: TSC frequency is calibrated for timer::wait/LAPIC, but
-                // the TSC is not the clocksource. Fall back to interrupt count.
-                crate::serial_println!(
-                    "\x1b[93m[time]\x1b[0m clocksource=tick freq={} Hz source={} \
-                     (TCG: TSC calibrated for delays but not usable as clocksource; using interrupt-count)",
-                    freq,
-                    freq_source,
-                );
+                // TSC calibrated but not usable as the clocksource (e.g. QEMU
+                // TCG: no invariant flag, no paravirtual frequency). Try HPET.
+                select_hpet(freq, freq_source)
             }
         }
         None => {
-            // No TSC frequency at all. Fall back to the interrupt-count clocksource.
             crate::serial_println!(
-                "\x1b[93m[time]\x1b[0m clocksource=tick (TSC unavailable; using interrupt-count fallback)"
+                "\x1b[93m[time]\x1b[0m TSC unavailable; selecting HPET clocksource"
             );
+            select_hpet(0, "none")
+        }
+    };
+
+    let _ = CLOCKSOURCE.try_init_once(|| selected);
+}
+
+/// Try to select the HPET backend; panic if it does not validate.
+///
+/// `tsc_freq_hz` / `tsc_freq_source` are passed only for diagnostics.
+fn select_hpet(tsc_freq_hz: u64, tsc_freq_source: &str) -> source::SelectedClocksource {
+    match hpet::discover() {
+        Some(hpet) => {
+            crate::serial_println!(
+                "\x1b[93m[time]\x1b[0m clocksource=hpet (tsc_freq={} Hz source={} not usable; \
+                 HPET selected)",
+                tsc_freq_hz,
+                tsc_freq_source,
+            );
+            source::SelectedClocksource::Hpet(hpet)
+        }
+        None => {
+            // No continuous backend validated. Per #65, fail explicitly rather
+            // than silently falling back to an interrupt-count clocksource.
+            crate::serial_println!(
+                "\x1b[91m[time]\x1b[0m FATAL: no continuous clocksource validated \
+                 (TSC unusable, HPET unavailable); refusing to boot with interrupt-count fallback"
+            );
+            panic!("no continuous clocksource validated (TSC unusable, HPET unavailable)");
         }
     }
 }
 
 /// Continuously advancing monotonic nanoseconds since boot.
 ///
-/// Under KVM/bare metal this reads the TSC clocksource and does not depend on
-/// interrupt delivery. Under QEMU TCG it falls back to counting delivered timer
-/// events (correct there because TCG does not coalesce interrupts).
+/// Reads the selected hardware backend (TSC or HPET) directly. Does not depend on
+/// interrupt delivery: late or coalesced timer IRQs do not affect this value.
 #[inline]
 pub fn monotonic_ns() -> u64 {
-    if TSC_AVAILABLE.load(Ordering::Acquire) {
-        if let Some(cs) = CLOCKSOURCE.get() {
-            return cs.elapsed_ns(tsc::read_cycles());
-        }
+    match CLOCKSOURCE.get() {
+        Some(cs) => cs.read_ns(),
+        None => 0,
     }
-    // TCG fallback: each delivered timer event is one tick period.
-    TIMER_EVENTS.load(Ordering::Relaxed) * NS_PER_TIMER_EVENT
 }
 
 /// Wall-clock nanoseconds since the Unix epoch (`CLOCK_REALTIME`).
@@ -160,7 +176,9 @@ pub fn handle_timer_event() {
     crate::sys::proc::on_timer_tick();
 }
 
-/// Diagnostic: number of timer events delivered since boot.
+/// Diagnostic: number of timer events delivered since boot. Used by the
+/// regression harness to prove delivered-event count can diverge from monotonic
+/// time without losing elapsed time.
 pub fn timer_event_count() -> u64 {
     TIMER_EVENTS.load(Ordering::Relaxed)
 }
@@ -174,32 +192,30 @@ pub fn timer_event_count() -> u64 {
 /// Two strategies are used, selected by duration:
 ///
 /// * **Short sleeps** (below [`SHORT_SLEEP_THRESHOLD_NS`]) busy-wait on the TSC
-///   via [`crate::driver::timer::wait`]. This is necessary because under QEMU TCG
-///   the fallback clocksource ([`monotonic_ns`]) has 1 ms granularity (one tick
-///   per delivered LAPIC interrupt), so an `hlt`-based sleep of less than 1 ms
-///   rounds up to the next tick — up to a ~100× overshoot for a 10 µs sleep. The
-///   TSC advances per executed cycle even under TCG, so a TSC busy-wait is precise
-///   for short intervals and never stalls (it spins rather than halting, so it is
-///   immune to TCG virtual-clock-during-hlt behavior). The CPU cost is bounded by
-///   the short duration. This mirrors how Linux (`udelay`/`ndelay`) and FreeBSD
+///   via [`crate::driver::timer::wait`]. This counts TSC cycles, which advance
+///   per executed instruction even under QEMU TCG, so it is a precise *delay*
+///   regardless of which clocksource backs `CLOCK_MONOTONIC`. (The TSC is not
+///   used as the system clocksource under TCG because its wall rate diverges
+///   from virtual time during `hlt`, but for a short busy-wait that rate error is
+///   negligible.) This mirrors how Linux (`udelay`/`ndelay`) and FreeBSD
 ///   (`DELAY`) realize sub-tick delays.
 ///
 /// * **Long sleeps** (at/above the threshold) use a `sti; hlt` loop keyed on
-///   [`monotonic_ns`], which is efficient (the CPU halts while waiting) and for
-///   which 1 ms tick quantization is negligible.
+///   [`monotonic_ns`], which is efficient (the CPU halts while waiting) and
+///   precise because `monotonic_ns` reads the continuous clocksource (TSC or
+///   HPET), not the tick count.
 ///
-/// Under KVM/bare metal the TSC is the clocksource, so both paths are precise;
-/// the threshold only selects between busy-waiting and halting. A deadline-
-/// ordered timer wheel that blocks sleeping tasks across tick boundaries (so a
-/// long sleep is not woken once per tick) remains a tracked follow-up in #62.
+/// A deadline-ordered timer wheel that blocks sleeping tasks across tick
+/// boundaries (so a long sleep is not woken once per tick) remains a tracked
+/// follow-up in #62.
 pub fn sleep_ns(nanoseconds: u64) {
     if nanoseconds == 0 {
         return;
     }
 
     // Below the tick quantization, busy-wait on the TSC for precision. The
-    // threshold is a few tick periods: any sleep that would suffer large
-    // relative error from 1 ms rounding takes the precise busy-wait path.
+    // threshold is a few tick periods: any sleep that would suffer large relative
+    // error from 1 ms rounding takes the precise busy-wait path.
     if nanoseconds < SHORT_SLEEP_THRESHOLD_NS {
         crate::driver::timer::wait(nanoseconds);
         return;
@@ -215,10 +231,12 @@ pub fn sleep_ns(nanoseconds: u64) {
 }
 
 /// Durations below this are realized as a TSC busy-wait rather than an `hlt`
-/// loop. Chosen as a small multiple of [`NS_PER_TIMER_EVENT`] (the 1 ms tick
-/// period under the TCG fallback clocksource) so that any sleep whose accuracy
-/// would be dominated by tick quantization takes the precise busy-wait path.
-const SHORT_SLEEP_THRESHOLD_NS: u64 = NS_PER_TIMER_EVENT * 2;
+/// loop. A small multiple of the 1 ms tick period so that any sleep whose
+/// accuracy would be dominated by tick quantization takes the precise busy-wait
+/// path. Under an HPET clocksource the long-sleep path is already precise (HPET
+/// resolution is typically ~70 ns), so the threshold only selects between
+/// busy-waiting and halting for short durations.
+const SHORT_SLEEP_THRESHOLD_NS: u64 = 2_000_000;
 
 /// Validate and execute a relative `nanosleep`/`clock_nanosleep` request.
 pub fn sleep_timespec(req: &Timespec) -> Result<(), i64> {

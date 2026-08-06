@@ -387,13 +387,22 @@ pub fn phys_addr(ptr: *const u8) -> u64 {
 }
 
 pub fn map_mmio(phys_addr: u64, size: usize) -> Result<(), ()> {
-    use x86_64::structures::paging::PageTableFlags;
+    use x86_64::structures::paging::{
+        mapper::{FlagUpdateError, MapToError},
+        PageTableFlags,
+    };
 
     let size = size.saturating_sub(1) as u64;
     let start_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(phys_addr));
     let end_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(phys_addr + size));
     let frames = PhysFrame::range_inclusive(start_frame, end_frame);
 
+    // Device MMIO must be uncached. The HHDM pre-maps usable physical memory as
+    // write-back, so for any MMIO region that already has a mapping we must
+    // *update* the page-table flags to device/uncached rather than silently
+    // leaving the cached mapping in place (which would corrupt reads through
+    // the CPU cache). `map_to` fails on an existing mapping; on that failure we
+    // fall back to `update_flags`.
     let flags = PageTableFlags::PRESENT
         | PageTableFlags::WRITABLE
         | PageTableFlags::NO_CACHE
@@ -406,16 +415,97 @@ pub fn map_mmio(phys_addr: u64, size: usize) -> Result<(), ()> {
             let page = Page::containing_address(virt);
 
             unsafe {
-                if let Ok(mapping) = mapper().map_to(page, frame, flags, frame_allocator) {
-                    mapping.flush();
-                } else {
-                    // If it failed, it might be already mapped.
-                    // We try to update flags just in case, or ignore.
+                match mapper().map_to(page, frame, flags, frame_allocator) {
+                    Ok(mapping) => mapping.flush(),
+                    // Already mapped (typically the HHDM identity of this physical
+                    // frame). Force device/uncached flags so MMIO accesses bypass
+                    // the cache.
+                    Err(MapToError::PageAlreadyMapped(_)) => {
+                        match mapper().update_flags(page, flags) {
+                            Ok(mapping) => mapping.flush(),
+                            Err(FlagUpdateError::ParentEntryHugePage) => {
+                                // The HHDM mapped this region with a 2 MiB / 1 GiB
+                                // huge page. We cannot reflag a 4 KiB slice of a huge
+                                // page without splitting it, which is not done here.
+                                // Fail explicitly so the caller does not silently
+                                // use a cached MMIO mapping (which would corrupt
+                                // reads). Per #65 the caller then fails loudly.
+                                crate::serial_println!(
+                                    "\x1b[91m[mem]\x1b[0m map_mmio: {:#x} lies under a \
+                                     huge-page HHDM mapping; cannot set uncached",
+                                    phys
+                                );
+                                return Err(());
+                            }
+                            Err(_) => return Err(()),
+                        }
+                    }
+                    // Out of frames, or a parent huge-page entry we can't split.
+                    Err(_) => return Err(()),
                 }
             }
         }
-    });
+        Ok(())
+    })?;
     Ok(())
+}
+
+/// Ensure a physical address range is mapped into the HHDM as normal cached
+/// memory and return its kernel-virtual address.
+///
+/// The HHDM maps usable RAM, but firmware regions (BIOS ROM, EBDA, ACPI tables
+/// in reserved memory) are not part of the usable-RAM map and may be unmapped.
+/// ACPI table discovery scans these regions, so this helper maps any missing
+/// pages as write-back before the handler dereferences them. Already-mapped
+/// ranges are left untouched.
+pub fn ensure_physical_mapped(phys_addr: u64, size: usize) -> Result<VirtAddr, ()> {
+    use x86_64::structures::paging::{
+        mapper::{MapToError, TranslateResult},
+        PageTableFlags, Translate,
+    };
+
+    let virt = phys_to_virt(PhysAddr::new(phys_addr));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+    // Iterate every page the range touches. The HHDM maps usable RAM, but
+    // firmware regions (BIOS ROM, EBDA, ACPI tables in reserved memory) may be
+    // only partially mapped — a table spanning a page boundary can have its
+    // first page mapped (usable RAM) and its second page unmapped (reserved),
+    // so checking only the start address is not enough. Map each unmapped page;
+    // leave already-mapped pages untouched.
+    let last = phys_addr.saturating_add(size.saturating_sub(1) as u64);
+    let start_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(phys_addr));
+    let end_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(last));
+    let frames = PhysFrame::range_inclusive(start_frame, end_frame);
+
+    with_frame_allocator(|frame_allocator| {
+        for frame in frames {
+            let page = Page::containing_address(phys_to_virt(frame.start_address()));
+            // Skip pages that are already mapped (avoids disturbing existing
+            // usable-RAM mappings and wasting allocator frames).
+            if !matches!(
+                mapper().translate(page.start_address()),
+                TranslateResult::NotMapped | TranslateResult::InvalidFrameAddress(_)
+            ) {
+                continue;
+            }
+            unsafe {
+                match mapper().map_to(page, frame, flags, frame_allocator) {
+                    Ok(mapping) => mapping.flush(),
+                    // A concurrent mapper may have mapped this page between our
+                    // translate check and the map_to call; that is benign.
+                    Err(MapToError::PageAlreadyMapped(_)) => {}
+                    // Genuine failures (out of frames, or a parent huge-page entry
+                    // we can't split here): propagate so the caller does not
+                    // dereference an unmapped address.
+                    Err(_) => return Err(()),
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    Ok(virt)
 }
 
 pub fn memory_size() -> usize {

@@ -6,6 +6,8 @@
 /.zig-cache
 /rootfs/bin
 /rootfs/sbin
+/tools/time-regression/logs/*
+/.claude/plans/*
 twilight_kernel/kernel
 kernel/twilight_kernel/kernel
 twilight-os.iso
