@@ -94,9 +94,21 @@ fn setup_power_control(acpi: &AcpiTables<KernelAcpiHandler>) {
     }
     if let Ok(dsdt) = acpi.dsdt() {
         // The DSDT lives in firmware/reserved memory that may not be part of the
-        // usable-RAM HHDM map, so ensure it is mapped before reading.
-        let virt_addr = sys::memory::ensure_physical_mapped(dsdt.address as u64, dsdt.length as usize)
-            .unwrap_or_else(|_| sys::memory::phys_to_virt(PhysAddr::new(dsdt.address as u64)));
+        // usable-RAM HHDM map, so ensure it is mapped before reading. If mapping
+        // fails, skip parsing rather than dereferencing an unmapped address — keep
+        // the hardcoded `_S5` fallback so shutdown still works.
+        let virt_addr =
+            match sys::memory::ensure_physical_mapped(dsdt.address as u64, dsdt.length as usize)
+            {
+                Ok(v) => v,
+                Err(()) => {
+                    println!("ACPI: could not map DSDT; using hardcoded S5 fallback");
+                    unsafe {
+                        SLP_TYPA = (5 & 7) << 10;
+                    }
+                    return;
+                }
+            };
         let ptr = virt_addr.as_ptr();
         let table = unsafe { core::slice::from_raw_parts(ptr, dsdt.length as usize) };
         let handler = Box::new(KernelAmlHandler);

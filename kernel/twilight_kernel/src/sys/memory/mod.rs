@@ -387,14 +387,17 @@ pub fn phys_addr(ptr: *const u8) -> u64 {
 }
 
 pub fn map_mmio(phys_addr: u64, size: usize) -> Result<(), ()> {
-    use x86_64::structures::paging::PageTableFlags;
+    use x86_64::structures::paging::{
+        mapper::{FlagUpdateError, MapToError},
+        PageTableFlags,
+    };
 
     let size = size.saturating_sub(1) as u64;
     let start_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(phys_addr));
     let end_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(phys_addr + size));
     let frames = PhysFrame::range_inclusive(start_frame, end_frame);
 
-    // Device MMIO must be uncached. The HHDM pre-maps all physical memory as
+    // Device MMIO must be uncached. The HHDM pre-maps usable physical memory as
     // write-back, so for any MMIO region that already has a mapping we must
     // *update* the page-table flags to device/uncached rather than silently
     // leaving the cached mapping in place (which would corrupt reads through
@@ -414,15 +417,31 @@ pub fn map_mmio(phys_addr: u64, size: usize) -> Result<(), ()> {
             unsafe {
                 match mapper().map_to(page, frame, flags, frame_allocator) {
                     Ok(mapping) => mapping.flush(),
-                    Err(_) => {
-                        // Already mapped (typically the HHDM identity of this
-                        // physical frame). Force device/uncached flags so MMIO
-                        // accesses bypass the cache.
+                    // Already mapped (typically the HHDM identity of this physical
+                    // frame). Force device/uncached flags so MMIO accesses bypass
+                    // the cache.
+                    Err(MapToError::PageAlreadyMapped(_)) => {
                         match mapper().update_flags(page, flags) {
                             Ok(mapping) => mapping.flush(),
+                            Err(FlagUpdateError::ParentEntryHugePage) => {
+                                // The HHDM mapped this region with a 2 MiB / 1 GiB
+                                // huge page. We cannot reflag a 4 KiB slice of a huge
+                                // page without splitting it, which is not done here.
+                                // Fail explicitly so the caller does not silently
+                                // use a cached MMIO mapping (which would corrupt
+                                // reads). Per #65 the caller then fails loudly.
+                                crate::serial_println!(
+                                    "\x1b[91m[mem]\x1b[0m map_mmio: {:#x} lies under a \
+                                     huge-page HHDM mapping; cannot set uncached",
+                                    phys
+                                );
+                                return Err(());
+                            }
                             Err(_) => return Err(()),
                         }
                     }
+                    // Out of frames, or a parent huge-page entry we can't split.
+                    Err(_) => return Err(()),
                 }
             }
         }
@@ -441,7 +460,8 @@ pub fn map_mmio(phys_addr: u64, size: usize) -> Result<(), ()> {
 /// ranges are left untouched.
 pub fn ensure_physical_mapped(phys_addr: u64, size: usize) -> Result<VirtAddr, ()> {
     use x86_64::structures::paging::{
-        mapper::TranslateResult, PageTableFlags, Translate,
+        mapper::{MapToError, TranslateResult},
+        PageTableFlags, Translate,
     };
 
     let virt = phys_to_virt(PhysAddr::new(phys_addr));
@@ -472,9 +492,13 @@ pub fn ensure_physical_mapped(phys_addr: u64, size: usize) -> Result<VirtAddr, (
             unsafe {
                 match mapper().map_to(page, frame, flags, frame_allocator) {
                     Ok(mapping) => mapping.flush(),
-                    Err(_) => {
-                        // A concurrent mapper may have mapped it; ignore.
-                    }
+                    // A concurrent mapper may have mapped this page between our
+                    // translate check and the map_to call; that is benign.
+                    Err(MapToError::PageAlreadyMapped(_)) => {}
+                    // Genuine failures (out of frames, or a parent huge-page entry
+                    // we can't split here): propagate so the caller does not
+                    // dereference an unmapped address.
+                    Err(_) => return Err(()),
                 }
             }
         }

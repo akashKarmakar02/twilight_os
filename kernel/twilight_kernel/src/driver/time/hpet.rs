@@ -115,7 +115,7 @@ pub fn discover() -> Option<HpetClock> {
     // SAFETY: `base` points to the HPET MMIO block, mapped device/uncached by
     // `map_mmio` above. All register accesses are aligned volatile u64 reads/writes
     // at fixed offsets defined by the HPET specification.
-    let (period_fs, epoch) = unsafe {
+    let (period_fs, cfg, epoch) = unsafe {
         let caps = probe.read_reg(REG_CAPABILITIES);
         let period_fs = caps >> 32;
 
@@ -142,6 +142,9 @@ pub fn discover() -> Option<HpetClock> {
         }
 
         // Enable the main counter, preserving unrelated general-configuration bits.
+        // Capture the original config so it can be restored if discovery later
+        // rejects this HPET (e.g. the counter does not advance), leaving device
+        // state as we found it.
         let cfg = probe.read_reg(REG_CONFIG);
         probe.write_reg(REG_CONFIG, cfg | ENABLE_CNF);
 
@@ -150,18 +153,22 @@ pub fn discover() -> Option<HpetClock> {
         // elapsed time relative to its current value rather than resetting it.
         let epoch = probe.read_counter();
 
-        (period_fs, epoch)
+        (period_fs, cfg, epoch)
     };
 
-    // Prove the counter advances before selecting it. Spin briefly via the TSC
-    // (which advances per-cycle even under TCG) and re-read; a non-advancing
-    // counter would freeze guest time.
-    // SAFETY: same MMIO block as above.
-    let tsc0 = super::tsc::read_cycles();
+    // Prove the counter advances before selecting it. A non-advancing counter
+    // would freeze guest time, so reject it explicitly.
+    //
+    // The wait is bounded by an iteration count, NOT by a TSC-frequency-derived
+    // deadline: when `tsc::detect()` returns `None` the published TSC frequency
+    // is 0, and deriving the window from it would collapse to ~one cycle and
+    // reject a perfectly good HPET (#65 review). Each iteration issues a volatile
+    // MMIO read (a device access takes ~1 us on real hardware, far longer than
+    // the ~70 ns HPET period), so a handful of iterations is enough for at least
+    // one counter tick. The cap is generous to cover slow virtualized MMIO.
     let mut advanced = false;
-    // Wait up to ~1 ms of TSC cycles for the counter to tick.
-    let deadline = tsc0.saturating_add(super::tsc::frequency_hz().max(1_000) / 1_000);
-    while super::tsc::read_cycles() < deadline {
+    const ADVANCE_PROBE_ITERS: u32 = 4096;
+    for _ in 0..ADVANCE_PROBE_ITERS {
         // SAFETY: reading the main counter is a fixed volatile MMIO load.
         let now = unsafe { probe.read_counter() };
         if now != epoch {
@@ -171,6 +178,9 @@ pub fn discover() -> Option<HpetClock> {
     }
     if !advanced {
         crate::serial_println!("\x1b[93m[time]\x1b[0m hpet: counter does not advance, rejecting");
+        // Restore the original general-configuration value so we don't leave the
+        // counter enabled after rejecting it.
+        unsafe { probe.write_reg(REG_CONFIG, cfg) };
         return None;
     }
 
