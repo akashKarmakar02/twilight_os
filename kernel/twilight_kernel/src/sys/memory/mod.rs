@@ -394,6 +394,12 @@ pub fn map_mmio(phys_addr: u64, size: usize) -> Result<(), ()> {
     let end_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(phys_addr + size));
     let frames = PhysFrame::range_inclusive(start_frame, end_frame);
 
+    // Device MMIO must be uncached. The HHDM pre-maps all physical memory as
+    // write-back, so for any MMIO region that already has a mapping we must
+    // *update* the page-table flags to device/uncached rather than silently
+    // leaving the cached mapping in place (which would corrupt reads through
+    // the CPU cache). `map_to` fails on an existing mapping; on that failure we
+    // fall back to `update_flags`.
     let flags = PageTableFlags::PRESENT
         | PageTableFlags::WRITABLE
         | PageTableFlags::NO_CACHE
@@ -406,16 +412,76 @@ pub fn map_mmio(phys_addr: u64, size: usize) -> Result<(), ()> {
             let page = Page::containing_address(virt);
 
             unsafe {
-                if let Ok(mapping) = mapper().map_to(page, frame, flags, frame_allocator) {
-                    mapping.flush();
-                } else {
-                    // If it failed, it might be already mapped.
-                    // We try to update flags just in case, or ignore.
+                match mapper().map_to(page, frame, flags, frame_allocator) {
+                    Ok(mapping) => mapping.flush(),
+                    Err(_) => {
+                        // Already mapped (typically the HHDM identity of this
+                        // physical frame). Force device/uncached flags so MMIO
+                        // accesses bypass the cache.
+                        match mapper().update_flags(page, flags) {
+                            Ok(mapping) => mapping.flush(),
+                            Err(_) => return Err(()),
+                        }
+                    }
                 }
             }
         }
-    });
+        Ok(())
+    })?;
     Ok(())
+}
+
+/// Ensure a physical address range is mapped into the HHDM as normal cached
+/// memory and return its kernel-virtual address.
+///
+/// The HHDM maps usable RAM, but firmware regions (BIOS ROM, EBDA, ACPI tables
+/// in reserved memory) are not part of the usable-RAM map and may be unmapped.
+/// ACPI table discovery scans these regions, so this helper maps any missing
+/// pages as write-back before the handler dereferences them. Already-mapped
+/// ranges are left untouched.
+pub fn ensure_physical_mapped(phys_addr: u64, size: usize) -> Result<VirtAddr, ()> {
+    use x86_64::structures::paging::{
+        mapper::TranslateResult, PageTableFlags, Translate,
+    };
+
+    let virt = phys_to_virt(PhysAddr::new(phys_addr));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+    // Iterate every page the range touches. The HHDM maps usable RAM, but
+    // firmware regions (BIOS ROM, EBDA, ACPI tables in reserved memory) may be
+    // only partially mapped — a table spanning a page boundary can have its
+    // first page mapped (usable RAM) and its second page unmapped (reserved),
+    // so checking only the start address is not enough. Map each unmapped page;
+    // leave already-mapped pages untouched.
+    let last = phys_addr.saturating_add(size.saturating_sub(1) as u64);
+    let start_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(phys_addr));
+    let end_frame: PhysFrame = PhysFrame::containing_address(PhysAddr::new(last));
+    let frames = PhysFrame::range_inclusive(start_frame, end_frame);
+
+    with_frame_allocator(|frame_allocator| {
+        for frame in frames {
+            let page = Page::containing_address(phys_to_virt(frame.start_address()));
+            // Skip pages that are already mapped (avoids disturbing existing
+            // usable-RAM mappings and wasting allocator frames).
+            if !matches!(
+                mapper().translate(page.start_address()),
+                TranslateResult::NotMapped | TranslateResult::InvalidFrameAddress(_)
+            ) {
+                continue;
+            }
+            unsafe {
+                match mapper().map_to(page, frame, flags, frame_allocator) {
+                    Ok(mapping) => mapping.flush(),
+                    Err(_) => {
+                        // A concurrent mapper may have mapped it; ignore.
+                    }
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    Ok(virt)
 }
 
 pub fn memory_size() -> usize {

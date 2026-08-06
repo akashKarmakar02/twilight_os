@@ -241,12 +241,16 @@ pub fn init(
 
     arch::x86_64::syscall::init();
 
-    x86_64::instructions::interrupts::enable();
+    // Discover and cache ACPI tables. The HPET clocksource (selected below when
+    // the TSC is not validated) is discovered through these tables, so ACPI must
+    // be initialized before the time subsystem. This also wires power control.
+    sys::acpi::init();
 
     // Initialize the clocksource before anything that reads time or calibrates
-    // against it. The TSC clocksource is detected from CPUID (no IRQs needed)
-    // and publishes the TSC frequency used by `timer::wait` and LAPIC
-    // calibration below. This must precede `timer::init` and `lapic::init`.
+    // against it, and before interrupts are enabled. Selection policy (#65):
+    // validated invariant/paravirtual TSC, else HPET, else explicit failure.
+    // The TSC frequency is published here for `timer::wait` and LAPIC calibration
+    // below. This must precede `timer::init` and `lapic::init`.
     driver::time::init();
 
     driver::timer::init();
@@ -256,7 +260,8 @@ pub fn init(
     driver::apic::lapic::init();
 
     // Establish the realtime epoch from the CMOS RTC. The RTC defines the
-    // wall-clock origin; elapsed time thereafter comes from the TSC clocksource.
+    // wall-clock origin; elapsed time thereafter comes from the selected
+    // clocksource (TSC or HPET).
     driver::time::init_realtime_offset_from_cmos();
 
     // Mask PIT (IRQ0) to prevent double ticks
@@ -266,6 +271,9 @@ pub fn init(
         // Preserve all dynamically unmasked IRQs (e.g. UHCI IRQ10) and only mask IRQ0.
         pics.write_masks(masks[0] | 0x01, masks[1]);
     }
+
+    // Complete PIT/LAPIC setup before BSP interrupts are globally enabled (#65).
+    x86_64::instructions::interrupts::enable();
 
     kernel_utils::dhcp::main();
 }
