@@ -432,6 +432,12 @@ pub struct Process {
     pub sigsuspend_saved_mask: [u64; 2],
     pub in_sigsuspend: bool,
     pub signal_alt_stack: SignalAltStack,
+    /// Outstanding wait token, deadline, and resume reason for deadline-ordered
+    /// blocking (#66). `wait_token` is `Some` iff this process is currently
+    /// blocked in `sys::timer::block_current_until` (or an I/O timeout).
+    pub wait_token: Option<crate::sys::timer::WaitToken>,
+    pub wait_deadline_ns: Option<u64>,
+    pub wake_reason: Option<crate::sys::timer::WakeReason>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -783,6 +789,9 @@ impl Process {
             sigsuspend_saved_mask: [0; 2],
             in_sigsuspend: false,
             signal_alt_stack: SignalAltStack::default(),
+            wait_token: None,
+            wait_deadline_ns: None,
+            wake_reason: None,
         };
         Ok(p)
     }
@@ -1147,6 +1156,9 @@ impl Process {
             sigsuspend_saved_mask: [0; 2],
             in_sigsuspend: false,
             signal_alt_stack: self.signal_alt_stack,
+            wait_token: None,
+            wait_deadline_ns: None,
+            wake_reason: None,
         };
 
         // crate::serial_println!("[fork] child={} ready", pid);
@@ -1224,6 +1236,9 @@ impl Process {
             sigsuspend_saved_mask: [0; 2],
             in_sigsuspend: false,
             signal_alt_stack: SignalAltStack::default(),
+            wait_token: None,
+            wait_deadline_ns: None,
+            wake_reason: None,
         })
     }
 
@@ -1370,24 +1385,27 @@ pub fn exit(code: i32) {
 
     if slice[cur_idx].is_thread {
         slice[cur_idx].close_all_fds();
+        invalidate_wait_token(&mut slice[cur_idx]);
         slice[cur_idx].state = ProcessState::Dead;
         slice[cur_idx].exit_code = code;
 
-        let Some(next_idx) = find_next_runnable_index(slice, cur_idx) else {
+        if let Some(next_idx) = find_next_runnable_index(slice, cur_idx) {
+            switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard);
             loop {
                 crate::task::executor::halt();
             }
-        };
-        switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard);
-        loop {
-            crate::task::executor::halt();
         }
+        // No runnable alternative yet: another task may be Sleeping and will be
+        // woken by a future timer IRQ. Drop the guard so schedule_now() can run.
+        drop(scheduler_guard);
+        idle_until_runnable();
     }
 
     let parent_pid = slice[cur_idx].parent_pid;
     reparent_children(slice, current_pid);
     crate::serial_println!("[exit] pid={} parent={}", current_pid, parent_pid);
     slice[cur_idx].close_all_fds();
+    invalidate_wait_token(&mut slice[cur_idx]);
     slice[cur_idx].state = ProcessState::Dead;
     slice[cur_idx].exit_code = code;
     slice[cur_idx].wait_status = (code & 0xff) << 8;
@@ -1410,10 +1428,11 @@ pub fn exit(code: i32) {
         .or_else(|| find_next_runnable_index(slice, cur_idx));
 
     let Some(next_idx) = next_idx else {
+        // No runnable alternative yet: another task may be Sleeping and will be
+        // woken by a future timer IRQ. Drop the guard so schedule_now() can run.
+        drop(scheduler_guard);
         crate::serial_println!("[exit] pid={} no runnable target", current_pid);
-        loop {
-            crate::task::executor::halt();
-        }
+        idle_until_runnable();
     };
 
     crate::serial_println!(
@@ -1456,6 +1475,7 @@ pub fn exit_group(code: i32) -> ! {
 
     for process in slice.iter_mut().filter(|process| process.tgid == tgid) {
         process.close_all_fds();
+        invalidate_wait_token(process);
         process.state = ProcessState::Dead;
         process.exit_code = code;
     }
@@ -1470,9 +1490,10 @@ pub fn exit_group(code: i32) -> ! {
         .filter(|&idx| matches!(slice[idx].state, ProcessState::Runnable))
         .or_else(|| find_next_runnable_index(slice, cur_idx));
     let Some(next_idx) = next_idx else {
-        loop {
-            crate::task::executor::halt();
-        }
+        // No runnable alternative yet: another task may be Sleeping and will be
+        // woken by a future timer IRQ. Drop the guard so schedule_now() can run.
+        drop(scheduler_guard);
+        idle_until_runnable();
     };
 
     switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard);
@@ -1504,6 +1525,7 @@ pub fn terminate_current_by_signal(sig: i32) -> ! {
     let parent_pid = slice[cur_idx].parent_pid;
     reparent_children(slice, current_pid);
     slice[cur_idx].close_all_fds();
+    invalidate_wait_token(&mut slice[cur_idx]);
     slice[cur_idx].state = ProcessState::Dead;
     slice[cur_idx].exit_code = 128 + sig;
     slice[cur_idx].wait_status = sig & 0x7f;
@@ -1525,10 +1547,11 @@ pub fn terminate_current_by_signal(sig: i32) -> ! {
         .or_else(|| find_next_runnable_index(slice, cur_idx));
 
     let Some(next_idx) = next_idx else {
+        // No runnable alternative yet: another task may be Sleeping and will be
+        // woken by a future timer IRQ. Drop the guard so schedule_now() can run.
+        drop(scheduler_guard);
         crate::serial_println!("[signal-exit] pid={} no runnable target", current_pid);
-        loop {
-            crate::task::executor::halt();
-        }
+        idle_until_runnable();
     };
 
     crate::serial_println!(
@@ -1602,8 +1625,22 @@ pub fn await_io() {
             return;
         };
 
+        // A wake may have raced ahead of us since the last iteration: an IRQ
+        // handler can run between dropping the guard (or returning from a
+        // context switch) and re-acquiring it here, because SchedulerGuard
+        // disables preemption but *not* interrupts. If `wake_process` already
+        // flipped us to Runnable or set pending_io, honour that wake instead of
+        // clobbering it back to AwaitingIo — otherwise the wakeup is lost and
+        // this task blocks forever.
         if slice[cur_idx].pending_io {
             slice[cur_idx].pending_io = false;
+            if matches!(slice[cur_idx].state, ProcessState::Runnable | ProcessState::AwaitingIo) {
+                slice[cur_idx].state = ProcessState::Running;
+            }
+            return;
+        }
+        if matches!(slice[cur_idx].state, ProcessState::Runnable) {
+            slice[cur_idx].state = ProcessState::Running;
             return;
         }
 
@@ -1666,13 +1703,53 @@ pub fn wake_process(pid: u16) {
     match process.state {
         ProcessState::AwaitingIo => {
             process.state = ProcessState::Runnable;
-            process.pending_io = false;
+            // Mark the wake so the just-unblocked task, once rescheduled and
+            // re-entering await_io()'s loop top, can distinguish a genuine wake
+            // from a first-entry block. Without this, the loop would clobber the
+            // Runnable state back to AwaitingIo and lose the wakeup.
+            process.pending_io = true;
         }
         ProcessState::Dead | ProcessState::Stopped => {}
         _ => {
             process.pending_io = true;
         }
     }
+}
+
+/// Wake a deadline-blocked process from the timer expiry path (#66).
+///
+/// The `token` must match the process's currently published `wait_token`; a
+/// mismatch (stale/cancelled entry, or PID reuse) is a no-op. This is the
+/// stale-entry guard that prevents a cancelled wait from waking a later one.
+/// Called from hard-IRQ context by `sys::timer::expire_due` after the queue
+/// guard has been released.
+pub fn wake_from_timer(pid: u16, token: crate::sys::timer::WaitToken) {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
+    #[allow(static_mut_refs)]
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return;
+    };
+    let Some(process) = table.get_process(pid) else {
+        return;
+    };
+    // Only wake a Sleeping process whose published token matches. A stale or
+    // already-woken entry cannot wake a later wait.
+    if process.wait_token != Some(token) || !matches!(process.state, ProcessState::Sleeping) {
+        return;
+    }
+    process.state = ProcessState::Runnable;
+    process.wait_token = None;
+    process.wait_deadline_ns = None;
+    process.wake_reason = Some(crate::sys::timer::WakeReason::Deadline);
+}
+
+/// Clear any outstanding wait token on a process about to exit or be killed.
+/// The queue entry is reclaimed lazily when it reaches the heap head; clearing
+/// the published token here makes it stale so it cannot wake a later wait.
+fn invalidate_wait_token(process: &mut Process) {
+    process.wait_token = None;
+    process.wait_deadline_ns = None;
+    process.wake_reason = None;
 }
 
 #[repr(C)]
@@ -1896,10 +1973,41 @@ fn switch_by_index_guarded(
     true
 }
 
+/// Idle spin for a task that has no runnable alternative *yet*.
+///
+/// Used by the exit/kill paths when the current task is already Dead (or about
+/// to be) but no other task is currently Runnable. This happens now that long
+/// sleeps genuinely block (`Sleeping`) instead of busy-waiting as `Runnable`:
+/// the only other task may be asleep and will be woken by a future timer IRQ.
+///
+/// A bare `loop { halt(); }` would deadlock here: the timer ISR sees
+/// `from_user == 0` (this is kernel mode) and, with kernel preemption disabled,
+/// cannot switch to the task it just woke. So after each `halt` we re-enter the
+/// scheduler: once a timer expiry flips a sleeper to `Runnable`,
+/// [`schedule_now`] switches to it and this task never returns.
+///
+/// The caller must have already dropped its `SchedulerGuard` so [`schedule_now`]
+/// can re-enter the scheduler.
+fn idle_until_runnable() -> ! {
+    loop {
+        crate::task::executor::halt();
+        // Re-check for a runnable task. schedule_now() switches away if one
+        // exists; if not, it returns false and we halt again.
+        let _ = schedule_now();
+    }
+}
+
 fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
     // need_resched is already set by on_timer_tick() (called via
     // driver::time::handle_timer_event before this function). The logic below
     // decides whether to act on it now.
+
+    // Drain deadline-queue overflow outside hard-IRQ context. expire_due()
+    // (called from handle_timer_event under irq_enter) processes a bounded
+    // batch and defers the remainder; finish that work now that irq_exit() has
+    // restored task-context preemption rules. Woken sleepers are Runnable, so
+    // the schedule_now() calls below will pick them up.
+    crate::sys::timer::process_deferred_expiry();
 
     // Existing safe path: interrupted userspace → schedule immediately.
     if from_user != 0 {
@@ -2085,6 +2193,9 @@ pub fn init() {
                 sigsuspend_saved_mask: [0; 2],
                 in_sigsuspend: false,
                 signal_alt_stack: SignalAltStack::default(),
+                wait_token: None,
+                wait_deadline_ns: None,
+                wake_reason: None,
             })
     }
 
@@ -2132,6 +2243,9 @@ pub fn init() {
         sigsuspend_saved_mask: [0; 2],
         in_sigsuspend: false,
         signal_alt_stack: SignalAltStack::default(),
+        wait_token: None,
+        wait_deadline_ns: None,
+        wake_reason: None,
     };
 
     idle_task.gs_base = VirtAddr::new(&*idle_task.kernel_gs as *const _ as u64);
