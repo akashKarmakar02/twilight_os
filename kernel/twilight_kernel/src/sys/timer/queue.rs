@@ -277,6 +277,7 @@ impl TimerQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn always_live(_pid: u16, _token: WaitToken) -> bool {
         true

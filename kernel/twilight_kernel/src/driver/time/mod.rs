@@ -26,8 +26,6 @@ use core::time::Duration;
 
 use conquer_once::spin::OnceCell;
 
-use twilight_common::syscall::types::{EFAULT, EINVAL, Timespec};
-
 use crate::driver::timer::cmos::CMOS;
 
 const NSEC_PER_SEC: u64 = 1_000_000_000;
@@ -164,6 +162,32 @@ pub fn init_realtime_offset_from_cmos() {
     OFFSET_INITED.store(1, Ordering::Relaxed);
 }
 
+/// The boot-time realtime epoch offset (`CLOCK_REALTIME = offset + monotonic`).
+///
+/// Exposed so the time-syscall policy module can translate absolute `CLOCK_REALTIME`
+/// deadlines into monotonic deadlines for the deadline queue without reaching into
+/// this module's privates.
+pub fn realtime_offset_ns() -> u64 {
+    REALTIME_OFFSET_NS.load(Ordering::Relaxed)
+}
+
+/// Lazily establish the realtime epoch on first `CLOCK_REALTIME` access if boot
+/// did not already do so. Idempotent.
+///
+/// The flag is claimed atomically so that, even though only the BSP currently
+/// runs syscall code (APs halt in `ap_main`), a future SMP scheduler cannot
+/// race two CPUs through the check+init window and shift the epoch with a
+/// second CMOS read. Losers observe the already-claimed/completed state and
+/// return.
+pub fn ensure_realtime_offset_inited() {
+    if OFFSET_INITED
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        init_realtime_offset_from_cmos();
+    }
+}
+
 /// Clock-event handler invoked by the timer ISR.
 ///
 /// This advances scheduler state and expires deadlines; it does **not** advance
@@ -188,99 +212,16 @@ pub fn timer_event_count() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Sleeping
+// CLOCK_* ids
 // ---------------------------------------------------------------------------
-
-/// Block the current task until `nanoseconds` of monotonic time have elapsed.
-///
-/// Two strategies are used, selected by duration:
-///
-/// * **Short sleeps** (below [`SHORT_SLEEP_THRESHOLD_NS`]) busy-wait on the TSC
-///   via [`crate::driver::timer::wait`]. This counts TSC cycles, which advance
-///   per executed instruction even under QEMU TCG, so it is a precise *delay*
-///   regardless of which clocksource backs `CLOCK_MONOTONIC`. (The TSC is not
-///   used as the system clocksource under TCG because its wall rate diverges
-///   from virtual time during `hlt`, but for a short busy-wait that rate error is
-///   negligible.) This mirrors how Linux (`udelay`/`ndelay`) and FreeBSD
-///   (`DELAY`) realize sub-tick delays.
-///
-/// * **Long sleeps** (at/above the threshold) block on the deadline-ordered
-///   timer queue ([`crate::sys::timer::block_current_until`]). The caller is
-///   moved to `Sleeping` and selected by the runnable scan only after its
-///   deadline expires, so it is not woken once per tick and does not suffer a
-///   runnable-queue delay after expiry. The CPU halts while waiting.
-pub fn sleep_ns(nanoseconds: u64) {
-    if nanoseconds == 0 {
-        return;
-    }
-
-    // Below the tick quantization, busy-wait on the TSC for precision. The
-    // threshold is a few tick periods: any sleep that would suffer large relative
-    // error from 1 ms rounding takes the precise busy-wait path.
-    if nanoseconds < SHORT_SLEEP_THRESHOLD_NS {
-        crate::driver::timer::wait(nanoseconds);
-        return;
-    }
-
-    let deadline = monotonic_ns().saturating_add(nanoseconds);
-    // Block on the deadline queue. The wake reason is ignored here: plain
-    // nanosleep is not interruptible by signals yet (that is the POSIX syscall
-    // ticket's concern). A Deadline reason means the absolute time arrived.
-    let _reason = crate::sys::timer::block_current_until(deadline);
-}
-
-/// Durations below this are realized as a TSC busy-wait rather than an `hlt`
-/// loop. A small multiple of the 1 ms tick period so that any sleep whose
-/// accuracy would be dominated by tick quantization takes the precise busy-wait
-/// path. Under an HPET clocksource the long-sleep path is already precise (HPET
-/// resolution is typically ~70 ns), so the threshold only selects between
-/// busy-waiting and halting for short durations.
-const SHORT_SLEEP_THRESHOLD_NS: u64 = 2_000_000;
-
-/// Validate and execute a relative `nanosleep`/`clock_nanosleep` request.
-pub fn sleep_timespec(req: &Timespec) -> Result<(), i64> {
-    if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= (NSEC_PER_SEC as i64) {
-        return Err(-(EINVAL as i64));
-    }
-
-    let secs = req.tv_sec as u128;
-    let nsec = req.tv_nsec as u128;
-    let total = secs
-        .saturating_mul(NSEC_PER_SEC as u128)
-        .saturating_add(nsec);
-
-    sleep_ns(core::cmp::min(total, u64::MAX as u128) as u64);
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// CLOCK_* policy and clock_gettime
-// ---------------------------------------------------------------------------
+//
+// Time-syscall *policy* (validation, user copies, signal interruption, remainder
+// computation) lives in `crate::sys::syscall::time`. This module only reads the
+// clock and reports clock events; it no longer touches userspace pointers or
+// implements sleep semantics.
 
 pub const CLOCK_REALTIME: i32 = 0;
 pub const CLOCK_MONOTONIC: i32 = 1;
-
-pub fn sys_clock_gettime(clockid: i32, tp: *mut Timespec) -> i64 {
-    if tp.is_null() {
-        return -(EFAULT as i64);
-    }
-
-    if OFFSET_INITED.load(Ordering::Relaxed) == 0 {
-        init_realtime_offset_from_cmos();
-    }
-
-    let ns: u64 = match clockid {
-        CLOCK_MONOTONIC => monotonic_ns(),
-        CLOCK_REALTIME => realtime_ns(),
-        _ => return -(EINVAL as i64),
-    };
-
-    unsafe {
-        (*tp).tv_sec = (ns / NSEC_PER_SEC) as i64;
-        (*tp).tv_nsec = (ns % NSEC_PER_SEC) as i64;
-    }
-    0
-}
 
 // ---------------------------------------------------------------------------
 // Uptime helpers (used by logs, procfs, drivers)
