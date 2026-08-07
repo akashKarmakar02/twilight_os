@@ -242,13 +242,17 @@ pub fn clear_quantum() {
 }
 
 /// Account elapsed quantum time. Sets `need_resched` if the running task's
-/// slice has expired. Called from the timer ISR; replaces the old per-tick
-/// `set_need_resched()`.
+/// slice has expired, and clears the expired deadline so [`clockevent::rearm`]
+/// does not keep selecting a stale (past) quantum deadline on every event.
+/// Called from the timer ISR; replaces the old per-tick `set_need_resched()`.
 #[inline]
 pub fn account_quantum(now_ns: u64) {
     let d = QUANTUM_DEADLINE.load(Ordering::SeqCst);
     if d != 0 && now_ns >= d {
         set_need_resched();
+        // Clear so the next rearm arms only for a live software deadline (or
+        // disarms). The next context switch re-arms a fresh quantum.
+        QUANTUM_DEADLINE.store(0, Ordering::SeqCst);
     }
 }
 

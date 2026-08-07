@@ -43,21 +43,37 @@ pub fn init() {
 /// or disarm if both are absent.
 ///
 /// Called from hard-IRQ context (after expiry, before EOI) and from task context
-/// after a deadline is inserted or cancelled. Callers must have IRQs disabled
-/// (hard-IRQ, or holding a `lock_irq` guard).
+/// after a deadline is inserted or cancelled. Task-context callers may run with
+/// interrupts enabled, so the sample/store/program sequence is wrapped in
+/// [`without_interrupts`]: this prevents a hard-IRQ [`rearm`] from interleaving
+/// with this call and clobbering a value sampled before the interrupt. With
+/// interrupts disabled on the (only) running CPU, the armed-deadline state is
+/// exclusively owned for the duration of the call, so a plain store is safe.
 pub fn rearm(now_ns: u64) {
-    let target = earliest_deadline();
-    match target {
-        None => {
-            ARMED_DEADLINE.store(ARMED_NONE, Ordering::Release);
-            lapic::cancel_timer();
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let target = earliest_deadline();
+        match target {
+            None => {
+                ARMED_DEADLINE.store(ARMED_NONE, Ordering::Release);
+                lapic::cancel_timer();
+            }
+            Some(abs) => {
+                ARMED_DEADLINE.store(abs, Ordering::Release);
+                let delta = abs.saturating_sub(now_ns).max(lapic::min_delta_ns());
+                lapic::program_oneshot_ns(delta);
+            }
         }
-        Some(abs) => {
-            ARMED_DEADLINE.store(abs, Ordering::Release);
-            let delta = abs.saturating_sub(now_ns).max(lapic::min_delta_ns());
-            lapic::program_oneshot_ns(delta);
-        }
-    }
+    });
+}
+
+/// Decide whether `new_abs` should replace the currently armed deadline `cur`.
+///
+/// A real deadline always replaces [`ARMED_NONE`] (the "no event" sentinel), and
+/// a strictly earlier deadline replaces a later one. Equal or later deadlines do
+/// not replace — the armed event already fires no later than `new_abs`.
+#[inline]
+fn should_replace(cur: u64, new_abs: u64) -> bool {
+    new_abs < cur
 }
 
 /// Atomically reprogram the LAPIC if `new_abs` is earlier than the currently
@@ -71,7 +87,7 @@ pub fn rearm(now_ns: u64) {
 pub fn rearm_if_earlier(now_ns: u64, new_abs: u64) {
     loop {
         let cur = ARMED_DEADLINE.load(Ordering::Acquire);
-        if new_abs >= cur {
+        if !should_replace(cur, new_abs) {
             return; // Already armed no later than the new deadline.
         }
         if ARMED_DEADLINE
@@ -109,14 +125,6 @@ fn earliest_deadline() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::sync::atomic::AtomicU64;
-
-    /// Reset the armed-deadline static to a known value for an isolated test.
-    /// Tests that touch `ARMED_DEADLINE` must not run concurrently with each
-    /// other (the host test harness runs them sequentially).
-    fn reset_armed(to: u64) {
-        ARMED_DEADLINE.store(to, Ordering::SeqCst);
-    }
 
     #[test]
     fn armed_none_sentinel_is_never_a_real_deadline() {
@@ -142,36 +150,28 @@ mod tests {
         assert_eq!(earliest(None, None), None);
     }
 
-    /// `rearm_if_earlier` must not overwrite an earlier armed deadline with a
-    /// later one. We simulate the CAS logic directly against a local atomic so
-    /// the test does not depend on LAPIC hardware.
+    /// `should_replace` must not overwrite an earlier armed deadline with a later
+    /// one, and must replace when the new deadline is strictly earlier. Tested
+    /// against the pure predicate directly so the test does not depend on LAPIC
+    /// hardware.
     #[test]
-    fn rearm_if_earlier_does_not_overwrite_earlier_with_later() {
-        let armed = AtomicU64::new(1000); // already armed at 1000
-        let new_abs = 2000u64; // later — must NOT replace
-        let cur = armed.load(Ordering::Acquire);
-        assert!(new_abs >= cur);
-        // The guard in rearm_if_earlier returns without CAS in this case.
-        assert_eq!(armed.load(Ordering::Acquire), 1000);
+    fn should_replace_rejects_later_or_equal() {
+        // A later deadline must not replace an earlier armed one.
+        assert!(!should_replace(1000, 2000));
+        // An equal deadline must not replace (no point reprogramming).
+        assert!(!should_replace(1000, 1000));
     }
 
     #[test]
-    fn rearm_if_earlier_replaces_when_new_is_strictly_earlier() {
-        let armed = AtomicU64::new(2000);
-        let new_abs = 1000u64;
-        let cur = armed.load(Ordering::Acquire);
-        assert!(new_abs < cur);
-        let _ = armed
-            .compare_exchange(cur, new_abs, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok();
-        assert_eq!(armed.load(Ordering::Acquire), 1000);
+    fn should_replace_accepts_strictly_earlier() {
+        assert!(should_replace(2000, 1000));
     }
 
     #[test]
-    fn rearm_if_earlier_treats_none_as_earliest() {
-        reset_armed(ARMED_NONE);
-        let cur = ARMED_DEADLINE.load(Ordering::Acquire);
-        let new_abs = 5_000_000u64;
-        assert!(new_abs < cur, "any real deadline is earlier than ARMED_NONE");
+    fn should_replace_treats_none_as_earliest() {
+        // Any real deadline is earlier than ARMED_NONE, so it replaces.
+        assert!(should_replace(ARMED_NONE, 5_000_000));
+        // ARMED_NONE itself does not replace a real deadline.
+        assert!(!should_replace(5_000_000, ARMED_NONE));
     }
 }

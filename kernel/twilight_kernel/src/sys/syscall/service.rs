@@ -3674,9 +3674,13 @@ pub fn ppoll(
         if ts.tv_sec == 0 && ts.tv_nsec == 0 {
             return 0;
         }
+        // Validate before the unsigned conversion: a negative tv_sec would
+        // otherwise cast to a huge u64 and block for ~584 years.
+        if let Err(e) = crate::sys::syscall::time::validate_timespec(ts) {
+            return e;
+        }
         let now_ns = crate::driver::time::monotonic_ns();
-        let delta_ns = (ts.tv_sec as u64).saturating_mul(1_000_000_000)
-            .saturating_add(ts.tv_nsec as u64);
+        let delta_ns = crate::sys::syscall::time::timespec_to_ns(ts);
         Some(now_ns.saturating_add(delta_ns))
     } else {
         None
@@ -3791,6 +3795,11 @@ pub fn select(
             if tv.tv_sec == 0 && tv.tv_usec == 0 {
                 return 0;
             }
+            // Validate before the unsigned conversion: a negative tv_sec would
+            // otherwise cast to a huge u64 and block for ~584 years.
+            if !valid_timeval(*tv) {
+                return -(EINVAL as i64);
+            }
             let now_ns = crate::driver::time::monotonic_ns();
             let delta_ns = (tv.tv_sec as u64)
                 .saturating_mul(1_000_000_000)
@@ -3837,6 +3846,11 @@ pub fn select(
         let tv = unsafe { &*(timeout_ptr as *const Timeval) };
         if tv.tv_sec == 0 && tv.tv_usec == 0 {
             return 0;
+        }
+        // Validate before the unsigned conversion: a negative tv_sec would
+        // otherwise cast to a huge u64 and block for ~584 years.
+        if !valid_timeval(*tv) {
+            return -(EINVAL as i64);
         }
         let now_ns = crate::driver::time::monotonic_ns();
         let delta_ns = (tv.tv_sec as u64)

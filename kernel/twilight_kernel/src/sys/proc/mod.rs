@@ -1714,8 +1714,18 @@ pub fn await_io() {
 /// (I/O or timeout) before returning.
 pub fn await_io_with_timeout(timeout_deadline_ns: Option<u64>) {
     let cur_pid = id();
+    // Token from the previous loop iteration, if any. Held across iterations so
+    // a retry explicitly cancels the outstanding wait before arming a fresh one,
+    // rather than relying on lazy queue reclamation to drop a stale entry (which
+    // would leave a spurious timer event armed for a dead deadline).
+    let mut outstanding_token: Option<crate::sys::timer::WaitToken> = None;
 
     loop {
+        // Cancel any token left over from a previous iteration before re-arming.
+        if let Some(tok) = outstanding_token.take() {
+            crate::sys::timer::cancel_owned(tok);
+        }
+
         let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
             return;
         };
@@ -1776,6 +1786,9 @@ pub fn await_io_with_timeout(timeout_deadline_ns: Option<u64>) {
                     return; // Woken by wake_process explicitly setting state
                 }
             }
+            // Spurious wake: neither pending_io nor Running. Retry, carrying the
+            // outstanding token so the loop top cancels it before re-arming.
+            outstanding_token = io_token;
         } else {
             // No other runnable process. Stay logically AwaitingIo.
             drop(scheduler_guard);
@@ -1807,6 +1820,8 @@ pub fn await_io_with_timeout(timeout_deadline_ns: Option<u64>) {
                     return;
                 }
             }
+            // Spurious wake from halt: retry, carrying the outstanding token.
+            outstanding_token = io_token;
         }
     }
 }

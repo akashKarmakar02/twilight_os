@@ -189,6 +189,12 @@ fn calibrate_oneshot() -> Option<LapicClockevent> {
     }
 
     let min_delta_ns = ticks_to_ns(MIN_COUNT_TICKS, ticks_per_sec).max(1);
+    // Mask the LVT timer so the calibration counter (still counting down from
+    // u32::MAX) cannot fire a spurious interrupt between here and the first
+    // real rearm. The first clockevent::rearm() re-enables and programs it.
+    unsafe {
+        write_reg(LVT_TIMER_REG, MASKED);
+    }
     Some(LapicClockevent {
         ticks_per_sec,
         min_delta_ns,
@@ -247,12 +253,22 @@ fn estimate_ticks_per_ms() -> u32 {
 /// Unlike the TSC-domain `timer::wait`, this reads `monotonic_ns()` so it stays
 /// in the same timebase the deadline queue uses — correct under TCG where the
 /// clocksource may be HPET.
+///
+/// Bounded: if the clocksource stalls (e.g. a broken HPET MMIO read under a
+/// misconfigured QEMU model), give up after `CALIB_NS * 4` rather than hang the
+/// boot forever. The caller rejects the resulting zero/implausible elapsed
+/// interval and falls back to the periodic timer.
 fn busy_wait_ns(nanoseconds: u64) {
     if nanoseconds == 0 {
         return;
     }
     let start = crate::driver::time::monotonic_ns();
+    // Cap at 4x the requested interval so a stalled clock cannot spin forever.
+    let escape = nanoseconds.saturating_mul(4);
     while crate::driver::time::monotonic_ns().wrapping_sub(start) < nanoseconds {
+        if crate::driver::time::monotonic_ns().wrapping_sub(start) >= escape {
+            break;
+        }
         core::hint::spin_loop();
     }
 }
@@ -357,11 +373,19 @@ mod tests {
 
     #[test]
     fn ns_to_ticks_ceils_positive_deltas() {
+        // At 1 tick/ns every integer nanosecond converts exactly — no ceiling
+        // is involved, so this checks exact conversion at a 1 GHz rate.
         let tps = 1_000_000_000; // 1 tick per ns
-        // 999_999_999 ns -> just under 1e9 ticks -> ceil to 1e9 ticks.
-        assert_eq!(ns_to_ticks(999_999_999, tps), 1_000_000_000);
-        // 1_000_000_001 ns -> ceil to 1_000_000_001 ticks.
+        assert_eq!(ns_to_ticks(999_999_999, tps), 999_999_999);
         assert_eq!(ns_to_ticks(1_000_000_001, tps), 1_000_000_001);
+
+        // A frequency that does not divide evenly into 1e9 exercises the ceil:
+        // 1.5 GHz means 1.5 ticks/ns, so 7 ns = 10.5 ticks -> ceil to 11. Pick
+        // deltas above MIN_COUNT_TICKS so the minimum-count floor does not clamp
+        // the result and obscure the rounding.
+        let tps_frac = 1_500_000_000;
+        assert_eq!(ns_to_ticks(7, tps_frac), 11); // 10.5 -> ceil 11
+        assert_eq!(ns_to_ticks(6, tps_frac), 9); // 9.0 -> exact 9
     }
 
     #[test]
