@@ -5,7 +5,7 @@
 //! explicit `cond_resched()` safe point. The existing user-mode timer return
 //! path remains the only interrupt-context scheduling exception.
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 // Bootstrap implementation: userspace scheduling currently runs only on the
 // BSP, while APs remain in their halt loop. Twilight's existing CpuLocal<T>
@@ -20,6 +20,21 @@ static IRQ_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static IN_SCHEDULER: AtomicBool = AtomicBool::new(false);
 
 static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
+
+// --- Scheduler quantum (one-shot clockevent, #68) --------------------------
+//
+// The scheduler slice is an absolute monotonic deadline, not a per-tick counter.
+// `need_resched` is set only when `now >= QUANTUM_DEADLINE`, replacing the old
+// unconditional `set_need_resched()` every 1 ms tick. A deadline of 0 means no
+// quantum is armed (idle, or a single runnable task with no peer to preempt
+// for), so the clockevent stays disarmed and no periodic interrupts fire.
+
+/// Default scheduler slice length.
+pub const QUANTUM_NS: u64 = 10_000_000; // 10 ms
+
+/// Absolute monotonic deadline at which the running task's slice expires, or 0
+/// if no quantum is armed.
+static QUANTUM_DEADLINE: AtomicU64 = AtomicU64::new(0);
 
 // --- Kernel-preemption context trackers -----------------------------------
 //
@@ -201,6 +216,40 @@ pub fn clear_need_resched() {
 #[inline]
 pub fn need_resched() -> bool {
     NEED_RESCHED.load(Ordering::SeqCst)
+}
+
+// --- Quantum deadline API ---------------------------------------------------
+
+/// The armed quantum deadline, or `None` when no quantum is active (0 sentinel).
+#[inline]
+pub fn quantum_deadline_ns() -> Option<u64> {
+    let d = QUANTUM_DEADLINE.load(Ordering::SeqCst);
+    (d != 0).then_some(d)
+}
+
+/// Arm a fresh quantum: the slice expires at `now + QUANTUM_NS`. Called by the
+/// scheduler on context switch when another runnable task exists to preempt for.
+#[inline]
+pub fn reset_quantum(now_ns: u64) {
+    QUANTUM_DEADLINE.store(now_ns.saturating_add(QUANTUM_NS), Ordering::SeqCst);
+}
+
+/// Clear the quantum. Called when entering idle or when only one task is
+/// runnable, so no periodic preemption interrupts are needed.
+#[inline]
+pub fn clear_quantum() {
+    QUANTUM_DEADLINE.store(0, Ordering::SeqCst);
+}
+
+/// Account elapsed quantum time. Sets `need_resched` if the running task's
+/// slice has expired. Called from the timer ISR; replaces the old per-tick
+/// `set_need_resched()`.
+#[inline]
+pub fn account_quantum(now_ns: u64) {
+    let d = QUANTUM_DEADLINE.load(Ordering::SeqCst);
+    if d != 0 && now_ns >= d {
+        set_need_resched();
+    }
 }
 
 #[inline]

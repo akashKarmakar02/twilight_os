@@ -355,9 +355,15 @@ mod tests {
 
     #[test]
     fn ns_to_timespec_splits_correctly() {
+        // `Timespec` is #[repr(C, packed)], so field accesses go through a
+        // raw pointer read to avoid an unaligned reference (E0793).
         let t = ns_to_timespec(1_500_000_007);
-        assert_eq!(t.tv_sec, 1);
-        assert_eq!(t.tv_nsec, 500_000_007);
+        let sec = core::ptr::addr_of!(t.tv_sec);
+        let nsec = core::ptr::addr_of!(t.tv_nsec);
+        unsafe {
+            assert_eq!(*sec, 1);
+            assert_eq!(*nsec, 500_000_007);
+        }
     }
 
     #[test]

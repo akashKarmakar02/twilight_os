@@ -255,9 +255,12 @@ pub fn init(
 
     driver::timer::init();
 
-    // Switch to APIC timer. Calibration busy-waits on the TSC, not on the
-    // interrupt-count clock, so it is correct under KVM (#62).
+    // Switch to APIC timer. Calibration busy-waits on the selected clocksource
+    // (TSC or HPET), not the interrupt-count clock, so it is correct under KVM
+    // and TCG (#62/#68). The LAPIC is programmed in one-shot mode as a
+    // clockevent; clockevent::init arms the first event.
     driver::apic::lapic::init();
+    driver::time::clockevent::init();
 
     // Establish the realtime epoch from the CMOS RTC. The RTC defines the
     // wall-clock origin; elapsed time thereafter comes from the selected

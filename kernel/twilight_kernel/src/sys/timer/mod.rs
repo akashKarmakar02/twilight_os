@@ -128,6 +128,12 @@ pub fn block_current_until(deadline_ns: u64) -> WakeReason {
         cur.wait_deadline_ns = Some(deadline_ns);
         cur.wake_reason = None;
         cur.state = crate::sys::proc::ProcessState::Sleeping;
+
+        // Final earliest-deadline recheck before leaving the critical section:
+        // if this new deadline is earlier than the currently armed clockevent,
+        // atomically reprogram the LAPIC now. This closes the insertion-vs-IRQ
+        // race so an earlier deadline cannot be delayed behind an older event.
+        crate::driver::time::clockevent::rearm_if_earlier(now, deadline_ns);
     }
 
     // (6) Release the scheduler guard before switching. The next task may enter
@@ -211,13 +217,12 @@ fn read_and_clear_wake_reason(cur_pid: u16, deadline_ns: u64) -> WakeReason {
 }
 
 /// Arm a wait for the current process and return its token. Called by
-/// `block_current_until` and available to other subsystems (e.g. I/O timeouts)
-/// that publish their own blocked state under the same contract.
+/// `block_current_until` and by [`proc::arm_io_timeout_locked`] for poll/select
+/// timeouts, which publish their own blocked state under the same contract.
 ///
 /// The caller must hold the scheduler guard and have already validated the
 /// deadline against the clock. Returns [`WaitToken::EXHAUSTED`] if the token
 /// space is exhausted (do not block in that case).
-#[allow(dead_code)]
 pub(crate) fn arm_current_locked(deadline_ns: u64, kind: DeadlineKind) -> WaitToken {
     let cur_pid = crate::sys::proc::id();
     let mut q = TIMER_QUEUE.lock_irq();
@@ -242,10 +247,10 @@ pub(crate) fn arm_current_locked(deadline_ns: u64, kind: DeadlineKind) -> WaitTo
 /// dead. Safe to call with a token that is no longer live (no-op).
 ///
 /// This is the explicit cancellation primitive for paths that abort a wait
-/// without exiting (e.g. a POSIX signal interrupting a sleep). The exit path
-/// uses the lighter `proc::invalidate_wait_token`, which clears the same field
-/// without taking the queue lock; both rely on lazy reclamation.
-#[allow(dead_code)]
+/// without exiting (e.g. a POSIX signal interrupting a sleep, or an early I/O
+/// wake cancelling a poll timeout). The exit path uses the lighter
+/// `proc::invalidate_wait_token`, which clears the same field without taking
+/// the queue lock; both rely on lazy reclamation.
 pub(crate) fn cancel_owned(token: WaitToken) {
     let cur_pid = crate::sys::proc::id();
     {
@@ -273,7 +278,8 @@ pub(crate) fn cancel_owned(token: WaitToken) {
 pub fn expire_due(now_ns: u64) {
     // Collect a bounded batch of due entries without holding the queue while
     // waking processes.
-    let mut batch: [Option<(u16, WaitToken)>; EXPIRY_BATCH] = [const { None }; EXPIRY_BATCH];
+    let mut batch: [Option<(u16, WaitToken, DeadlineKind)>; EXPIRY_BATCH] =
+        [const { None }; EXPIRY_BATCH];
     let mut count = 0;
     let more_due;
     {
@@ -281,7 +287,7 @@ pub fn expire_due(now_ns: u64) {
         while count < EXPIRY_BATCH {
             match q.pop_due(now_ns, is_live_wait) {
                 Some(e) => {
-                    batch[count] = Some((e.pid, e.token));
+                    batch[count] = Some((e.pid, e.token, e.kind));
                     count += 1;
                 }
                 None => break,
@@ -294,8 +300,8 @@ pub fn expire_due(now_ns: u64) {
     }
     // Queue guard dropped: wake processes without holding it.
     for i in 0..count {
-        if let Some((pid, token)) = batch[i] {
-            crate::sys::proc::wake_from_timer(pid, token);
+        if let Some((pid, token, kind)) = batch[i] {
+            crate::sys::proc::wake_from_timer(pid, token, kind);
         }
     }
     if more_due {
@@ -311,7 +317,8 @@ pub fn process_deferred_expiry() {
         return;
     }
     let now_ns = crate::driver::time::monotonic_ns();
-    let mut batch: [Option<(u16, WaitToken)>; EXPIRY_BATCH] = [const { None }; EXPIRY_BATCH];
+    let mut batch: [Option<(u16, WaitToken, DeadlineKind)>; EXPIRY_BATCH] =
+        [const { None }; EXPIRY_BATCH];
     loop {
         let mut count = 0;
         let more_due;
@@ -320,7 +327,7 @@ pub fn process_deferred_expiry() {
             while count < EXPIRY_BATCH {
                 match q.pop_due(now_ns, is_live_wait) {
                     Some(e) => {
-                        batch[count] = Some((e.pid, e.token));
+                        batch[count] = Some((e.pid, e.token, e.kind));
                         count += 1;
                     }
                     None => break,
@@ -331,8 +338,8 @@ pub fn process_deferred_expiry() {
                 .is_some_and(|d| d <= now_ns);
         }
         for i in 0..count {
-            if let Some((pid, token)) = batch[i] {
-                crate::sys::proc::wake_from_timer(pid, token);
+            if let Some((pid, token, kind)) = batch[i] {
+                crate::sys::proc::wake_from_timer(pid, token, kind);
             }
         }
         if !more_due {
@@ -340,6 +347,8 @@ pub fn process_deferred_expiry() {
         }
     }
     DEFERRED_EXPIRY_PENDING.store(false, core::sync::atomic::Ordering::SeqCst);
+    // Rearm for the next earliest deadline after draining overflow.
+    crate::driver::time::clockevent::rearm(crate::driver::time::monotonic_ns());
 }
 
 /// Earliest live deadline, or `None` if no live waits exist. Stale heads are
