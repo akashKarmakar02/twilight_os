@@ -173,8 +173,17 @@ pub fn realtime_offset_ns() -> u64 {
 
 /// Lazily establish the realtime epoch on first `CLOCK_REALTIME` access if boot
 /// did not already do so. Idempotent.
+///
+/// The flag is claimed atomically so that, even though only the BSP currently
+/// runs syscall code (APs halt in `ap_main`), a future SMP scheduler cannot
+/// race two CPUs through the check+init window and shift the epoch with a
+/// second CMOS read. Losers observe the already-claimed/completed state and
+/// return.
 pub fn ensure_realtime_offset_inited() {
-    if OFFSET_INITED.load(Ordering::Relaxed) == 0 {
+    if OFFSET_INITED
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
         init_realtime_offset_from_cmos();
     }
 }

@@ -183,6 +183,14 @@ pub const SIGSTOP: usize = 19;
 pub const SIGBUS: usize = 7;
 pub const SIGSEGV: usize = 11;
 
+/// `sigaction` handler sentinels. `0` is SIG_DFL (default disposition), `1` is
+/// SIG_IGN (explicitly ignored). Any value `> 1` is a user handler (caught).
+const SIG_IGN: u64 = 1;
+
+/// Signals whose default disposition is to ignore (POSIX). These are left
+/// pending but never interrupt a sleep when at default disposition.
+const DEFAULT_IGNORE_SIGNALS: &[usize] = &[SIGCHLD];
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SignalAction {
@@ -524,6 +532,48 @@ impl Process {
         self.fd_table.clear();
     }
 
+    /// Whether `sig` would interrupt an interruptible sleep (`nanosleep`,
+    /// #67). POSIX requires only a caught, unmasked signal to interrupt; a
+    /// masked signal, an explicitly ignored (SIG_IGN) signal, or a signal
+    /// whose default disposition is to ignore (e.g. SIGCHLD) must remain
+    /// pending without aborting the sleep. The signal is still recorded as
+    /// pending by `queue_signal`; this only gates the wake.
+    fn signal_interrupts_sleep(&self, sig: usize) -> bool {
+        // Blocked by sigprocmask: stays pending, does not interrupt.
+        if self.signal_mask[0] & signal_bit(sig) != 0 {
+            return false;
+        }
+        let handler = self.signal_actions[sig].handler;
+        // Explicitly ignored (SIG_IGN): never interrupts.
+        if handler == SIG_IGN {
+            return false;
+        }
+        // Caught handler (> SIG_IGN): interrupts.
+        if handler > SIG_IGN {
+            return true;
+        }
+        // Default disposition (SIG_DFL, handler == 0): interrupts only if the
+        // default is not "ignore" (i.e. it is fatal or stop). Default-ignore
+        // signals stay pending without aborting the sleep.
+        !DEFAULT_IGNORE_SIGNALS.contains(&sig)
+    }
+
+    /// Whether any currently-pending signal would interrupt an interruptible
+    /// sleep. Used at sleep entry (`block_current_until`) so a pending but
+    /// non-deliverable signal (masked, ignored, or default-ignore) does not
+    /// abort the sleep before it blocks.
+    pub fn has_sleep_interrupting_signal(&self) -> bool {
+        let mut bits = self.pending_signals;
+        while bits != 0 {
+            let sig = bits.trailing_zeros() as usize + 1;
+            bits &= bits.wrapping_sub(1);
+            if self.signal_interrupts_sleep(sig) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn queue_signal(&mut self, sig: usize) {
         if !(1..=64).contains(&sig) {
             return;
@@ -536,11 +586,17 @@ impl Process {
             self.state = ProcessState::Runnable;
             self.pending_io = false;
         } else if matches!(self.state, ProcessState::Sleeping) {
-            // A signal interrupts a deadline sleep (#67). The blocked sleeper
-            // is made runnable and its wait token cleared so the (now-stale)
-            // timer entry cannot wake a later wait; `wake_reason` records that
-            // the wake was due to a signal so `nanosleep` can compute a
-            // remainder and return -EINTR instead of treating this as expiry.
+            // A signal interrupts a deadline sleep (#67) only when it is
+            // deliverable — unmasked and not ignored/default-ignore. The
+            // blocked sleeper is made runnable and its wait token cleared so
+            // the (now-stale) timer entry cannot wake a later wait;
+            // `wake_reason` records that the wake was due to a signal so
+            // `nanosleep` can compute a remainder and return -EINTR instead of
+            // treating this as expiry. A non-deliverable signal stays pending;
+            // the sleeper keeps its deadline and is not woken.
+            if !self.signal_interrupts_sleep(sig) {
+                return;
+            }
             self.state = ProcessState::Runnable;
             self.wait_token = None;
             self.wait_deadline_ns = None;

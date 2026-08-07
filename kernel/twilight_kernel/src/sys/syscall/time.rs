@@ -79,6 +79,11 @@ fn absolute_to_monotonic_deadline(clockid: i32, abs_ns: u64) -> Result<u64, i64>
             // Saturating subtract: a realtime deadline earlier than the boot
             // epoch maps to monotonic 0 (i.e. "in the past"), which the caller
             // returns from immediately.
+            //
+            // Establish the epoch first; an uninitialized offset of 0 would
+            // pass an absolute epoch deadline (~1.7e18 ns) through unchanged as
+            // a monotonic deadline, blocking for decades.
+            time::ensure_realtime_offset_inited();
             let offset = time::realtime_offset_ns();
             Ok(abs_ns.saturating_sub(offset))
         }
@@ -223,11 +228,12 @@ pub fn sys_clock_nanosleep(
             return 0;
         }
 
-        let now = match clock_now_ns(clockid) {
-            Ok(n) => n,
-            Err(e) => return e,
-        };
-        let deadline = now.saturating_add(duration_ns);
+        // A relative duration is identical in the CLOCK_MONOTONIC and
+        // CLOCK_REALTIME domains, and the deadline queue is monotonic, so the
+        // base must be the monotonic clock. Using clock_now_ns(CLOCK_REALTIME)
+        // here would add the boot epoch offset (~1.7e18 ns) to the deadline and
+        // block far beyond the requested interval.
+        let deadline = time::monotonic_ns().saturating_add(duration_ns);
 
         match sleep_until_deadline(deadline) {
             SleepOutcome::DeadlineReached => 0,

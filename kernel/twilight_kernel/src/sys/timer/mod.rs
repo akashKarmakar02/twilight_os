@@ -82,7 +82,7 @@ pub fn block_current_until(deadline_ns: u64) -> WakeReason {
             .proc_list
             .iter()
             .find(|p| p.pid == cur_pid)
-            .is_some_and(|p| p.has_unblocked_signal());
+            .is_some_and(|p| p.has_sleep_interrupting_signal());
         if has_signal {
             return WakeReason::Signal;
         }

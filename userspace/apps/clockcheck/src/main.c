@@ -353,7 +353,8 @@ static void do_sigint(uint64_t req, unsigned iters) {
             /* Remainder should be roughly req - elapsed. Allow generous slack
              * for scheduling/signal-delivery latency on each side. */
             uint64_t slack = req / 4 + 5 * 1000000ULL;
-            uint64_t lo = (elapsed > slack) ? (elapsed - slack) : 0;
+            uint64_t expected = (req > elapsed) ? (req - elapsed) : 0;
+            uint64_t lo = (expected > slack) ? (expected - slack) : 0;
             if (rem_ns < lo) {
                 verdict = "rem_too_small";
             } else {
