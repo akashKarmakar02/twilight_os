@@ -535,6 +535,16 @@ impl Process {
         ) {
             self.state = ProcessState::Runnable;
             self.pending_io = false;
+        } else if matches!(self.state, ProcessState::Sleeping) {
+            // A signal interrupts a deadline sleep (#67). The blocked sleeper
+            // is made runnable and its wait token cleared so the (now-stale)
+            // timer entry cannot wake a later wait; `wake_reason` records that
+            // the wake was due to a signal so `nanosleep` can compute a
+            // remainder and return -EINTR instead of treating this as expiry.
+            self.state = ProcessState::Runnable;
+            self.wait_token = None;
+            self.wait_deadline_ns = None;
+            self.wake_reason = Some(crate::sys::timer::WakeReason::Signal);
         }
     }
 

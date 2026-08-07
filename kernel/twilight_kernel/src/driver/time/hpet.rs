@@ -272,7 +272,7 @@ mod tests {
         assert!((68..=72).contains(&one_tick), "one_tick={}", one_tick);
         // 1_000_000 ticks ≈ 69.84 ms.
         let million = cycles_to_ns(1_000_000, mult, shift);
-        let expected = 1_000_000u128 * period_fs / 1_000_000;
+        let expected = 1_000_000u128 * period_fs as u128 / 1_000_000;
         assert!((million as i128 - expected as i128).abs() <= 2);
     }
 

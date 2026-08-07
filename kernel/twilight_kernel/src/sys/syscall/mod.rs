@@ -2,6 +2,7 @@ pub mod crypto;
 pub mod fs_attr;
 pub(crate) mod memory;
 pub mod service;
+pub(crate) mod time;
 mod utils;
 use crate::arch::x86_64::idt::Registers;
 use crate::driver::timer::cmos::CMOS;
@@ -214,29 +215,10 @@ pub extern "sysv64" fn syscall_handler(
             unix_time as i64
         }
         SYS_NANOSLEEP => {
-            let req_timespec_ptr = arg1 as *const Timespec;
-            let rem_timespec_ptr = arg2 as *mut Timespec;
-
-            if req_timespec_ptr.is_null() {
-                -(EFAULT as i64)
-            } else {
-                let req = unsafe { &*req_timespec_ptr };
-
-                // We don't implement interruption yet; if rem != NULL, return 0 remaining.
-                if !rem_timespec_ptr.is_null() {
-                    unsafe {
-                        *rem_timespec_ptr = Timespec {
-                            tv_sec: 0,
-                            tv_nsec: 0,
-                        }
-                    };
-                }
-
-                match crate::driver::time::sleep_timespec(req) {
-                    Ok(()) => 0i64,
-                    Err(e) => e, // negative errno
-                }
-            }
+            time::sys_nanosleep(
+                arg1 as *const Timespec,
+                arg2 as *mut Timespec,
+            )
         }
         SYS_SETITIMER => service::setitimer(arg1 as i32, arg2 as usize, arg3 as usize),
         SYS_CAPGET => service::capget(arg1 as usize, arg2 as usize),
@@ -251,79 +233,15 @@ pub extern "sysv64" fn syscall_handler(
         // We don't implement clear_tid yet, but returning a real tid is critical for glibc.
         SYS_SETTID_ADDR => crate::sys::proc::id() as i64,
         SYS_CLOCK_GETTIME => {
-            let timespec_ptr = arg2 as *mut Timespec;
-            crate::driver::time::sys_clock_gettime(arg1 as i32, timespec_ptr)
+            time::sys_clock_gettime(arg1 as i32, arg2 as *mut Timespec)
         }
         SYS_CLOCK_NANOSLEEP => {
-            const TIMER_ABSTIME: i32 = 1;
-            const NSEC_PER_SEC: i64 = 1_000_000_000;
-
-            let clockid = arg1 as i32;
-            let flags = arg2 as i32;
-            let req_ptr = arg3 as *const Timespec;
-            let rem_ptr = arg4 as *mut Timespec;
-
-            if req_ptr.is_null() {
-                -(EFAULT as i64)
-            } else if flags & !TIMER_ABSTIME != 0 {
-                -(EINVAL as i64)
-            } else {
-                // SAFETY: req_ptr was checked non-null above. read_unaligned
-                // avoids creating a reference to the packed userspace timespec.
-                let req = unsafe { core::ptr::read_unaligned(req_ptr) };
-                if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= NSEC_PER_SEC {
-                    -(EINVAL as i64)
-                } else {
-                    if !rem_ptr.is_null() {
-                        // SAFETY: rem_ptr is caller-provided writable memory by
-                        // Linux ABI contract when non-null. Twilight does not
-                        // interrupt sleeps yet, so remaining time is zero.
-                        unsafe {
-                            core::ptr::write_unaligned(
-                                rem_ptr,
-                                Timespec {
-                                    tv_sec: 0,
-                                    tv_nsec: 0,
-                                },
-                            );
-                        }
-                    }
-
-                    if flags & TIMER_ABSTIME == 0 {
-                        match crate::driver::time::sleep_timespec(&req) {
-                            Ok(()) => 0,
-                            Err(errno) => errno,
-                        }
-                    } else {
-                        let mut now = Timespec::default();
-                        let now_res = crate::driver::time::sys_clock_gettime(
-                            clockid,
-                            &mut now as *mut Timespec,
-                        );
-                        if now_res < 0 {
-                            now_res
-                        } else {
-                            let req_ns = (req.tv_sec as i128)
-                                .saturating_mul(NSEC_PER_SEC as i128)
-                                .saturating_add(req.tv_nsec as i128);
-                            let now_ns = (now.tv_sec as i128)
-                                .saturating_mul(NSEC_PER_SEC as i128)
-                                .saturating_add(now.tv_nsec as i128);
-                            if req_ns <= now_ns {
-                                0
-                            } else {
-                                crate::driver::time::sleep_ns(
-                                    core::cmp::min(
-                                        (req_ns - now_ns) as u128,
-                                        u64::MAX as u128,
-                                    ) as u64,
-                                );
-                                0
-                            }
-                        }
-                    }
-                }
-            }
+            time::sys_clock_nanosleep(
+                arg1 as i32,
+                arg2 as i32,
+                arg3 as *const Timespec,
+                arg4 as *mut Timespec,
+            )
         }
         SYS_EXIT_GROUP => service::exit_group(arg1 as i32),
         SYS_WAIT4 => service::wait4(arg1 as i32, arg2 as usize, arg3 as i32, arg4 as usize),

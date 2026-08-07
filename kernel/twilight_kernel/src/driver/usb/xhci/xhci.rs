@@ -946,7 +946,7 @@ impl XhciDriver {
 
                 // Poll manually (ISR is disabled)
                 self.poll_event_ring();
-                crate::driver::time::sleep_ns(10);
+                crate::driver::timer::wait(10);
                 waited_us += 10;
             }
         });

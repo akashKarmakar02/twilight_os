@@ -80,6 +80,56 @@ fn in_user_range(addr: usize, len: usize) -> Result<(), UserCopyError> {
     Ok(())
 }
 
+/// Copy one `T` from a possibly-unaligned user pointer into kernel-owned
+/// storage. The pointer is not retained after the call returns. Returns
+/// `Err(Fault)` for a null, non-canonical, or out-of-range user address.
+///
+/// Used by time syscalls (`nanosleep`, `clock_nanosleep`) to read the packed
+/// `Timespec` request into aligned kernel memory before any validation or
+/// blocking, so no userspace reference survives across a context switch.
+///
+/// SAFETY: this is the fault-aware equivalent of `core::ptr::read_unaligned`.
+/// The caller must ensure `src` is a userspace pointer (it is validated by
+/// `in_user_range` before any deref). A page fault on a COW/zfod page is
+/// resolved by the page-fault handler; a genuinely unmapped address is rejected
+/// by the range/canonical check.
+pub fn copy_from_user<T>(src: *const T) -> Result<T, UserCopyError>
+where
+    T: Copy,
+{
+    if src.is_null() {
+        return Err(UserCopyError::Fault);
+    }
+    in_user_range(src as usize, size_of::<T>())?;
+    // SAFETY: `in_user_range` verified the address is canonical and within the
+    // user range. `read_volatile` avoids creating a reference into userspace
+    // (the source may be unaligned — `Timespec` is `#[repr(C, packed)]`).
+    unsafe { Ok(core::ptr::read_volatile(src)) }
+}
+
+/// Copy one `T` to a possibly-unaligned user pointer. Returns `Err(Fault)` for
+/// a null, non-canonical, or out-of-range user address.
+///
+/// Used by time syscalls to write `clock_gettime` output and the `rem`
+/// remainder on an interrupted relative `nanosleep`. The write is best-effort
+/// per POSIX (Linux writes `rem` even when returning `-EINTR`); a fault here is
+/// reported so the caller can decide whether to surface `-EFAULT`.
+pub fn copy_to_user<T>(dst: *mut T, val: T) -> Result<(), UserCopyError>
+where
+    T: Copy,
+{
+    if dst.is_null() {
+        return Err(UserCopyError::Fault);
+    }
+    in_user_range(dst as usize, size_of::<T>())?;
+    // SAFETY: `in_user_range` verified the address. `write_volatile` avoids
+    // creating a reference into userspace and tolerates an unaligned `dst`.
+    unsafe {
+        core::ptr::write_volatile(dst, val);
+    }
+    Ok(())
+}
+
 pub fn format_path(path: String) -> String {
     #[allow(static_mut_refs)]
     let process = unsafe {
