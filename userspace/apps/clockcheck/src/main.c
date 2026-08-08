@@ -223,9 +223,13 @@ static void do_poll(uint64_t req, unsigned iters, int batch,
         return;
     }
     int timeout_ms = (int)(req / 1000000ULL);
-    /* Sub-ms requests cannot be expressed as a poll timeout; do not gate them
-     * as early wakeups, since the immediate return is a granularity artifact
-     * rather than a missed deadline. */
+    /* poll's timeout is millisecond-granular, so the sub-ms remainder of `req`
+     * is truncated away. Gate against the *effective* deadline
+     * (timeout_ms in ns), not the pre-truncation `req`: a 16.666ms request
+     * becomes a 16ms poll, and a 16.5ms return is on time, not early.
+     * Sub-ms requests (timeout_ms == 0) cannot express a wait at all and are
+     * not gated. */
+    uint64_t effective_req_ns = (uint64_t)timeout_ms * 1000000ULL;
     int gate_early = (timeout_ms > 0);
     for (unsigned i = 0; i < iters; i++) {
         struct pollfd pf = { .fd = pfd[0], .events = POLLIN };
@@ -237,8 +241,9 @@ static void do_poll(uint64_t req, unsigned iters, int batch,
          * fd was ready (unexpected here). rc < 0 is EINTR. Only a clean
          * timeout (rc == 0) is gated as a sleep. */
         int is_sleep = (rc == 0) && gate_early;
-        struct rec r = { s, e, e - s, (int64_t)(e - s) - (int64_t)req,
-                         classify(s, e, req, is_sleep) };
+        struct rec r = { s, e, e - s,
+                         (int64_t)(e - s) - (int64_t)effective_req_ns,
+                         classify(s, e, effective_req_ns, is_sleep) };
         if (batch) recs[i] = r; else print_rec("poll", req, &r);
     }
     close(pfd[0]);

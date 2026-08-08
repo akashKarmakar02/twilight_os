@@ -919,8 +919,12 @@ impl KeyboardListener for Tty {
     fn on_key(&self, key: u8, released: bool) {
         if !released {
             self.input_buffer.lock().push_back(key);
-            // Wake any processes blocked in pop_input_blocking()
+            // Wake any processes blocked in pop_input_blocking() and any
+            // poller/selecter waiting for readability on this TTY (#69). The
+            // global poll queue is notified so a poll(stdin) waiter that is not
+            // on INPUT_WAIT_QUEUE still wakes when input arrives.
             INPUT_WAIT_QUEUE.notify_all();
+            crate::sys::proc::poll_wait_queue().notify_all();
         }
     }
 }
@@ -928,6 +932,7 @@ impl KeyboardListener for Tty {
 /// Notify the TTY input wait queue (called from keyboard interrupt path).
 pub fn notify_input_waiters() {
     INPUT_WAIT_QUEUE.notify_all();
+    crate::sys::proc::poll_wait_queue().notify_all();
 }
 
 impl VfsNodeOps for Tty {

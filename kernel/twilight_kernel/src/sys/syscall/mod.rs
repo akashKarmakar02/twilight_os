@@ -1,6 +1,7 @@
 pub mod crypto;
 pub mod fs_attr;
 pub(crate) mod memory;
+pub mod poll;
 pub mod service;
 pub(crate) mod time;
 mod utils;
@@ -68,8 +69,8 @@ pub extern "sysv64" fn syscall_handler(
         SYS_STAT => service::stat(arg1 as usize, arg2 as usize),
         SYS_FSTAT => service::fstat(arg1 as usize, arg2 as usize),
         SYS_LSTAT => service::lstat(arg1 as usize, arg2 as usize),
-        SYS_POLL => service::poll(arg1 as usize, arg2 as usize, arg3 as isize),
-        SYS_SELECT => service::select(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize, arg5 as usize),
+        SYS_POLL => poll::poll(arg1 as usize, arg2 as usize, arg3 as isize),
+        SYS_SELECT => poll::select(arg1 as i32, arg2 as usize, arg3 as usize, arg4 as usize, arg5 as usize),
         SYS_LSEEK => service::lseek(arg1 as usize, arg2, arg3 as u8),
         SYS_MMAP => memory::mmap(
             arg1,
@@ -332,7 +333,7 @@ pub extern "sysv64" fn syscall_handler(
             0
         }
         // SYS_PPOLL
-        271 => service::ppoll(
+        271 => poll::ppoll(
             arg1 as usize,
             arg2 as usize,
             arg3 as usize,
