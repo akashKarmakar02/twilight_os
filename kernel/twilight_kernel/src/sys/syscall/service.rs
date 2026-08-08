@@ -3583,17 +3583,22 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
     }
 
     let infinite = timeout_ms < 0;
-    let start = uptime();
-    let deadline = if infinite {
+    // Absolute monotonic deadline in ns for the deadline queue (#68). A finite
+    // poll timeout is delivered as a one-shot clockevent rather than relying on
+    // a periodic tick to wake this loop.
+    let deadline_ns = if infinite {
         None
     } else {
-        Some(start + (timeout_ms as f64) / 1000.0)
+        let now_ns = crate::driver::time::monotonic_ns();
+        // timeout_ms in ms -> ns; saturate to avoid overflow on huge values.
+        let delta_ns = (timeout_ms as u64).saturating_mul(1_000_000);
+        Some(now_ns.saturating_add(delta_ns))
     };
     let wait_queue = sys::proc::poll_wait_queue();
 
     loop {
-        if let Some(limit) = deadline {
-            if uptime() >= limit {
+        if let Some(deadline) = deadline_ns {
+            if crate::driver::time::monotonic_ns() >= deadline {
                 return 0;
             }
         }
@@ -3613,14 +3618,17 @@ pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
             return ready as i64;
         }
 
-        if let Some(limit) = deadline {
-            if uptime() >= limit {
+        if let Some(deadline) = deadline_ns {
+            if crate::driver::time::monotonic_ns() >= deadline {
                 wait_queue.finish_wait(wait_pid);
                 return 0;
             }
         }
 
-        sys::proc::await_io();
+        // Block on I/O with the timeout deadline armed on the one-shot
+        // clockevent. await_io_with_timeout arms/cancels the IoTimeout token
+        // itself after entering AwaitingIo state, closing the arm-vs-wake race.
+        sys::proc::await_io_with_timeout(deadline_ns);
         wait_queue.finish_wait(wait_pid);
 
         ready = match poll_fd_set_for_pid(fds, current_pid) {
@@ -3660,23 +3668,28 @@ pub fn ppoll(
         return ready as i64;
     }
 
-    let deadline = if tmo_p != 0 {
+    let deadline_ns = if tmo_p != 0 {
         let ts_ptr = tmo_p as *const Timespec;
         let ts = unsafe { &*ts_ptr };
         if ts.tv_sec == 0 && ts.tv_nsec == 0 {
             return 0;
         }
-        let now = uptime();
-        let dur = (ts.tv_sec as f64) + (ts.tv_nsec as f64) / 1_000_000_000.0;
-        Some(now + dur)
+        // Validate before the unsigned conversion: a negative tv_sec would
+        // otherwise cast to a huge u64 and block for ~584 years.
+        if let Err(e) = crate::sys::syscall::time::validate_timespec(ts) {
+            return e;
+        }
+        let now_ns = crate::driver::time::monotonic_ns();
+        let delta_ns = crate::sys::syscall::time::timespec_to_ns(ts);
+        Some(now_ns.saturating_add(delta_ns))
     } else {
         None
     };
     let wait_queue = sys::proc::poll_wait_queue();
 
     loop {
-        if let Some(limit) = deadline {
-            if uptime() >= limit {
+        if let Some(deadline) = deadline_ns {
+            if crate::driver::time::monotonic_ns() >= deadline {
                 return 0;
             }
         }
@@ -3699,14 +3712,17 @@ pub fn ppoll(
             return ready as i64;
         }
 
-        if let Some(limit) = deadline {
-            if uptime() >= limit {
+        if let Some(deadline) = deadline_ns {
+            if crate::driver::time::monotonic_ns() >= deadline {
                 wait_queue.finish_wait(wait_pid);
                 return 0;
             }
         }
 
-        sys::proc::await_io();
+        // Block on I/O with the timeout deadline armed on the one-shot
+        // clockevent. await_io_with_timeout arms/cancels the IoTimeout token
+        // itself after entering AwaitingIo state, closing the arm-vs-wake race.
+        sys::proc::await_io_with_timeout(deadline_ns);
         wait_queue.finish_wait(wait_pid);
 
         ready = match poll_fd_set_for_pid(fds, current_pid) {
@@ -3779,17 +3795,25 @@ pub fn select(
             if tv.tv_sec == 0 && tv.tv_usec == 0 {
                 return 0;
             }
-            let total_ms = tv.tv_sec * 1000 + (tv.tv_usec as i64) / 1000 + 1;
-            let start = uptime();
+            // Validate before the unsigned conversion: a negative tv_sec would
+            // otherwise cast to a huge u64 and block for ~584 years.
+            if !valid_timeval(*tv) {
+                return -(EINVAL as i64);
+            }
+            let now_ns = crate::driver::time::monotonic_ns();
+            let delta_ns = (tv.tv_sec as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add((tv.tv_usec as u64).saturating_mul(1_000));
+            let deadline = now_ns.saturating_add(delta_ns);
             loop {
-                if uptime() >= start + (total_ms as f64) / 1000.0 {
+                if crate::driver::time::monotonic_ns() >= deadline {
                     return 0;
                 }
-                sys::proc::await_io();
+                sys::proc::await_io_with_timeout(Some(deadline));
             }
         }
         loop {
-            sys::proc::await_io();
+            sys::proc::await_io_with_timeout(None);
         }
     }
 
@@ -3816,23 +3840,30 @@ pub fn select(
     }
 
     let timeout_is_null = timeout_ptr == 0;
-    let deadline = if timeout_is_null {
+    let deadline_ns = if timeout_is_null {
         None
     } else {
         let tv = unsafe { &*(timeout_ptr as *const Timeval) };
         if tv.tv_sec == 0 && tv.tv_usec == 0 {
             return 0;
         }
-        let now = uptime();
-        let dur = (tv.tv_sec as f64) + (tv.tv_usec as f64) / 1_000_000.0;
-        Some(now + dur)
+        // Validate before the unsigned conversion: a negative tv_sec would
+        // otherwise cast to a huge u64 and block for ~584 years.
+        if !valid_timeval(*tv) {
+            return -(EINVAL as i64);
+        }
+        let now_ns = crate::driver::time::monotonic_ns();
+        let delta_ns = (tv.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add((tv.tv_usec as u64).saturating_mul(1_000));
+        Some(now_ns.saturating_add(delta_ns))
     };
 
     let wait_queue = sys::proc::poll_wait_queue();
 
     loop {
-        if let Some(limit) = deadline {
-            if uptime() >= limit {
+        if let Some(deadline) = deadline_ns {
+            if crate::driver::time::monotonic_ns() >= deadline {
                 return 0;
             }
         }
@@ -3862,14 +3893,17 @@ pub fn select(
             return ready as i64;
         }
 
-        if let Some(limit) = deadline {
-            if uptime() >= limit {
+        if let Some(deadline) = deadline_ns {
+            if crate::driver::time::monotonic_ns() >= deadline {
                 wait_queue.finish_wait(wait_pid);
                 return 0;
             }
         }
 
-        sys::proc::await_io();
+        // Block on I/O with the timeout deadline armed on the one-shot
+        // clockevent. await_io_with_timeout arms/cancels the IoTimeout token
+        // itself after entering AwaitingIo state, closing the arm-vs-wake race.
+        sys::proc::await_io_with_timeout(deadline_ns);
         wait_queue.finish_wait(wait_pid);
 
         ready = match poll_fd_set_for_pid(pfds, current_pid) {

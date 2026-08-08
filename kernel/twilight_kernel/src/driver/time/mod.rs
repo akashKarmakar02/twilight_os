@@ -16,6 +16,7 @@
 //! deadline expiry via [`handle_timer_event`], but they do not advance the
 //! timeline. The two responsibilities are separated, as Linux and FreeBSD do.
 
+pub mod clockevent;
 pub mod clocksource;
 pub mod hpet;
 pub mod source;
@@ -190,18 +191,28 @@ pub fn ensure_realtime_offset_inited() {
 
 /// Clock-event handler invoked by the timer ISR.
 ///
-/// This advances scheduler state and expires deadlines; it does **not** advance
-/// the timeline. The timeline is read from the clocksource on demand. Renamed
-/// from the old `pit_tick_isr` to make clear that a delivered interrupt is an
-/// event, not a unit of time.
+/// This accounts the scheduler quantum, expires deadlines, and rearms the
+/// one-shot clockevent for the next event — all before EOI. It does **not**
+/// advance the timeline: the timeline is read from the clocksource on demand.
+/// Renamed from the old `pit_tick_isr` to make clear that a delivered interrupt
+/// is an event, not a unit of time.
+///
+/// IRQ path (#68):
+/// ```text
+/// read now -> account quantum -> expire_due -> rearm -> (caller EOIs)
+/// ```
 pub fn handle_timer_event() {
     TIMER_EVENTS.fetch_add(1, Ordering::Relaxed);
-    crate::sys::proc::on_timer_tick();
-    // Expire deadline-blocked sleepers. The timeline is read from the
-    // clocksource on demand, so this uses monotonic_ns(), not the event count.
-    // Bounded hard-IRQ batch; overflow is drained post-irq_exit by
-    // sys::timer::process_deferred_expiry().
-    crate::sys::timer::expire_due(monotonic_ns());
+    let now = monotonic_ns();
+    // Account the scheduler quantum: set need_resched only if the running
+    // task's slice has actually elapsed, replacing the old per-tick reschedule.
+    crate::sys::preempt::account_quantum(now);
+    // Expire deadline-blocked sleepers. Bounded hard-IRQ batch; overflow is
+    // drained post-irq_exit by sys::timer::process_deferred_expiry().
+    crate::sys::timer::expire_due(now);
+    // Rearm the one-shot timer for the next earliest deadline or quantum, before
+    // EOI, so a deadline expiring during this IRQ is observed and not lost.
+    crate::driver::time::clockevent::rearm(now);
 }
 
 /// Diagnostic: number of timer events delivered since boot. Used by the

@@ -1425,6 +1425,36 @@ pub fn poll_wait_queue() -> &'static WaitQueue {
     &POLL_WAIT_QUEUE
 }
 
+/// Arm an I/O timeout deadline on the deadline queue and publish its token on
+/// `process`. Called by [`await_io_with_timeout`] under the scheduler guard,
+/// after the process has entered `AwaitingIo` state, so the timer expiry path
+/// (`wake_from_timer` with `IoTimeout`) can wake it.
+///
+/// Returns `None` if the token space is exhausted (the caller blocks without a
+/// timeout, which is safe — it will wake on I/O or never).
+fn arm_io_timeout_locked(
+    process: &mut Process,
+    deadline_ns: u64,
+) -> Option<crate::sys::timer::WaitToken> {
+    let token = crate::sys::timer::arm_current_locked(
+        deadline_ns,
+        crate::sys::timer::DeadlineKind::IoTimeout,
+    );
+    if token == crate::sys::timer::WaitToken::EXHAUSTED {
+        return None;
+    }
+    process.wait_token = Some(token);
+    process.wait_deadline_ns = Some(deadline_ns);
+    process.wake_reason = None;
+    // Final earliest-deadline recheck: reprogram the clockevent if this timeout
+    // is earlier than the currently armed event.
+    crate::driver::time::clockevent::rearm_if_earlier(
+        crate::driver::time::monotonic_ns(),
+        deadline_ns,
+    );
+    Some(token)
+}
+
 fn initial_context_stack_top(kernel_rsp: u64) -> u64 {
     kernel_rsp - INITIAL_CONTEXT_STACK_GUARD
 }
@@ -1632,11 +1662,6 @@ pub fn terminate_current_by_signal(sig: i32) -> ! {
     }
 }
 
-pub fn on_timer_tick() {
-    crate::sys::preempt::set_need_resched();
-    POLL_WAIT_QUEUE.notify_all();
-}
-
 pub fn maybe_schedule() {
     crate::sys::preempt::cond_resched();
 }
@@ -1678,9 +1703,29 @@ pub fn schedule_now() -> bool {
 }
 
 pub fn await_io() {
+    await_io_with_timeout(None);
+}
+
+/// Block on I/O with an optional absolute monotonic timeout deadline (#68).
+///
+/// When `timeout_deadline_ns` is `Some`, an I/O timeout is armed on the deadline
+/// queue after the process enters `AwaitingIo` state, so the one-shot clockevent
+/// wakes us exactly when the timeout expires. The token is cancelled on any wake
+/// (I/O or timeout) before returning.
+pub fn await_io_with_timeout(timeout_deadline_ns: Option<u64>) {
     let cur_pid = id();
+    // Token from the previous loop iteration, if any. Held across iterations so
+    // a retry explicitly cancels the outstanding wait before arming a fresh one,
+    // rather than relying on lazy queue reclamation to drop a stale entry (which
+    // would leave a spurious timer event armed for a dead deadline).
+    let mut outstanding_token: Option<crate::sys::timer::WaitToken> = None;
 
     loop {
+        // Cancel any token left over from a previous iteration before re-arming.
+        if let Some(tok) = outstanding_token.take() {
+            crate::sys::timer::cancel_owned(tok);
+        }
+
         let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
             return;
         };
@@ -1712,6 +1757,13 @@ pub fn await_io() {
 
         slice[cur_idx].state = ProcessState::AwaitingIo;
 
+        // Arm the I/O timeout after entering AwaitingIo, so wake_from_timer
+        // (which only wakes AwaitingIo processes for IoTimeout) can fire. The
+        // token is published on the process under the scheduler guard.
+        let io_token = timeout_deadline_ns.and_then(|deadline| {
+            arm_io_timeout_locked(&mut slice[cur_idx], deadline)
+        });
+
         if let Some(next_idx) = find_next_runnable_index(slice, cur_idx) {
             switch_by_index_guarded(slice, cur_idx, next_idx, scheduler_guard);
 
@@ -1722,12 +1774,21 @@ pub fn await_io() {
             if let Some(process) = table.get_process(cur_pid) {
                 if process.pending_io {
                     process.pending_io = false;
+                    if let Some(tok) = io_token {
+                        crate::sys::timer::cancel_owned(tok);
+                    }
                     return;
                 }
                 if matches!(process.state, ProcessState::Running) {
+                    if let Some(tok) = io_token {
+                        crate::sys::timer::cancel_owned(tok);
+                    }
                     return; // Woken by wake_process explicitly setting state
                 }
             }
+            // Spurious wake: neither pending_io nor Running. Retry, carrying the
+            // outstanding token so the loop top cancels it before re-arming.
+            outstanding_token = io_token;
         } else {
             // No other runnable process. Stay logically AwaitingIo.
             drop(scheduler_guard);
@@ -1744,15 +1805,23 @@ pub fn await_io() {
                     if matches!(process.state, ProcessState::Runnable) {
                         process.state = ProcessState::Running;
                     }
+                    if let Some(tok) = io_token {
+                        crate::sys::timer::cancel_owned(tok);
+                    }
                     return;
                 }
                 if matches!(process.state, ProcessState::Runnable) {
                     // No context switch occurred: this task is still the BSP
                     // current task and is resuming directly after HLT.
                     process.state = ProcessState::Running;
+                    if let Some(tok) = io_token {
+                        crate::sys::timer::cancel_owned(tok);
+                    }
                     return;
                 }
             }
+            // Spurious wake from halt: retry, carrying the outstanding token.
+            outstanding_token = io_token;
         }
     }
 }
@@ -1782,14 +1851,23 @@ pub fn wake_process(pid: u16) {
     }
 }
 
-/// Wake a deadline-blocked process from the timer expiry path (#66).
+/// Wake a deadline-blocked process from the timer expiry path (#66/#68).
 ///
 /// The `token` must match the process's currently published `wait_token`; a
 /// mismatch (stale/cancelled entry, or PID reuse) is a no-op. This is the
 /// stale-entry guard that prevents a cancelled wait from waking a later one.
 /// Called from hard-IRQ context by `sys::timer::expire_due` after the queue
 /// guard has been released.
-pub fn wake_from_timer(pid: u16, token: crate::sys::timer::WaitToken) {
+///
+/// `kind` selects the wakeup semantics: a `Sleep` deadline wakes a `Sleeping`
+/// process; an `IoTimeout` deadline wakes an `AwaitingIo` process (e.g. a
+/// `poll`/`select` timeout) and sets `pending_io` so the `await_io` loop treats
+/// it as a genuine wake.
+pub fn wake_from_timer(
+    pid: u16,
+    token: crate::sys::timer::WaitToken,
+    kind: crate::sys::timer::DeadlineKind,
+) {
     let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
     #[allow(static_mut_refs)]
     let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
@@ -1798,15 +1876,32 @@ pub fn wake_from_timer(pid: u16, token: crate::sys::timer::WaitToken) {
     let Some(process) = table.get_process(pid) else {
         return;
     };
-    // Only wake a Sleeping process whose published token matches. A stale or
-    // already-woken entry cannot wake a later wait.
-    if process.wait_token != Some(token) || !matches!(process.state, ProcessState::Sleeping) {
+    if process.wait_token != Some(token) {
         return;
     }
-    process.state = ProcessState::Runnable;
-    process.wait_token = None;
-    process.wait_deadline_ns = None;
-    process.wake_reason = Some(crate::sys::timer::WakeReason::Deadline);
+    match kind {
+        crate::sys::timer::DeadlineKind::Sleep => {
+            if !matches!(process.state, ProcessState::Sleeping) {
+                return;
+            }
+            process.state = ProcessState::Runnable;
+            process.wait_token = None;
+            process.wait_deadline_ns = None;
+            process.wake_reason = Some(crate::sys::timer::WakeReason::Deadline);
+        }
+        crate::sys::timer::DeadlineKind::IoTimeout => {
+            if !matches!(process.state, ProcessState::AwaitingIo) {
+                return;
+            }
+            // Treat the timeout as an I/O wake: the await_io loop will see
+            // pending_io and re-check its fds / deadline.
+            process.state = ProcessState::Runnable;
+            process.pending_io = true;
+            process.wait_token = None;
+            process.wait_deadline_ns = None;
+            process.wake_reason = None;
+        }
+    }
 }
 
 /// Clear any outstanding wait token on a process about to exit or be killed.
@@ -1921,6 +2016,18 @@ fn find_next_runnable_index(processes: &[Process], current_idx: usize) -> Option
     None
 }
 
+/// Arm or clear the scheduler quantum after selecting `current_idx` as the new
+/// running task. If another runnable peer exists, arm a fresh quantum so the
+/// one-shot clockevent preempts the slice when it elapses; otherwise clear it so
+/// idle/single-task workloads need no periodic interrupts (#68).
+fn arm_quantum_for_current(processes: &[Process], current_idx: usize) {
+    if find_next_runnable_index(processes, current_idx).is_some() {
+        crate::sys::preempt::reset_quantum(crate::driver::time::monotonic_ns());
+    } else {
+        crate::sys::preempt::clear_quantum();
+    }
+}
+
 /// Validate the BSP invariant at a stable scheduler boundary: exactly one
 /// process-table entry is Running, and it is the process selected for the CPU.
 fn validate_running_owner(processes: &[Process], expected_idx: usize) -> bool {
@@ -1990,6 +2097,12 @@ fn switch_tasks_with_new_scheduler_guard(current: &mut Process, next: &mut Proce
     }
     next.state = ProcessState::Running;
     crate::sys::preempt::clear_need_resched();
+    // This kernel-context switch path (exec/spawn/init) does not have the full
+    // process slice, so it cannot check for a runnable peer. Clear the quantum;
+    // the next schedule_now() through switch_by_index_guarded() will arm it if
+    // a peer exists. Rearm the clockevent so the disarmed state takes effect.
+    crate::sys::preempt::clear_quantum();
+    crate::driver::time::clockevent::rearm(crate::driver::time::monotonic_ns());
     scheduler_guard.release_before_switch();
     switch_tasks(current, next);
     true
@@ -2024,6 +2137,11 @@ fn switch_by_index_guarded(
         return false;
     }
 
+    // Arm the scheduler quantum for the new current task iff another runnable
+    // task exists to preempt for. With no peer, clear the quantum so the
+    // one-shot clockevent stays disarmed and no periodic preemption fires.
+    arm_quantum_for_current(processes, next_idx);
+
     let ptr = processes.as_mut_ptr();
     unsafe {
         let cur = &mut *ptr.add(cur_idx);
@@ -2055,6 +2173,11 @@ fn switch_by_index_guarded(
 /// The caller must have already dropped its `SchedulerGuard` so [`schedule_now`]
 /// can re-enter the scheduler.
 fn idle_until_runnable() -> ! {
+    // No runnable peer: clear the quantum so the one-shot clockevent is armed
+    // only for the earliest sleeper deadline (if any). Idle with no deadlines
+    // disarms the timer entirely — no periodic interrupts (#68).
+    crate::sys::preempt::clear_quantum();
+    crate::driver::time::clockevent::rearm(crate::driver::time::monotonic_ns());
     loop {
         crate::task::executor::halt();
         // Re-check for a runnable task. schedule_now() switches away if one
@@ -2064,9 +2187,9 @@ fn idle_until_runnable() -> ! {
 }
 
 fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut PreemptFrame {
-    // need_resched is already set by on_timer_tick() (called via
-    // driver::time::handle_timer_event before this function). The logic below
-    // decides whether to act on it now.
+    // need_resched is set by account_quantum() (called via
+    // driver::time::handle_timer_event before this function) when the running
+    // task's quantum has elapsed. The logic below decides whether to act on it.
 
     // Drain deadline-queue overflow outside hard-IRQ context. expire_due()
     // (called from handle_timer_event under irq_enter) processes a bounded
@@ -2086,8 +2209,8 @@ fn timer_preempt_common(frame: *mut PreemptFrame, from_user: u64) -> *mut Preemp
     // can_preempt_kernel() is satisfied.
     if crate::sys::preempt::ENABLE_KERNEL_PREEMPTION {
         if crate::sys::preempt::can_preempt_kernel() {
-            let rip = unsafe { (*frame).rip };
-            let rsp = unsafe { (*frame).rsp };
+            let _rip = unsafe { (*frame).rip };
+            let _rsp = unsafe { (*frame).rsp };
             // crate::serial_println!(
             //     "[kpreempt] allow: pid={} rip={:#x} rsp={:#x}",
             //     id(),

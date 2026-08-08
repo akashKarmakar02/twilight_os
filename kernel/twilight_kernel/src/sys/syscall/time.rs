@@ -42,7 +42,7 @@ enum SleepOutcome {
 
 /// Validate a `Timespec`'s fields. POSIX requires `tv_sec >= 0` and
 /// `0 <= tv_nsec < 1_000_000_000`.
-fn validate_timespec(req: &Timespec) -> Result<(), i64> {
+pub(crate) fn validate_timespec(req: &Timespec) -> Result<(), i64> {
     if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= NSEC_PER_SEC as i64 {
         return Err(-(EINVAL as i64));
     }
@@ -52,7 +52,7 @@ fn validate_timespec(req: &Timespec) -> Result<(), i64> {
 /// Convert a validated `Timespec` to integer nanoseconds using checked/saturating
 /// `u128` arithmetic. Saturates to `u64::MAX`; never wraps into an immediate
 /// deadline. No `f64`.
-fn timespec_to_ns(req: &Timespec) -> u64 {
+pub(crate) fn timespec_to_ns(req: &Timespec) -> u64 {
     let secs = req.tv_sec as u128;
     let nsec = req.tv_nsec as u128;
     let total = secs.saturating_mul(NSEC_PER_SEC as u128).saturating_add(nsec);
@@ -355,9 +355,18 @@ mod tests {
 
     #[test]
     fn ns_to_timespec_splits_correctly() {
+        // `Timespec` is #[repr(C, packed)], so field accesses go through a
+        // raw pointer read to avoid an unaligned reference (E0793). Use
+        // read_unaligned rather than a direct deref, which would still be UB on
+        // a packed field whose address is not aligned.
         let t = ns_to_timespec(1_500_000_007);
-        assert_eq!(t.tv_sec, 1);
-        assert_eq!(t.tv_nsec, 500_000_007);
+        unsafe {
+            assert_eq!(core::ptr::read_unaligned(core::ptr::addr_of!(t.tv_sec)), 1);
+            assert_eq!(
+                core::ptr::read_unaligned(core::ptr::addr_of!(t.tv_nsec)),
+                500_000_007
+            );
+        }
     }
 
     #[test]
