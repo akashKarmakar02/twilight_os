@@ -1864,38 +1864,48 @@ pub fn await_io_until(timeout_deadline_ns: Option<u64>) -> crate::sys::timer::Wa
             // outstanding token so the loop top cancels it before re-arming.
             outstanding_token = io_token;
         } else {
-            // No other runnable process. Stay logically AwaitingIo.
+            // No other runnable process. Stay logically AwaitingIo. Disable
+            // IRQs before checking the published wake state, then use
+            // enable_and_hlt() so a wake cannot land between the check and HLT.
             drop(scheduler_guard);
-            crate::task::executor::halt();
-
-            // Woke up from halt (likely timer or IO interrupt).
-            // Check if we were woken properly.
-            let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
-            #[allow(static_mut_refs)]
-            let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-            if let Some(process) = table.get_process(cur_pid) {
-                if process.pending_io {
-                    process.pending_io = false;
-                    if matches!(process.state, ProcessState::Runnable) {
-                        process.state = ProcessState::Running;
+            let _irq_guard = crate::utils::sync::IrqGuard::new();
+            loop {
+                {
+                    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
+                    #[allow(static_mut_refs)]
+                    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+                    if let Some(process) = table.get_process(cur_pid) {
+                        if process.pending_io {
+                            process.pending_io = false;
+                            if matches!(process.state, ProcessState::Runnable) {
+                                process.state = ProcessState::Running;
+                            }
+                            if let Some(tok) = io_token {
+                                crate::sys::timer::cancel_owned(tok);
+                            }
+                            return take_wake_reason(cur_pid);
+                        }
+                        if matches!(process.state, ProcessState::Runnable) {
+                            // No context switch occurred: this task is still the
+                            // BSP current task and resumes directly after HLT.
+                            process.state = ProcessState::Running;
+                            if let Some(tok) = io_token {
+                                crate::sys::timer::cancel_owned(tok);
+                            }
+                            return take_wake_reason(cur_pid);
+                        }
+                    } else {
+                        return crate::sys::timer::WakeReason::Cancelled;
                     }
-                    if let Some(tok) = io_token {
-                        crate::sys::timer::cancel_owned(tok);
-                    }
-                    return take_wake_reason(cur_pid);
                 }
-                if matches!(process.state, ProcessState::Runnable) {
-                    // No context switch occurred: this task is still the BSP
-                    // current task and is resuming directly after HLT.
-                    process.state = ProcessState::Running;
-                    if let Some(tok) = io_token {
-                        crate::sys::timer::cancel_owned(tok);
-                    }
-                    return take_wake_reason(cur_pid);
+                // A different blocked task may have been woken by the IRQ. The
+                // interrupt returned to this kernel HLT loop, where normal
+                // user-return preemption does not run, so schedule it here.
+                if schedule_now() {
+                    continue;
                 }
+                crate::task::executor::halt();
             }
-            // Spurious wake from halt: retry, carrying the outstanding token.
-            outstanding_token = io_token;
         }
     }
 }
@@ -2120,11 +2130,17 @@ fn find_next_runnable_index(processes: &[Process], current_idx: usize) -> Option
 /// one-shot clockevent preempts the slice when it elapses; otherwise clear it so
 /// idle/single-task workloads need no periodic interrupts (#68).
 fn arm_quantum_for_current(processes: &[Process], current_idx: usize) {
+    let now_ns = crate::driver::time::monotonic_ns();
     if find_next_runnable_index(processes, current_idx).is_some() {
-        crate::sys::preempt::reset_quantum(crate::driver::time::monotonic_ns());
+        crate::sys::preempt::reset_quantum(now_ns);
     } else {
         crate::sys::preempt::clear_quantum();
     }
+    // The timer ISR rearms before it performs a context switch and clears an
+    // expired quantum first. Reprogram here for the newly selected task;
+    // merely updating QUANTUM_DEADLINE can otherwise leave the LAPIC disarmed
+    // until an unrelated sleep/I/O deadline, destroying scheduler fairness.
+    crate::driver::time::clockevent::rearm(now_ns);
 }
 
 /// Validate the BSP invariant at a stable scheduler boundary: exactly one
@@ -2277,11 +2293,15 @@ fn idle_until_runnable() -> ! {
     // disarms the timer entirely — no periodic interrupts (#68).
     crate::sys::preempt::clear_quantum();
     crate::driver::time::clockevent::rearm(crate::driver::time::monotonic_ns());
+    let _irq_guard = crate::utils::sync::IrqGuard::new();
     loop {
+        // Check before HLT with IRQs disabled. If no peer exists, halt()
+        // atomically enables interrupts and sleeps, then restores IRQ-disable
+        // state for the next check.
+        if schedule_now() {
+            continue;
+        }
         crate::task::executor::halt();
-        // Re-check for a runnable task. schedule_now() switches away if one
-        // exists; if not, it returns false and we halt again.
-        let _ = schedule_now();
     }
 }
 

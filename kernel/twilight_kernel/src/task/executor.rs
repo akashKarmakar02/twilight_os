@@ -16,10 +16,31 @@ pub fn init_executor() {
 }
 
 pub fn sleep(duration: f64) {
-    let start = crate::driver::time::uptime_secs_f64();
-    while crate::driver::time::uptime_secs_f64() - start < duration {
+    if !duration.is_finite() || duration <= 0.0 {
+        return;
+    }
+
+    let now_ns = crate::driver::time::monotonic_ns();
+    let duration_ns_f = duration * 1_000_000_000.0;
+    let truncated_ns = duration_ns_f as u64;
+    let duration_ns = if truncated_ns == 0 {
+        1
+    } else if (truncated_ns as f64) < duration_ns_f {
+        truncated_ns.saturating_add(1)
+    } else {
+        truncated_ns
+    };
+    let deadline_ns = now_ns.saturating_add(duration_ns);
+
+    // The periodic PIT used to wake this HLT loop incidentally. Under the
+    // one-shot clockevent policy (#68), publish the actual wake deadline so an
+    // otherwise idle boot/kernel context cannot sleep forever.
+    crate::driver::time::clockevent::arm_kernel_hlt_wake(deadline_ns);
+    let _irq_guard = crate::utils::sync::IrqGuard::new();
+    while crate::driver::time::monotonic_ns() < deadline_ns {
         halt();
     }
+    crate::driver::time::clockevent::clear_kernel_hlt_wake();
 }
 
 pub fn halt() {

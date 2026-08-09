@@ -158,14 +158,12 @@ pub fn block_current_until(deadline_ns: u64) -> WakeReason {
 /// runnable candidate but is logically Sleeping, so halt until an interrupt
 /// (timer expiry or I/O) wakes us, then recheck the wait state.
 fn idle_until_woken(cur_pid: u16, _token: WaitToken) {
+    // Disable IRQs before the first state check, then use enable_and_hlt() in
+    // halt(). This makes "check still blocked -> sleep" atomic with respect to
+    // the timer wake path. A wake racing after schedule_now() returned false is
+    // observed here instead of being lost until an unrelated later interrupt.
+    let _irq_guard = crate::utils::sync::IrqGuard::new();
     loop {
-        // enable_and_hlt: interrupts fire (timer expiry), then we resume with
-        // IRQs disabled by the ISR return path.
-        crate::task::executor::halt();
-
-        // After wake, disable IRQs (halt() leaves them as they were) and recheck.
-        let _irq_guard = crate::utils::sync::IrqGuard::new();
-
         #[allow(static_mut_refs)]
         let Some(table) = (unsafe { crate::sys::proc::PROCESS_TABLE.get_mut() }) else {
             return;
@@ -184,7 +182,16 @@ fn idle_until_woken(cur_pid: u16, _token: WaitToken) {
             // Deadline elapsed without an explicit wake: self-wake.
             return;
         }
-        // Still sleeping and not due: halt again.
+        // Another sleeper may have become Runnable while this physical task is
+        // still blocked in kernel context. Kernel-mode timer return does not
+        // preempt, so explicitly hand the CPU to that peer before halting for
+        // our own deadline.
+        if crate::sys::proc::schedule_now() {
+            continue;
+        }
+        // Still sleeping and not due. halt() atomically enables interrupts and
+        // halts, then restores the disabled state before this loop rechecks.
+        crate::task::executor::halt();
     }
 }
 

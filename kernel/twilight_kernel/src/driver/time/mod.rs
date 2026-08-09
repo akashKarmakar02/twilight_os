@@ -207,6 +207,10 @@ pub fn handle_timer_event() {
     // Account the scheduler quantum: set need_resched only if the running
     // task's slice has actually elapsed, replacing the old per-tick reschedule.
     crate::sys::preempt::account_quantum(now);
+    // A kernel-context sleep uses HLT without a schedulable Process deadline.
+    // Consume its one-shot deadline here; delivery of this interrupt wakes the
+    // HLT loop, while clearing it prevents an immediate interrupt storm.
+    crate::driver::time::clockevent::account_kernel_hlt_wake(now);
     // Expire deadline-blocked sleepers. Bounded hard-IRQ batch; overflow is
     // drained post-irq_exit by sys::timer::process_deferred_expiry().
     crate::sys::timer::expire_due(now);
