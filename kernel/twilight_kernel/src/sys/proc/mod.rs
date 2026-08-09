@@ -579,12 +579,26 @@ impl Process {
             return;
         }
         self.pending_signals |= signal_bit(sig);
-        if matches!(
-            self.state,
-            ProcessState::Waiting | ProcessState::SignalWait | ProcessState::AwaitingIo
-        ) {
+        if matches!(self.state, ProcessState::Waiting | ProcessState::SignalWait) {
             self.state = ProcessState::Runnable;
             self.pending_io = false;
+        } else if matches!(self.state, ProcessState::AwaitingIo) {
+            // A signal interrupts a poll/select wait (#69) only when it is
+            // deliverable — unmasked and not ignored/default-ignore — the same
+            // gate as a deadline sleep (#67). A non-deliverable signal stays
+            // pending; the poller keeps its deadline and is not woken, so a
+            // blocked signal cannot abort an infinite `poll(-1)`. On
+            // interruption the wait token is cleared so the (now-stale) IoTimeout
+            // entry cannot fire a later Deadline wake, and `wake_reason` records
+            // `Signal` so the caller returns `-EINTR`.
+            if !self.signal_interrupts_sleep(sig) {
+                return;
+            }
+            self.state = ProcessState::Runnable;
+            self.pending_io = true;
+            self.wait_token = None;
+            self.wait_deadline_ns = None;
+            self.wake_reason = Some(crate::sys::timer::WakeReason::Signal);
         } else if matches!(self.state, ProcessState::Sleeping) {
             // A signal interrupts a deadline sleep (#67) only when it is
             // deliverable — unmasked and not ignored/default-ignore. The
@@ -1421,12 +1435,66 @@ pub fn current_has_unblocked_signal() -> bool {
         .is_some_and(|process| process.has_unblocked_signal())
 }
 
+/// Whether the current process has a pending signal that would interrupt an
+/// interruptible wait (poll/select/sigsuspend). This is the same gate as
+/// `nanosleep`'s sleep-interrupting check: a caught, unmasked, non-default-
+/// ignore signal. Used by poll/select to return `-EINTR` after a wake (#69).
+pub fn current_has_sleep_interrupting_signal() -> bool {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
+    let current = id();
+    #[allow(static_mut_refs)]
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return false;
+    };
+    table
+        .get_process(current)
+        .is_some_and(|process| process.has_sleep_interrupting_signal())
+}
+
+/// Atomically install `new_mask` as the current process's signal mask and
+/// return the previous mask. SIGKILL/SIGSTOP are always kept unblockable. Used
+/// by `ppoll` to apply its temporary signal mask as part of the waiter
+/// publication/blocking transaction (#69). The caller restores the saved mask
+/// on every return path.
+pub fn swap_signal_mask(new_mask: [u64; 2]) -> [u64; 2] {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
+    let current = id();
+    #[allow(static_mut_refs)]
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return new_mask;
+    };
+    let Some(process) = table.get_process(current) else {
+        return new_mask;
+    };
+    let old = process.signal_mask;
+    let mut m = new_mask;
+    m[0] &= !signal_bit(SIGKILL) & !signal_bit(SIGSTOP);
+    process.signal_mask = m;
+    old
+}
+
+/// Restore the signal mask previously saved by [`swap_signal_mask`].
+pub fn restore_signal_mask(saved_mask: [u64; 2]) {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
+    let current = id();
+    #[allow(static_mut_refs)]
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return;
+    };
+    let Some(process) = table.get_process(current) else {
+        return;
+    };
+    let mut m = saved_mask;
+    m[0] &= !signal_bit(SIGKILL) & !signal_bit(SIGSTOP);
+    process.signal_mask = m;
+}
+
 pub fn poll_wait_queue() -> &'static WaitQueue {
     &POLL_WAIT_QUEUE
 }
 
 /// Arm an I/O timeout deadline on the deadline queue and publish its token on
-/// `process`. Called by [`await_io_with_timeout`] under the scheduler guard,
+/// `process`. Called by [`await_io_until`] under the scheduler guard,
 /// after the process has entered `AwaitingIo` state, so the timer expiry path
 /// (`wake_from_timer` with `IoTimeout`) can wake it.
 ///
@@ -1703,16 +1771,22 @@ pub fn schedule_now() -> bool {
 }
 
 pub fn await_io() {
-    await_io_with_timeout(None);
+    let _ = await_io_until(None);
 }
 
-/// Block on I/O with an optional absolute monotonic timeout deadline (#68).
+/// Block on I/O with an optional absolute monotonic timeout deadline (#68/#69).
 ///
 /// When `timeout_deadline_ns` is `Some`, an I/O timeout is armed on the deadline
 /// queue after the process enters `AwaitingIo` state, so the one-shot clockevent
 /// wakes us exactly when the timeout expires. The token is cancelled on any wake
-/// (I/O or timeout) before returning.
-pub fn await_io_with_timeout(timeout_deadline_ns: Option<u64>) {
+/// (I/O, timeout, or signal) before returning.
+///
+/// Returns the reason execution resumed so a poll/select caller can distinguish
+/// a readiness event (`Event`) from a timeout expiry (`Deadline`) or a signal
+/// interruption (`Signal`). `Cancelled` is returned only when the scheduler guard
+/// could not be acquired or the process vanished — callers treat it as a spurious
+/// wake and re-scan.
+pub fn await_io_until(timeout_deadline_ns: Option<u64>) -> crate::sys::timer::WakeReason {
     let cur_pid = id();
     // Token from the previous loop iteration, if any. Held across iterations so
     // a retry explicitly cancels the outstanding wait before arming a fresh one,
@@ -1727,13 +1801,13 @@ pub fn await_io_with_timeout(timeout_deadline_ns: Option<u64>) {
         }
 
         let Some(scheduler_guard) = crate::sys::preempt::SchedulerGuard::try_enter() else {
-            return;
+            return crate::sys::timer::WakeReason::Cancelled;
         };
         #[allow(static_mut_refs)]
         let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
         let slice = table.proc_list.make_contiguous();
         let Some(cur_idx) = find_process_index(slice, cur_pid) else {
-            return;
+            return crate::sys::timer::WakeReason::Cancelled;
         };
 
         // A wake may have raced ahead of us since the last iteration: an IRQ
@@ -1748,11 +1822,11 @@ pub fn await_io_with_timeout(timeout_deadline_ns: Option<u64>) {
             if matches!(slice[cur_idx].state, ProcessState::Runnable | ProcessState::AwaitingIo) {
                 slice[cur_idx].state = ProcessState::Running;
             }
-            return;
+            return take_wake_reason(cur_pid);
         }
         if matches!(slice[cur_idx].state, ProcessState::Runnable) {
             slice[cur_idx].state = ProcessState::Running;
-            return;
+            return take_wake_reason(cur_pid);
         }
 
         slice[cur_idx].state = ProcessState::AwaitingIo;
@@ -1777,53 +1851,82 @@ pub fn await_io_with_timeout(timeout_deadline_ns: Option<u64>) {
                     if let Some(tok) = io_token {
                         crate::sys::timer::cancel_owned(tok);
                     }
-                    return;
+                    return take_wake_reason(cur_pid);
                 }
                 if matches!(process.state, ProcessState::Running) {
                     if let Some(tok) = io_token {
                         crate::sys::timer::cancel_owned(tok);
                     }
-                    return; // Woken by wake_process explicitly setting state
+                    return take_wake_reason(cur_pid); // Woken by wake_process
                 }
             }
             // Spurious wake: neither pending_io nor Running. Retry, carrying the
             // outstanding token so the loop top cancels it before re-arming.
             outstanding_token = io_token;
         } else {
-            // No other runnable process. Stay logically AwaitingIo.
+            // No other runnable process. Stay logically AwaitingIo. Disable
+            // IRQs before checking the published wake state, then use
+            // enable_and_hlt() so a wake cannot land between the check and HLT.
             drop(scheduler_guard);
-            crate::task::executor::halt();
-
-            // Woke up from halt (likely timer or IO interrupt).
-            // Check if we were woken properly.
-            let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
-            #[allow(static_mut_refs)]
-            let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
-            if let Some(process) = table.get_process(cur_pid) {
-                if process.pending_io {
-                    process.pending_io = false;
-                    if matches!(process.state, ProcessState::Runnable) {
-                        process.state = ProcessState::Running;
+            let _irq_guard = crate::utils::sync::IrqGuard::new();
+            loop {
+                {
+                    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
+                    #[allow(static_mut_refs)]
+                    let table = unsafe { PROCESS_TABLE.get_mut().unwrap() };
+                    if let Some(process) = table.get_process(cur_pid) {
+                        if process.pending_io {
+                            process.pending_io = false;
+                            if matches!(process.state, ProcessState::Runnable) {
+                                process.state = ProcessState::Running;
+                            }
+                            if let Some(tok) = io_token {
+                                crate::sys::timer::cancel_owned(tok);
+                            }
+                            return take_wake_reason(cur_pid);
+                        }
+                        if matches!(process.state, ProcessState::Runnable) {
+                            // No context switch occurred: this task is still the
+                            // BSP current task and resumes directly after HLT.
+                            process.state = ProcessState::Running;
+                            if let Some(tok) = io_token {
+                                crate::sys::timer::cancel_owned(tok);
+                            }
+                            return take_wake_reason(cur_pid);
+                        }
+                    } else {
+                        return crate::sys::timer::WakeReason::Cancelled;
                     }
-                    if let Some(tok) = io_token {
-                        crate::sys::timer::cancel_owned(tok);
-                    }
-                    return;
                 }
-                if matches!(process.state, ProcessState::Runnable) {
-                    // No context switch occurred: this task is still the BSP
-                    // current task and is resuming directly after HLT.
-                    process.state = ProcessState::Running;
-                    if let Some(tok) = io_token {
-                        crate::sys::timer::cancel_owned(tok);
-                    }
-                    return;
+                // A different blocked task may have been woken by the IRQ. The
+                // interrupt returned to this kernel HLT loop, where normal
+                // user-return preemption does not run, so schedule it here.
+                if schedule_now() {
+                    continue;
                 }
+                crate::task::executor::halt();
             }
-            // Spurious wake from halt: retry, carrying the outstanding token.
-            outstanding_token = io_token;
         }
     }
+}
+
+/// Read and clear the published wake reason for `pid`, defaulting to `Event`
+/// when no explicit reason was recorded (a bare `wake_process` without a
+/// token-bearing wake path). Used by [`await_io_until`] to report why the wait
+/// resumed.
+fn take_wake_reason(pid: u16) -> crate::sys::timer::WakeReason {
+    let _preempt_guard = crate::sys::preempt::PreemptGuard::new();
+    #[allow(static_mut_refs)]
+    let Some(table) = (unsafe { PROCESS_TABLE.get_mut() }) else {
+        return crate::sys::timer::WakeReason::Event;
+    };
+    let Some(process) = table.get_process(pid) else {
+        return crate::sys::timer::WakeReason::Event;
+    };
+    process
+        .wake_reason
+        .take()
+        .unwrap_or(crate::sys::timer::WakeReason::Event)
 }
 
 pub fn wake_process(pid: u16) {
@@ -1839,10 +1942,14 @@ pub fn wake_process(pid: u16) {
         ProcessState::AwaitingIo => {
             process.state = ProcessState::Runnable;
             // Mark the wake so the just-unblocked task, once rescheduled and
-            // re-entering await_io()'s loop top, can distinguish a genuine wake
-            // from a first-entry block. Without this, the loop would clobber the
-            // Runnable state back to AwaitingIo and lose the wakeup.
+            // re-entering await_io_until()'s loop top, can distinguish a genuine
+            // wake from a first-entry block. Without this, the loop would clobber
+            // the Runnable state back to AwaitingIo and lose the wakeup.
             process.pending_io = true;
+            // Record an Event wake so a poll/select caller can tell readiness (or
+            // a spurious notify) apart from a timeout expiry (#69). The token is
+            // left in place; the awoken task cancels it before re-arming.
+            process.wake_reason = Some(crate::sys::timer::WakeReason::Event);
         }
         ProcessState::Dead | ProcessState::Stopped => {}
         _ => {
@@ -1894,12 +2001,14 @@ pub fn wake_from_timer(
                 return;
             }
             // Treat the timeout as an I/O wake: the await_io loop will see
-            // pending_io and re-check its fds / deadline.
+            // pending_io and re-check its fds / deadline. Record a Deadline wake
+            // so a poll/select caller can distinguish timeout expiry from a
+            // readiness event (#69).
             process.state = ProcessState::Runnable;
             process.pending_io = true;
             process.wait_token = None;
             process.wait_deadline_ns = None;
-            process.wake_reason = None;
+            process.wake_reason = Some(crate::sys::timer::WakeReason::Deadline);
         }
     }
 }
@@ -2021,11 +2130,17 @@ fn find_next_runnable_index(processes: &[Process], current_idx: usize) -> Option
 /// one-shot clockevent preempts the slice when it elapses; otherwise clear it so
 /// idle/single-task workloads need no periodic interrupts (#68).
 fn arm_quantum_for_current(processes: &[Process], current_idx: usize) {
+    let now_ns = crate::driver::time::monotonic_ns();
     if find_next_runnable_index(processes, current_idx).is_some() {
-        crate::sys::preempt::reset_quantum(crate::driver::time::monotonic_ns());
+        crate::sys::preempt::reset_quantum(now_ns);
     } else {
         crate::sys::preempt::clear_quantum();
     }
+    // The timer ISR rearms before it performs a context switch and clears an
+    // expired quantum first. Reprogram here for the newly selected task;
+    // merely updating QUANTUM_DEADLINE can otherwise leave the LAPIC disarmed
+    // until an unrelated sleep/I/O deadline, destroying scheduler fairness.
+    crate::driver::time::clockevent::rearm(now_ns);
 }
 
 /// Validate the BSP invariant at a stable scheduler boundary: exactly one
@@ -2178,11 +2293,15 @@ fn idle_until_runnable() -> ! {
     // disarms the timer entirely — no periodic interrupts (#68).
     crate::sys::preempt::clear_quantum();
     crate::driver::time::clockevent::rearm(crate::driver::time::monotonic_ns());
+    let _irq_guard = crate::utils::sync::IrqGuard::new();
     loop {
+        // Check before HLT with IRQs disabled. If no peer exists, halt()
+        // atomically enables interrupts and sleeps, then restores IRQ-disable
+        // state for the next check.
+        if schedule_now() {
+            continue;
+        }
         crate::task::executor::halt();
-        // Re-check for a runnable task. schedule_now() switches away if one
-        // exists; if not, it returns false and we halt again.
-        let _ = schedule_now();
     }
 }
 

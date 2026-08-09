@@ -30,17 +30,54 @@ const ARMED_NONE: u64 = u64::MAX;
 /// earlier insertion win even if a concurrent rearm is choosing its next event.
 static ARMED_DEADLINE: AtomicU64 = AtomicU64::new(ARMED_NONE);
 
+/// Absolute deadline used by the legacy kernel
+/// [`executor::sleep`](crate::task::executor::sleep) HLT loop.
+///
+/// Unlike process sleeps, this early-boot/kernel-context wait has no process
+/// that can be inserted into the scheduler deadline queue. It still needs to
+/// participate in one-shot clockevent selection; otherwise `enable_and_hlt()`
+/// can sleep forever once the periodic PIT tick has been disabled (#68).
+/// A value of 0 means that no kernel HLT wake is pending.
+static KERNEL_HLT_DEADLINE: AtomicU64 = AtomicU64::new(0);
+
 /// Initialize the clockevent subsystem. Called after the LAPIC is calibrated.
 pub fn init() {
     ARMED_DEADLINE.store(ARMED_NONE, Ordering::Relaxed);
+    KERNEL_HLT_DEADLINE.store(0, Ordering::Relaxed);
     // Arm the first event for the current earliest deadline (if any). At boot
     // there are no sleepers and the quantum is not yet armed, so this typically
     // disarms; the first context switch arms the quantum.
     rearm(crate::driver::time::monotonic_ns());
 }
 
-/// Program the LAPIC for `min(earliest_software_deadline, quantum_deadline)`,
-/// or disarm if both are absent.
+/// Publish a deadline that must wake a kernel-context HLT loop.
+///
+/// Bootstrap and scheduled kernel work currently run only on the BSP, so one
+/// slot is sufficient. Recompute the complete clockevent target because a
+/// previously armed quantum/software deadline may be either earlier or later.
+pub fn arm_kernel_hlt_wake(deadline_ns: u64) {
+    KERNEL_HLT_DEADLINE.store(deadline_ns, Ordering::Release);
+    rearm(crate::driver::time::monotonic_ns());
+}
+
+/// Remove a kernel HLT wake published by [`arm_kernel_hlt_wake`].
+pub fn clear_kernel_hlt_wake() {
+    KERNEL_HLT_DEADLINE.store(0, Ordering::Release);
+    rearm(crate::driver::time::monotonic_ns());
+}
+
+/// Consume a due kernel HLT deadline before the timer ISR chooses its next
+/// event. The interrupt itself wakes `enable_and_hlt()`; clearing here prevents
+/// [`rearm`] from repeatedly selecting the already-expired deadline.
+pub fn account_kernel_hlt_wake(now_ns: u64) {
+    let deadline = KERNEL_HLT_DEADLINE.load(Ordering::Acquire);
+    if deadline != 0 && now_ns >= deadline {
+        KERNEL_HLT_DEADLINE.store(0, Ordering::Release);
+    }
+}
+
+/// Program the LAPIC for the earliest software, scheduler-quantum, or kernel-HLT
+/// deadline, or disarm if all three are absent.
 ///
 /// Called from hard-IRQ context (after expiry, before EOI) and from task context
 /// after a deadline is inserted or cancelled. Task-context callers may run with
@@ -109,17 +146,15 @@ pub fn disarm() {
     lapic::cancel_timer();
 }
 
-/// The earliest of the next software deadline and the scheduler quantum
-/// deadline, or `None` if neither exists.
+/// The earliest software, scheduler-quantum, or kernel-HLT deadline.
 fn earliest_deadline() -> Option<u64> {
     let sw = crate::sys::timer::next_deadline_ns();
     let q = crate::sys::preempt::quantum_deadline_ns();
-    match (sw, q) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
+    let kernel_hlt = match KERNEL_HLT_DEADLINE.load(Ordering::Acquire) {
+        0 => None,
+        deadline => Some(deadline),
+    };
+    [sw, q, kernel_hlt].into_iter().flatten().min()
 }
 
 #[cfg(test)]
@@ -133,21 +168,18 @@ mod tests {
     }
 
     #[test]
-    fn earliest_of_two_picks_the_smaller() {
+    fn earliest_of_all_sources_picks_the_smaller() {
         // Mirrors earliest_deadline's min logic without touching globals.
-        fn earliest(sw: Option<u64>, q: Option<u64>) -> Option<u64> {
-            match (sw, q) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            }
+        fn earliest(sw: Option<u64>, q: Option<u64>, kernel_hlt: Option<u64>) -> Option<u64> {
+            [sw, q, kernel_hlt].into_iter().flatten().min()
         }
-        assert_eq!(earliest(Some(100), Some(200)), Some(100));
-        assert_eq!(earliest(Some(200), Some(100)), Some(100));
-        assert_eq!(earliest(Some(100), None), Some(100));
-        assert_eq!(earliest(None, Some(100)), Some(100));
-        assert_eq!(earliest(None, None), None);
+        assert_eq!(earliest(Some(100), Some(200), Some(300)), Some(100));
+        assert_eq!(earliest(Some(200), Some(100), Some(300)), Some(100));
+        assert_eq!(earliest(Some(300), Some(200), Some(100)), Some(100));
+        assert_eq!(earliest(Some(100), None, None), Some(100));
+        assert_eq!(earliest(None, Some(100), None), Some(100));
+        assert_eq!(earliest(None, None, Some(100)), Some(100));
+        assert_eq!(earliest(None, None, None), None);
     }
 
     /// `should_replace` must not overwrite an earlier armed deadline with a later
