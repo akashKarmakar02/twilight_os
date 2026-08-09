@@ -1,6 +1,4 @@
-use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
-use x86_64::instructions::interrupts;
 
 use crate::sys::preempt::PreemptGuard;
 
@@ -24,22 +22,27 @@ impl<T: ?Sized> Mutex<T> {
         crate::sys::preempt::lock_count_inc();
         MutexGuard {
             guard: ManuallyDrop::new(guard),
-            irq_lock: false,
+            irq_was_enabled: false,
+            owns_irq_disable: false,
             _preempt_guard: preempt_guard,
         }
     }
 
     pub fn lock_irq(&self) -> MutexGuard<T> {
-        let irq_lock = interrupts::are_enabled();
-
-        interrupts::disable();
+        // Nest-safe IRQ disable (#70): record whether IF was on, then CLI and
+        // push one level onto the per-CPU IRQ-disable depth stack. The guard's
+        // drop pops the level and re-enables IRQs only when the stack is empty
+        // and IF was originally on — so nested lock_irq()/IrqGuard cannot
+        // prematurely re-enable interrupts.
+        let was_enabled = crate::sys::preempt::irq_save();
         let preempt_guard = PreemptGuard::new_no_resched();
         let guard = self.inner.lock();
         crate::sys::preempt::lock_count_inc();
 
         MutexGuard {
             guard: ManuallyDrop::new(guard),
-            irq_lock,
+            irq_was_enabled: was_enabled,
+            owns_irq_disable: true,
             _preempt_guard: preempt_guard,
         }
     }
@@ -51,7 +54,13 @@ impl<T: ?Sized> Mutex<T> {
 
 pub struct MutexGuard<'a, T: ?Sized + 'a> {
     guard: ManuallyDrop<spin::MutexGuard<'a, T>>,
-    irq_lock: bool,
+    /// Whether IF was enabled when `lock_irq()` was called. Only meaningful
+    /// when `owns_irq_disable` is true.
+    irq_was_enabled: bool,
+    /// True iff this guard was produced by `lock_irq()` and therefore owns one
+    /// level on the IRQ-disable depth stack that must be popped on drop.
+    /// `lock()` sets this false and never touches IRQ state.
+    owns_irq_disable: bool,
     // Dropped after Drop::drop releases the spinlock and restores IRQ state.
     _preempt_guard: PreemptGuard,
 }
@@ -75,13 +84,18 @@ impl<T: ?Sized> core::ops::DerefMut for MutexGuard<'_, T> {
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
+        // Release the spinlock first, then pop the IRQ-disable depth stack (if
+        // this was a lock_irq guard) so IRQs are not re-enabled while the lock
+        // is still held.
+        let owns_irq = self.owns_irq_disable;
+        let was_enabled = self.irq_was_enabled;
         unsafe {
             ManuallyDrop::drop(&mut self.guard);
         }
         crate::sys::preempt::lock_count_dec();
 
-        if self.irq_lock {
-            interrupts::enable();
+        if owns_irq {
+            crate::sys::preempt::irq_restore(was_enabled);
         }
     }
 }
@@ -175,39 +189,56 @@ impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
     }
 }
 
+/// RAII guard that disables interrupts for its lifetime and restores the
+/// previous interrupt state on drop.
+///
+/// Nest-safe (#70): an `IrqGuard` constructed while another `IrqGuard` (or a
+/// `Mutex::lock_irq()` guard) is already live will not re-enable interrupts on
+/// drop; only the outermost guard (the one that observed IF enabled) restores
+/// interrupts. This is backed by a per-CPU depth counter in
+/// [`crate::sys::preempt`].
 pub struct IrqGuard {
-    locked: bool,
+    was_enabled: bool,
 }
 
 impl IrqGuard {
-    /// Creates a new IRQ guard. See the [`IrqGuard`] documentation for more.
+    /// Disable interrupts and push one level onto the IRQ-disable depth stack.
     pub fn new() -> Self {
-        let locked = interrupts::are_enabled();
-
-        interrupts::disable();
-
-        Self { locked }
+        let was_enabled = crate::sys::preempt::irq_save();
+        Self { was_enabled }
     }
 }
 
 impl Drop for IrqGuard {
-    /// Drops the IRQ guard, enabling interrupts again. See the [`IrqGuard`]
-    /// documentation for more.
     fn drop(&mut self) {
-        if self.locked {
-            interrupts::enable();
-        }
+        crate::sys::preempt::irq_restore(self.was_enabled);
     }
 }
 
+/// Maximum number of waiters a single [`WaitQueue`] can hold.
+///
+/// This is a fixed cap so the queue never heap-allocates — critical because
+/// `notify_all` is invoked from IRQ context (keyboard ISR), where the global
+/// allocator's internal spin lock is not IRQ-safe and could deadlock against a
+/// task-context allocation in progress (#70). A wait queue's waiter count is
+/// bounded by the number of live processes blocked on the same resource, which
+/// in practice is far below this cap; overflow drops the wake (the caller will
+/// retry or the waiter times out), never corrupts state.
+const WAIT_QUEUE_CAPACITY: usize = 64;
+
+/// A blocking-wait queue storing PIDs in a fixed-size slab.
+///
+/// All operations are O(n) in the waiter count (n ≤ [`WAIT_QUEUE_CAPACITY`]),
+/// which is acceptable for the small waiter sets this serves. The slab is
+/// allocation-free so it is safe to drive from IRQ context.
 pub struct WaitQueue {
-    waiters: Mutex<Vec<u16>>,
+    waiters: Mutex<[Option<u16>; WAIT_QUEUE_CAPACITY]>,
 }
 
 impl WaitQueue {
     pub const fn new() -> Self {
         Self {
-            waiters: Mutex::new(Vec::new()),
+            waiters: Mutex::new([const { None }; WAIT_QUEUE_CAPACITY]),
         }
     }
 
@@ -215,29 +246,39 @@ impl WaitQueue {
         let pid = crate::sys::proc::id();
         let mut waiters = self.waiters.lock_irq();
 
-        if !waiters.contains(&pid) {
-            waiters.push(pid);
+        // Already queued?
+        if waiters.iter().any(|w| matches!(w, Some(p) if *p == pid)) {
+            return pid;
         }
-
+        for slot in waiters.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(pid);
+                return pid;
+            }
+        }
+        // Slab full: leave unqueued. The caller still blocks via its deadline /
+        // spurious-wake path; the worst case is a missed wake that the caller's
+        // timeout or re-poll recovers from. Log so overflow is observable.
+        crate::serial_println!("[WaitQueue] prepare_current: slab full ({}), pid={} not enqueued", WAIT_QUEUE_CAPACITY, pid);
         pid
     }
 
     pub fn finish_wait(&self, pid: u16) {
         let mut waiters = self.waiters.lock_irq();
-
-        if let Some(idx) = waiters.iter().position(|&waiter| waiter == pid) {
-            waiters.remove(idx);
+        for slot in waiters.iter_mut() {
+            if matches!(slot, Some(p) if *p == pid) {
+                *slot = None;
+                break;
+            }
         }
     }
 
     pub fn notify_one(&self) {
         let waiter = {
             let mut waiters = self.waiters.lock_irq();
-            if waiters.is_empty() {
-                None
-            } else {
-                Some(waiters.remove(0))
-            }
+            // Take the first occupied slot.
+            let taken = waiters.iter_mut().find_map(|slot| slot.take());
+            taken
         };
 
         if let Some(pid) = waiter {
@@ -249,11 +290,8 @@ impl WaitQueue {
         loop {
             let waiter = {
                 let mut waiters = self.waiters.lock_irq();
-                if waiters.is_empty() {
-                    None
-                } else {
-                    Some(waiters.remove(0))
-                }
+                let taken = waiters.iter_mut().find_map(|slot| slot.take());
+                taken
             };
 
             let Some(pid) = waiter else {
@@ -265,7 +303,7 @@ impl WaitQueue {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.waiters.lock_irq().is_empty()
+        self.waiters.lock_irq().iter().all(|w| w.is_none())
     }
 }
 

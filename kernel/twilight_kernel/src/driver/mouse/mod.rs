@@ -15,7 +15,7 @@ lazy_static! {
 }
 
 pub(crate) fn enqueue_packet(packet: [u8; PS2_PACKET_SIZE]) {
-    let mut packets = PACKETS.lock();
+    let mut packets = PACKETS.lock_irq();
     if packets.len() == MAX_PACKETS {
         packets.pop_front();
     }
@@ -37,7 +37,7 @@ impl VfsNodeOps for MouseDev {
         }
 
         loop {
-            if let Some(packet) = PACKETS.lock().pop_front() {
+            if let Some(packet) = PACKETS.lock_irq().pop_front() {
                 buf[..PS2_PACKET_SIZE].copy_from_slice(&packet);
                 return Ok(PS2_PACKET_SIZE);
             }
@@ -50,7 +50,7 @@ impl VfsNodeOps for MouseDev {
     }
 
     fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
-        Ok(!PACKETS.lock().is_empty())
+        Ok(!PACKETS.lock_irq().is_empty())
     }
 
     fn ioctl(&mut self, _device: &mut BlockDev, _cmd: u64, _arg: usize) -> Result<i64, ()> {

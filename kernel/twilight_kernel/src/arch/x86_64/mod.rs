@@ -5,6 +5,7 @@ pub mod cpu_local;
 pub mod gdt;
 pub mod idt;
 pub mod io;
+pub mod irq;
 pub mod power;
 pub mod syscall;
 
