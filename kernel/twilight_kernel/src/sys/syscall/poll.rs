@@ -40,6 +40,12 @@ use twilight_common::syscall::types::{
 
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
+/// Maximum number of pollfds accepted from userspace. Bounded so that
+/// `nfds * size_of::<PollFd>()` stays within `isize::MAX` — the safety
+/// requirement of `slice::from_raw_parts_mut` — before any user buffer is
+/// formed. A larger `nfds` returns `-EINVAL`.
+const MAX_NFDS: usize = isize::MAX as usize / core::mem::size_of::<PollFd>();
+
 // ---------------------------------------------------------------------------
 // Readiness scan
 // ---------------------------------------------------------------------------
@@ -203,8 +209,11 @@ fn wait_for_ready(
     loop {
         // (1) Pump the network stack before each scan so protocol-timer-driven
         //     TCP/UDP readiness (retransmit, peer segment, TIME-WAIT) is
-        //     observed without a per-tick broadcast (#69).
-        let _ = sys::net::pump_network();
+        //     observed without a per-tick broadcast (#69). The returned delay is
+        //     the smoltcp protocol-timer deadline; fold it into the effective
+        //     wait deadline below so a blocked poller wakes when that timer
+        //     should fire and re-pumps, instead of sleeping forever.
+        let net_delay_ns = sys::net::pump_network();
 
         // Check for a pending interrupting signal first: one queued before we
         // publish must abort now, not after a full block.
@@ -242,28 +251,56 @@ fn wait_for_ready(
             }
         }
 
+        // Compute the effective deadline for this block: the earlier of the
+        // user timeout and the next smoltcp protocol-timer expiry. Arming the
+        // protocol deadline lets the one-shot clockevent wake us when smoltcp
+        // has timed work to do (retransmit, delayed-ACK, TIME-WAIT), even for
+        // an infinite poll(-1) with no user deadline — without it such a
+        // poller would strand forever, since NIC RX is only ingested by an
+        // explicit pump and there is no per-tick wake-all (#69).
+        let effective_deadline = match (deadline_ns, net_delay_ns) {
+            (Some(user), Some(net)) => Some(core::cmp::min(user, net)),
+            (Some(user), None) => Some(user),
+            (None, Some(net)) => Some(net),
+            (None, None) => None,
+        };
+
         // (4) Atomically block. await_io_until arms/cancels the IoTimeout token
         //     itself after entering AwaitingIo state, closing the arm-vs-wake
         //     race, and returns the reason execution resumed.
-        let reason = proc::await_io_until(deadline_ns);
+        let reason = proc::await_io_until(effective_deadline);
         wait_queue.finish_wait(wait_pid);
 
         // (5) After wake, recheck readiness, deadline, and signals. A signal
         //     wake takes precedence: return -EINTR regardless of readiness, per
         //     POSIX (a caught signal during poll interrupts it).
         match reason {
-            WakeReason::Signal | WakeReason::Cancelled => {
+            WakeReason::Signal => {
                 return Err(-(EINTR as i64));
             }
+            WakeReason::Cancelled => {
+                // Scheduler contention or a vanished process: spurious wake.
+                // Fall through to the next iteration, which rechecks signals,
+                // the deadline, and readiness — do not surface a bogus EINTR
+                // with no signal pending.
+            }
             WakeReason::Deadline => {
-                // Timeout expiry. Perform the final readiness scan first:
-                // readiness observable at the moment of expiry wins over the
-                // timeout.
-                match poll_fd_set_for_pid(fds, current_pid) {
-                    Ok(n) if n > 0 => return Ok(n as i64),
-                    Ok(_) => return Ok(0),
-                    Err(e) => return Err(e),
+                // A deadline expired. If it was the user timeout, perform the
+                // final readiness scan (readiness observable at the moment of
+                // expiry wins over the timeout) and return. If it was only the
+                // protocol-timer deadline, loop to re-pump and rescan instead
+                // of returning a premature zero.
+                let user_expired = deadline_ns
+                    .map(|d| crate::driver::time::monotonic_ns() >= d)
+                    .unwrap_or(false);
+                if user_expired {
+                    match poll_fd_set_for_pid(fds, current_pid) {
+                        Ok(n) if n > 0 => return Ok(n as i64),
+                        Ok(_) => return Ok(0),
+                        Err(e) => return Err(e),
+                    }
                 }
+                // Protocol-timer deadline: fall through to re-pump + rescan.
             }
             WakeReason::Event => {
                 // Readiness (or spurious) wake: re-scan and loop.
@@ -288,6 +325,13 @@ fn wait_for_ready(
 /// value is an absolute monotonic deadline armed on the one-shot clockevent.
 pub fn poll(fds_ptr: usize, nfds: usize, timeout_ms: isize) -> i64 {
     let current_pid = sys::proc::id();
+
+    // Reject an oversized nfds before forming any user slice: the safety
+    // requirement of slice::from_raw_parts_mut is that len * size_of::<T>
+    // fits in isize::MAX.
+    if nfds > MAX_NFDS {
+        return -(EINVAL as i64);
+    }
 
     // nfds == 0 still obeys timeout/signal semantics: zero timeout returns
     // immediately, finite timeout sleeps until expiry or signal, infinite
@@ -339,6 +383,11 @@ pub fn ppoll(
 ) -> i64 {
     let current_pid = sys::proc::id();
 
+    // Reject an oversized nfds before forming any user slice (see poll()).
+    if nfds > MAX_NFDS {
+        return -(EINVAL as i64);
+    }
+
     let fds: &mut [PollFd] = if nfds == 0 {
         &mut []
     } else {
@@ -350,21 +399,23 @@ pub fn ppoll(
 
     // Resolve the timeout into an absolute monotonic deadline before touching
     // the signal mask, so a validation failure does not leave the mask swapped.
-    let deadline_ns = if tmo_p != 0 {
+    // The zero-timeout condition is resolved from this single Timespec read and
+    // threaded through, so a concurrent writer cannot make the deadline and the
+    // "return immediately" decision disagree (a second dereference below would
+    // be a TOCTOU across the user pointer).
+    let (deadline_ns, zero_timeout) = if tmo_p != 0 {
         let ts_ptr = tmo_p as *const twilight_common::syscall::types::Timespec;
         let ts = unsafe { &*ts_ptr };
-        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
-            // Zero timeout: still scan once for readiness, but do not block.
-            // (Falls through to the initial scan + immediate-return path below.)
-        }
         if let Err(e) = crate::sys::syscall::time::validate_timespec(ts) {
             return e;
         }
+        // Zero timeout: scan once for readiness, but do not block.
+        let is_zero = ts.tv_sec == 0 && ts.tv_nsec == 0;
         let now_ns = crate::driver::time::monotonic_ns();
         let delta_ns = crate::sys::syscall::time::timespec_to_ns(ts);
-        Some(now_ns.saturating_add(delta_ns))
+        (Some(now_ns.saturating_add(delta_ns)), is_zero)
     } else {
-        None
+        (None, false)
     };
 
     // Install the temporary signal mask atomically, saving the old mask.
@@ -386,7 +437,7 @@ pub fn ppoll(
     };
 
     // Ensure the mask is restored on every return path.
-    let result = ppoll_inner(fds, current_pid, tmo_p, deadline_ns);
+    let result = ppoll_inner(fds, current_pid, zero_timeout, deadline_ns);
 
     if let Some(mask) = saved_mask {
         proc::restore_signal_mask(mask);
@@ -397,7 +448,7 @@ pub fn ppoll(
 fn ppoll_inner(
     fds: &mut [PollFd],
     current_pid: u16,
-    tmo_p: usize,
+    zero_timeout: bool,
     deadline_ns: Option<u64>,
 ) -> i64 {
     // Initial readiness scan.
@@ -409,12 +460,8 @@ fn ppoll_inner(
         return ready as i64;
     }
     // A zero timespec means "return immediately" (already scanned: nothing ready).
-    if tmo_p != 0 {
-        let ts_ptr = tmo_p as *const twilight_common::syscall::types::Timespec;
-        let ts = unsafe { &*ts_ptr };
-        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
-            return 0;
-        }
+    if zero_timeout {
+        return 0;
     }
 
     match wait_for_ready(fds, current_pid, deadline_ns) {
@@ -443,7 +490,11 @@ pub fn select(
     let n = nfds as usize;
     let current_pid = sys::proc::id();
 
-    let mut pfd_array: [PollFd; FD_SETSIZE] = unsafe { core::mem::zeroed() };
+    // Heap-allocate the PollFd storage sized to the actual nfds instead of a
+    // full [PollFd; FD_SETSIZE] (8 KiB) on the 16 KiB kernel stack. nfds is
+    // already bounded by FD_SETSIZE above, so this is at most 8 KiB on the
+    // heap, and typically far smaller.
+    let mut pfd_vec: alloc::vec::Vec<PollFd> = alloc::vec![PollFd { fd: 0, events: 0, revents: 0 }; n];
     let mut pfd_count: usize = 0;
     let mut readfds_local: FdSet = FdSet::default();
     let mut writefds_local: FdSet = FdSet::default();
@@ -471,10 +522,15 @@ pub fn select(
         }
         if exceptfds_local.isset(fd) {
             events |= POLLPRI;
+            // poll_fd_set only evaluates POLLIN/POLLOUT, never POLLPRI. Request
+            // POLLIN too so the POLLERR/POLLHUP/POLLNVAL paths run for an
+            // exceptfds-only descriptor; otherwise it scans as not-ready and
+            // select blocks until the timeout even on an error condition.
+            events |= POLLIN;
         }
 
         if events != 0 {
-            pfd_array[pfd_count] = PollFd {
+            pfd_vec[pfd_count] = PollFd {
                 fd: fd_i32,
                 events,
                 revents: 0,
@@ -490,7 +546,7 @@ pub fn select(
         let tv = unsafe { &*(timeout_ptr as *const Timeval) };
         if tv.tv_sec == 0 && tv.tv_usec == 0 {
             // Zero timeout: scan once, write back, return.
-            let pfds = &mut pfd_array[..pfd_count];
+            let pfds = &mut pfd_vec.as_mut_slice()[..pfd_count];
             let ready = match poll_fd_set_for_pid(pfds, current_pid) {
                 Ok(n) => n,
                 Err(e) => return e,
@@ -515,7 +571,7 @@ pub fn select(
         Some(now_ns.saturating_add(delta_ns))
     };
 
-    let pfds = &mut pfd_array[..pfd_count];
+    let pfds = &mut pfd_vec.as_mut_slice()[..pfd_count];
 
     // Initial readiness scan.
     let ready = match poll_fd_set_for_pid(pfds, current_pid) {
