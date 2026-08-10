@@ -24,11 +24,22 @@ static IN_SCHEDULER: AtomicBool = AtomicBool::new(false);
 // `IrqGuard` and `Mutex::lock_irq()` disable interrupts and must be nest-safe:
 // an inner guard's drop must not re-enable interrupts while an outer guard is
 // still alive. We track a depth counter (`IRQ_DISABLE_DEPTH`) that records how
-// many IRQ-disabling guards are stacked on this CPU. A guard increments on
-// construction (after disabling) and decrements on drop; interrupts are
+// many IRQ-disabling guards are stacked on the current CPU. A guard increments
+// on construction (after disabling) and decrements on drop; interrupts are
 // re-enabled only when the depth returns to zero. The outermost guard remembers
 // whether IF was enabled before it disabled, so a guard constructed inside an
 // already-IRQ-off region restores IF=0.
+//
+// LIFO contract: guards must drop in reverse order of construction. Each
+// `irq_restore(was_enabled)` pairs with its `irq_save()`, and the depth only
+// reaches zero when the outermost guard drops; an inner guard dropping while an
+// outer one is still live leaves the depth non-zero, so IF stays cleared.
+//
+// This counter is currently a single global, not per-CPU. That is correct only
+// because APs do not enter these paths: `ap_main` loads no IDT and sits in a
+// halt loop, so it never acquires `lock_irq()`/`IrqGuard` or takes interrupts
+// (same invariant documented above for `PREEMPT_COUNT`). Moving scheduling onto
+// APs requires making this `CpuLocal` first — see the note on GS reuse above.
 static IRQ_DISABLE_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
@@ -237,7 +248,10 @@ pub fn irq_save() -> bool {
 /// them; otherwise leave interrupts disabled (an outer guard still owns the
 /// IRQ-off region).
 ///
-/// `was_enabled` must be the value returned by the paired [`irq_save`].
+/// `was_enabled` must be the value returned by the paired [`irq_save`], and
+/// calls must be LIFO: an inner guard must drop before its enclosing outer
+/// guard. The depth only reaches zero when the outermost guard drops, so a
+/// well-ordered drop sequence never re-enables IF while an outer guard is live.
 #[inline]
 pub fn irq_restore(was_enabled: bool) {
     if let Some(0) = decrement(&IRQ_DISABLE_DEPTH, "irq_disable_depth") {

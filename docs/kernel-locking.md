@@ -51,9 +51,11 @@ lock at all. This is safe because of two invariants:
 
 Because both accessors have IF off (or are the same context), there is no
 reentrant access. Wrapping every `PROCESS_TABLE.get_mut()` in an `IrqGuard` would
-be redundant noise. The same reasoning applies to `UCHI_DEVICES` and the other
-`Once<T>` / `static mut` structures accessed from both init and IRQ handlers:
-init runs before interrupts are enabled, and the IRQ handler runs with IF off.
+be redundant noise. This conclusion holds **only while syscall handlers keep IF
+cleared**; re-audit `PROCESS_TABLE` before enabling interrupts in syscall bodies.
+The same reasoning applies to `UCHI_DEVICES` and the other `Once<T>` / `static mut`
+structures accessed from both init and IRQ handlers: init runs before interrupts
+are enabled, and the IRQ handler runs with IF off.
 
 ## IRQ-shared lock inventory
 
@@ -115,7 +117,8 @@ while acquiring another lock.
   makes lock-balance bugs observable in the non-preemptive kernel.
 - `can_preempt_kernel()` remains gated on `ENABLE_KERNEL_PREEMPTION`; when false
   it returns `false` immediately. The counters it consults are now maintained
-  regardless, so enabling kernel preemption later requires no further changes.
+  regardless, so future preemption work can reuse them; enabling kernel
+  preemption still requires a separate scheduler and call-site audit.
 
 ## Adding a new lock
 
