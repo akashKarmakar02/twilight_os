@@ -75,7 +75,7 @@ pub fn init() {
 }
 
 pub fn handle_interrupt_byte(byte: u8) {
-    let mut state = PACKET_STATE.lock();
+    let mut state = PACKET_STATE.lock_irq();
     if let Some(packet) = state.push(byte) {
         enqueue_packet(packet);
     }

@@ -19,6 +19,29 @@ static IRQ_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 static IN_SCHEDULER: AtomicBool = AtomicBool::new(false);
 
+// --- Nest-safe interrupt masking (#70) -------------------------------------
+//
+// `IrqGuard` and `Mutex::lock_irq()` disable interrupts and must be nest-safe:
+// an inner guard's drop must not re-enable interrupts while an outer guard is
+// still alive. We track a depth counter (`IRQ_DISABLE_DEPTH`) that records how
+// many IRQ-disabling guards are stacked on the current CPU. A guard increments
+// on construction (after disabling) and decrements on drop; interrupts are
+// re-enabled only when the depth returns to zero. The outermost guard remembers
+// whether IF was enabled before it disabled, so a guard constructed inside an
+// already-IRQ-off region restores IF=0.
+//
+// LIFO contract: guards must drop in reverse order of construction. Each
+// `irq_restore(was_enabled)` pairs with its `irq_save()`, and the depth only
+// reaches zero when the outermost guard drops; an inner guard dropping while an
+// outer one is still live leaves the depth non-zero, so IF stays cleared.
+//
+// This counter is currently a single global, not per-CPU. That is correct only
+// because APs do not enter these paths: `ap_main` loads no IDT and sits in a
+// halt loop, so it never acquires `lock_irq()`/`IrqGuard` or takes interrupts
+// (same invariant documented above for `PREEMPT_COUNT`). Moving scheduling onto
+// APs requires making this `CpuLocal` first — see the note on GS reuse above.
+static IRQ_DISABLE_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
 static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
 
 // --- Scheduler quantum (one-shot clockevent, #68) --------------------------
@@ -38,9 +61,11 @@ static QUANTUM_DEADLINE: AtomicU64 = AtomicU64::new(0);
 
 // --- Kernel-preemption context trackers -----------------------------------
 //
-// These counters are only incremented when `ENABLE_KERNEL_PREEMPTION` is true
-// (a compile-time const). When the flag is false the compiler eliminates every
-// increment/decrement, so existing behavior is preserved with zero overhead.
+// These counters are always incremented (regardless of
+// `ENABLE_KERNEL_PREEMPTION`) so that lock-balance and context-invariant
+// diagnostics work in the non-preemptive kernel too (#70). The cost is one
+// atomic op per lock acquire/release and context enter/exit — negligible beside
+// the spinlock acquire itself.
 //
 // Each counter is a depth (not a boolean) so that nested entry is balanced.
 // `can_preempt_kernel()` requires every counter to be zero before scheduling
@@ -200,6 +225,42 @@ pub fn irq_depth() -> usize {
     IRQ_DEPTH.load(Ordering::SeqCst)
 }
 
+// --- Nest-safe IRQ disable/restore (#70) -----------------------------------
+
+/// Disable interrupts and record this IRQ-off region on the per-CPU depth
+/// stack. Returns `true` if interrupts were enabled before the call (so the
+/// outermost guard is responsible for re-enabling them). Pairs with
+/// [`irq_restore`].
+///
+/// Nest-safe: an inner call made while interrupts are already off still
+/// increments the depth but records `was_enabled = false`, so its matching
+/// [`irq_restore`] will not re-enable interrupts prematurely.
+#[inline]
+pub fn irq_save() -> bool {
+    let was_enabled = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::disable();
+    IRQ_DISABLE_DEPTH.fetch_add(1, Ordering::SeqCst);
+    was_enabled
+}
+
+/// Pop one level off the IRQ-disable depth stack. When the depth returns to
+/// zero and the matching [`irq_save`] observed interrupts enabled, re-enable
+/// them; otherwise leave interrupts disabled (an outer guard still owns the
+/// IRQ-off region).
+///
+/// `was_enabled` must be the value returned by the paired [`irq_save`], and
+/// calls must be LIFO: an inner guard must drop before its enclosing outer
+/// guard. The depth only reaches zero when the outermost guard drops, so a
+/// well-ordered drop sequence never re-enables IF while an outer guard is live.
+#[inline]
+pub fn irq_restore(was_enabled: bool) {
+    if let Some(0) = decrement(&IRQ_DISABLE_DEPTH, "irq_disable_depth") {
+        if was_enabled {
+            x86_64::instructions::interrupts::enable();
+        }
+    }
+}
+
 #[inline]
 pub fn set_need_resched() {
     let was_set = NEED_RESCHED.swap(true, Ordering::SeqCst);
@@ -265,16 +326,12 @@ pub fn in_scheduler() -> bool {
 
 #[inline]
 pub fn lock_count_inc() {
-    if ENABLE_KERNEL_PREEMPTION {
-        HELD_LOCK_COUNT.fetch_add(1, Ordering::SeqCst);
-    }
+    HELD_LOCK_COUNT.fetch_add(1, Ordering::SeqCst);
 }
 
 #[inline]
 pub fn lock_count_dec() {
-    if ENABLE_KERNEL_PREEMPTION {
-        decrement(&HELD_LOCK_COUNT, "held_lock_count");
-    }
+    decrement(&HELD_LOCK_COUNT, "held_lock_count");
 }
 
 #[inline]
@@ -290,8 +347,8 @@ pub fn locks_held() -> bool {
 // --- Context guards -------------------------------------------------------
 
 /// RAII guard that increments a context counter on creation and decrements it
-/// on drop. When `ENABLE_KERNEL_PREEMPTION` is false the increment/decrement
-/// are compile-time eliminated, so the guard is zero-cost.
+/// on drop. The counters are always active so diagnostics work in the
+/// non-preemptive kernel too (#70).
 #[must_use = "dropping the guard exits the context"]
 pub struct ContextGuard {
     counter: &'static AtomicUsize,
@@ -301,9 +358,7 @@ pub struct ContextGuard {
 
 impl ContextGuard {
     fn enter(counter: &'static AtomicUsize, name: &'static str) -> Self {
-        if ENABLE_KERNEL_PREEMPTION {
-            counter.fetch_add(1, Ordering::SeqCst);
-        }
+        counter.fetch_add(1, Ordering::SeqCst);
         Self {
             counter,
             name,
@@ -316,9 +371,7 @@ impl Drop for ContextGuard {
     fn drop(&mut self) {
         if self.active {
             self.active = false;
-            if ENABLE_KERNEL_PREEMPTION {
-                decrement(self.counter, self.name);
-            }
+            decrement(self.counter, self.name);
         }
     }
 }
@@ -483,7 +536,7 @@ pub fn warn_if_schedule_unsafe() {
         );
     }
     if in_fault_context() {
-        // crate::serial_println!("[sched] WARNING: schedule_now inside fault context");
+        crate::serial_println!("[sched] WARNING: schedule_now inside fault context");
     }
     if in_allocator_context() {
         crate::serial_println!("[sched] WARNING: schedule_now inside allocator context");

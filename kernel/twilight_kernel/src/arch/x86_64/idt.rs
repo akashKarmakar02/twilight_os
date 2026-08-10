@@ -354,7 +354,7 @@ pub fn register_irq_handler(irq: u8, handler: fn()) -> Result<(), ()> {
 
     // Unmask the IRQ in PIC
     unsafe {
-        let mut pics = PICS.lock();
+        let mut pics = PICS.lock_irq();
         let halves = pics.read_masks();
         let mut masks = (halves[0] as u16) | ((halves[1] as u16) << 8);
         masks &= !(1 << irq);
@@ -372,8 +372,11 @@ pub fn irq_vector(irq: u8) -> u8 {
 }
 
 fn dispatch_irq(irq: u8) {
+    // Account every external IRQ on the depth stack so `irq_depth()` reflects
+    // all in-progress interrupts, not only the timer (#70).
+    let _ctx = crate::arch::x86_64::irq::IrqCtx::new();
     unsafe {
-        PICS.lock().notify_end_of_interrupt(interrupt_index(irq));
+        PICS.lock_irq().notify_end_of_interrupt(interrupt_index(irq));
     }
     if irq < 16 {
         if let Some(h) = { IRQ_HANDLERS.lock()[irq as usize] } {
@@ -384,10 +387,10 @@ fn dispatch_irq(irq: u8) {
 
 pub fn init_pics() {
     unsafe {
-        PICS.lock().initialize();
+        PICS.lock_irq().initialize();
         // PIC1: unmask IRQ0..2 (timer, keyboard, cascade).
         // PIC2: unmask IRQ12 (mouse), IRQ14/15 (IDE).
-        PICS.lock().write_masks(0b11111000, 0b00101111);
+        PICS.lock_irq().write_masks(0b11111000, 0b00101111);
     }
 }
 
@@ -540,12 +543,14 @@ unsafe extern "C" fn apic_timer_preempt_isr() -> ! {
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
+    let _ctx = crate::arch::x86_64::irq::IrqCtx::new();
+
     let mut port = Port::<u8>::new(0x60);
 
     let scancode: u8 = unsafe { port.read() };
 
     unsafe {
-        PICS.lock().notify_end_of_interrupt(interrupt_index(1));
+        PICS.lock_irq().notify_end_of_interrupt(interrupt_index(1));
     }
 
     keyboard_interrupt(scancode);
@@ -554,13 +559,15 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
+    let _ctx = crate::arch::x86_64::irq::IrqCtx::new();
+
     let mut port = Port::<u8>::new(0x60);
     let data: u8 = unsafe { port.read() };
 
     handle_interrupt_byte(data);
 
     unsafe {
-        PICS.lock().notify_end_of_interrupt(interrupt_index(12));
+        PICS.lock_irq().notify_end_of_interrupt(interrupt_index(12));
     }
 }
 

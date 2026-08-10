@@ -2353,7 +2353,7 @@ pub extern "C" fn timer_preempt(frame: *mut PreemptFrame, from_user: u64) -> *mu
     // EOI for IRQ0 (PIC timer)
     unsafe {
         crate::arch::x86_64::idt::PICS
-            .lock()
+            .lock_irq()
             .notify_end_of_interrupt(crate::arch::x86_64::idt::PIC_1_OFFSET);
     }
 

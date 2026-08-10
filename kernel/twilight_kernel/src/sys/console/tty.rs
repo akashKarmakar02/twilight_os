@@ -195,7 +195,7 @@ impl Tty {
     /// Canonical reads become ready only when a complete line (or VEOF) is
     /// present; this mirrors the readiness rule used by Unix terminals.
     pub fn input_read_ready(&self) -> bool {
-        let input = self.input_buffer.lock();
+        let input = self.input_buffer.lock_irq();
         if self.icanon {
             input
                 .iter()
@@ -237,10 +237,10 @@ impl Tty {
 
     pub fn put_input(&mut self, c: u8) {
         if self.is_raw_mode() && c == b'\x08' {
-            self.input_buffer.lock().push_back(0x7Fu8);
+            self.input_buffer.lock_irq().push_back(0x7Fu8);
             // serial_println!("{:?}", self.input_buffer);
         } else {
-            self.input_buffer.lock().push_back(c);
+            self.input_buffer.lock_irq().push_back(c);
         }
     }
     fn is_raw_mode(&self) -> bool {
@@ -261,7 +261,7 @@ impl Tty {
 
     #[inline]
     fn pop_input_now(&self) -> Option<u8> {
-        self.input_buffer.lock().pop_front()
+        self.input_buffer.lock_irq().pop_front()
     }
 
     #[inline]
@@ -918,7 +918,7 @@ fn xterm_256_to_rgb(n: u8) -> u32 {
 impl KeyboardListener for Tty {
     fn on_key(&self, key: u8, released: bool) {
         if !released {
-            self.input_buffer.lock().push_back(key);
+            self.input_buffer.lock_irq().push_back(key);
             // Wake any processes blocked in pop_input_blocking() and any
             // poller/selecter waiting for readability on this TTY (#69). The
             // global poll queue is notified so a poll(stdin) waiter that is not
@@ -974,7 +974,7 @@ impl VfsNodeOps for Tty {
     }
 
     fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
-        Ok(!self.input_buffer.lock().is_empty())
+        Ok(!self.input_buffer.lock_irq().is_empty())
     }
 
     fn ioctl(&mut self, _device: &mut BlockDev, cmd: u64, arg: usize) -> Result<i64, ()> {
@@ -1014,7 +1014,7 @@ impl VfsNodeOps for Tty {
                 self.termios = newt;
                 self.apply_termios();
                 if cmd == IOCTL_TCSETSF {
-                    self.input_buffer.lock().clear();
+                    self.input_buffer.lock_irq().clear();
                 }
             }
             IOCTL_TIOCGPGRP => {

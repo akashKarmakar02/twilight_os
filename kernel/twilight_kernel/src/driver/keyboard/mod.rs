@@ -168,7 +168,7 @@ struct PendingKeyEvent {
 
 fn enqueue_key_event(event: PcKeyEvent) {
     if let Some(code) = keycode_to_linux(event.code) {
-        let mut queue = KEY_EVENT_QUEUE.lock();
+        let mut queue = KEY_EVENT_QUEUE.lock_irq();
         if queue.len() >= MAX_KEY_EVENTS {
             queue.pop_front();
         }
@@ -292,7 +292,7 @@ pub struct KeyboardDev;
 impl KeyboardDev {
     fn pop_events(&self, capacity: usize) -> Vec<InputEvent> {
         let mut collected = Vec::new();
-        let mut queue = KEY_EVENT_QUEUE.lock();
+        let mut queue = KEY_EVENT_QUEUE.lock_irq();
 
         for _ in 0..capacity {
             if let Some(evt) = queue.pop_front() {
@@ -337,7 +337,7 @@ impl VfsNodeOps for KeyboardDev {
     }
 
     fn poll(&self, _device: &mut BlockDev) -> Result<bool, ()> {
-        Ok(!KEY_EVENT_QUEUE.lock().is_empty())
+        Ok(!KEY_EVENT_QUEUE.lock_irq().is_empty())
     }
 
     fn ioctl(&mut self, _device: &mut BlockDev, _cmd: u64, _arg: usize) -> Result<i64, ()> {
@@ -350,9 +350,9 @@ impl VfsNodeOps for KeyboardDev {
 }
 
 pub fn keyboard_interrupt(scancode: u8) {
-    let mut keyboard = KEYBOARD.lock();
+    let mut keyboard = KEYBOARD.lock_irq();
 
-    let mut ps2_keyboard_state = PS2_KEYBOARD_STATE.lock();
+    let mut ps2_keyboard_state = PS2_KEYBOARD_STATE.lock_irq();
 
     if scancode == 29 {
         ps2_keyboard_state.is_ctrl_pressed = true;
