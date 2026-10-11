@@ -1,6 +1,7 @@
 pub mod crypto;
 pub mod fs_attr;
 pub(crate) mod memory;
+pub(crate) mod net_io;
 pub mod poll;
 pub mod service;
 pub(crate) mod time;

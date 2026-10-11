@@ -327,10 +327,14 @@ impl ProcessTable {
             let prev_task = &mut *ptr.add(prev_idx);
             let next_task = &mut *ptr.add(next_idx);
 
-            // This is a *kernel* context switch (e.g., exec/spawn). The previous task is now blocked
-            // in the kernel until the new process exits. Prevent the preemptive timer from resuming it
-            // from a stale user preempt frame.
-            prev_task.state = ProcessState::Waiting;
+            // Launch callers wait in the kernel with no resumable user frame.
+            // PID 0 instead resumes its boot stack as network service after init
+            // starts. Other callers retain the synchronous launch contract.
+            prev_task.state = if current_pid == 0 {
+                ProcessState::Runnable
+            } else {
+                ProcessState::Waiting
+            };
             prev_task.preempt_frame = 0;
             crate::serial_println!(
                 "[proc::run] switch parent pid={} -> child pid={}",
@@ -1950,6 +1954,15 @@ pub fn wake_process(pid: u16) {
             // a spurious notify) apart from a timeout expiry (#69). The token is
             // left in place; the awoken task cancels it before re-arming.
             process.wake_reason = Some(crate::sys::timer::WakeReason::Event);
+            // An event can add a runnable peer while the sole running task has
+            // no quantum armed. Give it a scheduling boundary (#83).
+            if pid != id() && crate::sys::preempt::quantum_deadline_ns().is_none() {
+                let now = crate::driver::time::monotonic_ns();
+                crate::sys::preempt::reset_quantum(now);
+                if let Some(deadline) = crate::sys::preempt::quantum_deadline_ns() {
+                    crate::driver::time::clockevent::rearm_if_earlier(now, deadline);
+                }
+            }
         }
         ProcessState::Dead | ProcessState::Stopped => {}
         _ => {

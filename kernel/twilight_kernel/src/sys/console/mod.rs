@@ -50,5 +50,9 @@ pub fn init_console() {
         let process_table = unsafe { PROCESS_TABLE.get_mut_unchecked() };
 
         process_table.run(Process::new(node, path, "/", &[path], 0).unwrap());
+        // The bootstrap task owns a kernel stack already. After launching PID 1
+        // it becomes the event-driven network service instead of being stranded.
+        crate::sys::net::service::run();
     }
+    panic!("no init executable found");
 }

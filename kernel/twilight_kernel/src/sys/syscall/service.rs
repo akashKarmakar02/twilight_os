@@ -627,6 +627,14 @@ pub fn write(arg1: i32, arg2: usize, arg3: usize) -> i64 {
     let nonblock = (status_flags & O_NONBLOCK) != 0;
     let seek = file.seek;
 
+    if matches!(
+        &file.kind,
+        OpenFileKind::Socket(SocketFile::Tcp(_) | SocketFile::Udp(_))
+    ) {
+        drop(file);
+        return super::net_io::write(&file_ref, buf, nonblock);
+    }
+
     if let OpenFileKind::Pipe(pipe) = &file.kind {
         let pipe = pipe.clone();
         drop(file);
@@ -1041,6 +1049,14 @@ pub fn read(fd: usize, buf: &mut [u8]) -> i64 {
             return -(EBADF as i64);
         }
         let seek = file.seek;
+
+            if matches!(
+                &file.kind,
+                OpenFileKind::Socket(SocketFile::Tcp(_) | SocketFile::Udp(_))
+            ) {
+                drop(file);
+                return super::net_io::read(&file_ref, buf, status_flags & O_NONBLOCK != 0);
+            }
 
         // TTY reads may sleep waiting for a complete canonical line.  Test
         // readiness while the descriptor is stable, then release every VFS
@@ -3772,6 +3788,7 @@ pub fn connect(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
         Err(code) => return code as i64,
     };
     let mut file = file_ref.lock();
+    let nonblock = file.status_flags & O_NONBLOCK != 0;
     let OpenFileKind::Socket(sock) = &mut file.kind else {
         return -(ENOTSOCK as i64);
     };
@@ -3795,9 +3812,33 @@ pub fn connect(fd: i32, addr_ptr: usize, addr_len: usize) -> i64 {
             Ok(ep) => ep,
             Err(e) => return -(e as i64),
         };
-        match sock.connect(ep.addr, ep.port) {
-            Ok(()) => 0,
-            Err(_) => -(ETIMEDOUT as i64),
+        match sock {
+            SocketFile::Tcp(socket) => {
+                if let Err(errno) = socket.start_connect(ep.addr, ep.port) {
+                    return -(errno as i64);
+                }
+                drop(file);
+                if nonblock {
+                    return -(EINPROGRESS as i64);
+                }
+                let deadline = crate::driver::time::monotonic_ns().saturating_add(5_000_000_000);
+                match super::net_io::retry(
+                    &file_ref,
+                    false,
+                    Some(deadline),
+                    |socket| match socket {
+                        SocketFile::Tcp(socket) => socket.connect_status(),
+                        _ => Err(ENOTSOCK),
+                    },
+                ) {
+                    Ok(()) => 0,
+                    Err(errno) => -(errno as i64),
+                }
+            }
+            _ => match sock.connect(ep.addr, ep.port) {
+                Ok(()) => 0,
+                Err(_) => -(EIO as i64),
+            },
         }
     }
 }
@@ -3980,7 +4021,7 @@ pub fn accept4(fd: i32, addr_ptr: usize, addrlen_ptr: usize, flags: i32) -> i64 
         SocketFile::Unix(socket) => Some(socket.clone()),
         _ => None,
     };
-    let nonblock = (status_flags & O_NONBLOCK) != 0 || (flags & SOCK_NONBLOCK) != 0;
+    let nonblock = (status_flags & O_NONBLOCK) != 0;
 
     let cloexec = (flags & SOCK_CLOEXEC) != 0;
 
@@ -4013,7 +4054,12 @@ pub fn accept4(fd: i32, addr_ptr: usize, addrlen_ptr: usize, flags: i32) -> i64 
             kind: OpenFileKind::Socket(new_sock),
             seek: 0,
             path: "socket".to_string(),
-            status_flags: O_RDWR | if nonblock { O_NONBLOCK } else { 0 },
+            status_flags: O_RDWR
+                | if flags & SOCK_NONBLOCK != 0 {
+                    O_NONBLOCK
+                } else {
+                    0
+                },
         };
         let entry = FdEntry {
             file: Arc::new(Mutex::new(open_file)),
@@ -4035,15 +4081,11 @@ pub fn accept4(fd: i32, addr_ptr: usize, addrlen_ptr: usize, flags: i32) -> i64 
             Err(code) => -(code as i64),
         }
     } else {
-        let res = if nonblock {
-            match sock.try_accept_new() {
-                Ok(Some(v)) => Ok(v),
-                Ok(None) => Err(-(EAGAIN as i64)),
-                Err(_) => Err(-(EIO as i64)),
-            }
-        } else {
-            sock.accept_new().map_err(|_| -(EAGAIN as i64))
-        };
+        drop(file);
+        let res = super::net_io::retry(&file_ref, nonblock, None, |socket| {
+            socket.try_accept_new().map_err(|_| EIO)?.ok_or(EAGAIN)
+        })
+        .map_err(|errno| -(errno as i64));
 
         let (new_sock, peer) = match res {
             Ok(v) => v,
@@ -4058,13 +4100,28 @@ pub fn accept4(fd: i32, addr_ptr: usize, addrlen_ptr: usize, flags: i32) -> i64 
             kind: OpenFileKind::Socket(new_sock),
             seek: 0,
             path: "socket".to_string(),
-            status_flags: O_RDWR | if nonblock { O_NONBLOCK } else { 0 },
+            status_flags: O_RDWR
+                | if flags & SOCK_NONBLOCK != 0 {
+                    O_NONBLOCK
+                } else {
+                    0
+                },
         };
         let entry = FdEntry {
             file: Arc::new(Mutex::new(open_file)),
             fd_flags: if cloexec { FD_CLOEXEC } else { 0 },
         };
 
+        #[allow(static_mut_refs)]
+        let process = unsafe {
+            PROCESS_TABLE
+                .get_mut()
+                .unwrap()
+                .get_process(crate::sys::proc::id())
+        };
+        let Some(process) = process else {
+            return -(ESRCH as i64);
+        };
         match install_fd_entry(process, entry, 0) {
             Ok(fd) => fd as i64,
             Err(code) => -(code as i64),
@@ -4129,24 +4186,25 @@ pub fn sendto(
             }
         }
         _ => {
-            if nonblock && !sock.poll(IO::Write) {
-                return -(EAGAIN as i64);
-            }
             let dest = if addr_ptr != 0 {
                 match parse_sockaddr_in(addr_ptr, addr_len) {
-                    Ok(ep) => Some(ep),
-                    Err(e) => return -(e as i64),
+                    Ok(endpoint) => Some(endpoint),
+                    Err(errno) => return -(errno as i64),
                 }
             } else {
                 None
             };
-            let res = match dest {
-                Some(ep) => sock.send_to(buf, ep),
-                None => sock.write(buf),
-            };
-            match res {
-                Ok(n) => n as i64,
-                Err(_) => -(EDESTADDRREQ as i64),
+            drop(file);
+            match super::net_io::retry(&file_ref, nonblock, None, |socket| match socket {
+                SocketFile::Tcp(socket) => socket.try_write(buf),
+                SocketFile::Udp(socket) => match dest {
+                    Some(endpoint) => socket.try_send_to(buf, endpoint),
+                    None => socket.try_write(buf),
+                },
+                _ => Err(ENOTSOCK),
+            }) {
+                Ok(count) => count as i64,
+                Err(errno) => -(errno as i64),
             }
         }
     }
@@ -4205,29 +4263,24 @@ pub fn recvfrom(
         return n as i64;
     }
 
-    match sock {
-        SocketFile::Unix(_) => unreachable!(),
-        _ => {
-            if nonblock && !sock.poll(IO::Read) {
-                return -(EAGAIN as i64);
-            }
-            let (n, src) = match sock {
-                SocketFile::Udp(u) => match u.recv_from(buf) {
-                    Ok((n, ep)) => (n, Some(ep)),
-                    Err(_) => return -(EIO as i64),
-                },
-                _ => match sock.read(buf) {
-                    Ok(n) => (n, None),
-                    Err(_) => return -(EIO as i64),
-                },
-            };
-            if let Some(src) = src {
-                if let Err(e) = write_sockaddr_in(addr_ptr, addrlen_ptr, src) {
-                    return e;
+    drop(file);
+    let result = super::net_io::retry(&file_ref, nonblock, None, |socket| match socket {
+        SocketFile::Udp(socket) => socket
+            .try_recv_from(buf)
+            .map(|(count, endpoint)| (count, Some(endpoint))),
+        SocketFile::Tcp(socket) => socket.try_read(buf).map(|count| (count, None)),
+        _ => Err(ENOTSOCK),
+    });
+    match result {
+        Ok((count, endpoint)) => {
+            if let Some(endpoint) = endpoint {
+                if let Err(errno) = write_sockaddr_in(addr_ptr, addrlen_ptr, endpoint) {
+                    return errno;
                 }
             }
-            n as i64
+            count as i64
         }
+        Err(errno) => -(errno as i64),
     }
 }
 

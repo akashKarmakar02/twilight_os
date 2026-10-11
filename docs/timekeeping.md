@@ -71,6 +71,15 @@ pre-existing HHDM write-back mapping). The implementation:
 - Captures the counter epoch without resetting an already-active consumer.
 - Proves the counter advances before selecting it.
 
+## Network protocol deadlines
+
+The PID 0 network service owns smoltcp protocol deadlines independently of
+poll/select user timeouts (#83). smoltcp reads monotonic microseconds; its relative
+poll delay is added to a monotonic nanosecond sample before await_io_until.
+Immediate protocol work is paced at a one-millisecond future boundary. NIC
+interrupts wake the service, and socket state changes wake poll/socket waiters;
+there is no per-tick network broadcast. See [networking.md](networking.md).
+
 ## Testing
 
 The regression harness under `tools/time-regression/` boots the live ISO across

@@ -28,8 +28,9 @@ The harness is **non-destructive**:
 - It boots the live ISO + initramfs with **no disk attached**. `hdd.img` is
   never referenced, mounted, or written.
 - Each QEMU run uses `-no-reboot` and is cleaned up via process signals on exit
-  (trap on EXIT/INT/TERM). Raw serial logs are preserved under `logs/` for any
-  failed cell.
+  (EXIT cleanup; INT/TERM exit through that cleanup). A signal stops the
+  runner rather than continuing its matrix against a closed serial PTY. Raw
+  serial logs are preserved under `logs/` for any failed cell.
 - A per-cell clean-shutdown timeout bounds how long a hung guest can delay the
   run; on timeout the QEMU process is force-killed and the failure is recorded.
 

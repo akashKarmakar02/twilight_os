@@ -107,7 +107,11 @@ cleanup_qemu() {
     fi
     QEMU_PID=""
 }
-trap cleanup_qemu EXIT INT TERM
+trap cleanup_qemu EXIT
+# A signal must end the runner after cleanup. A cleanup-only TERM trap used to
+# continue sending commands to the PTY of the QEMU it had just stopped (#83).
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # accel_args <accel> <cpu> — result in the ACCEL_ARGS array.
 accel_args() {

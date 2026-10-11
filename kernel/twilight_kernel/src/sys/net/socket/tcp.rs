@@ -1,20 +1,19 @@
-use crate::{println, sys};
+//! TCP descriptor state. Operations make one nonblocking attempt; the syscall
+//! layer owns sleeping and drops its OpenFile guard before doing so. The network
+//! service owns packet processing, protocol timers and detached close state.
 
-use super::SOCKETS;
-use super::random_port;
-
-use crate::arch::x86_64::halt;
+use super::{SOCKETS, random_port};
 use crate::driver::disk::ata::{FileIO, IO};
 use crate::driver::nic::NET;
-use crate::driver::timer::cmos::CMOS;
-use crate::task::executor::sleep;
+use crate::sys::net::service;
 use alloc::vec;
 use smoltcp::iface::SocketHandle;
 use smoltcp::phy::Device;
-use smoltcp::socket::Socket;
 use smoltcp::socket::tcp;
-use smoltcp::time::Instant;
 use smoltcp::wire::{IpAddress, IpEndpoint};
+use twilight_common::syscall::types::{
+    EAGAIN, EALREADY, ECONNREFUSED, EINVAL, EIO, EISCONN, EPIPE,
+};
 
 #[derive(Debug)]
 pub struct TcpSocket {
@@ -23,26 +22,25 @@ pub struct TcpSocket {
     pub listen_port: Option<u16>,
 }
 
+fn buffers() -> tcp::Socket<'static> {
+    tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 1024]),
+        tcp::SocketBuffer::new(vec![0; 1024]),
+    )
+}
+
 impl TcpSocket {
+    /// Maximum payload size advertised by the attached Ethernet interface.
     pub fn size() -> usize {
-        if let Some((_, ref mut device)) = *NET.lock() {
-            let mtu = device.capabilities().max_transmission_unit;
-            let eth_header = 14;
-            let ip_header = 20;
-            let tcp_header = 20;
-            mtu - eth_header - ip_header - tcp_header
-        } else {
-            1
-        }
+        NET.lock().as_mut().map_or(1, |(_, device)| {
+            device.capabilities().max_transmission_unit - 54
+        })
     }
 
+    /// Allocate protocol buffers before taking the socket-set lock.
     pub fn new() -> Self {
-        let mut sockets = SOCKETS.lock();
-        let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
-        let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
-        let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
-        let handle = sockets.add(tcp_socket);
-
+        let socket = buffers();
+        let handle = SOCKETS.lock().add(socket);
         Self {
             handle,
             bound_port: None,
@@ -50,339 +48,211 @@ impl TcpSocket {
         }
     }
 
+    /// Remember the local port; listen/connect installs it in smoltcp.
     pub fn bind(&mut self, port: u16) -> Result<(), ()> {
         self.bound_port = Some(port);
         Ok(())
     }
 
-    pub fn connect(&mut self, addr: IpAddress, port: u16) -> Result<(), ()> {
-        let mut connecting = false;
-
-        let mut cmos = CMOS::new();
-        let timeout = 5;
-        let started = cmos.unix_time();
-        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
-            loop {
-                if cmos.unix_time() - started > timeout {
-                    return Err(());
-                }
-                let mut sockets = SOCKETS.lock();
-
-                let ms = (cmos.unix_time() * 1000000) as i64;
-                let time = Instant::from_micros(ms);
-                iface.poll(time, device, &mut sockets);
-                let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-                match socket.state() {
-                    tcp::State::Closed => {
-                        if connecting {
-                            return Err(());
-                        }
-                        let cx = iface.context();
-                        let dest = (addr, port);
-                        let local_port = self.bound_port.unwrap_or_else(random_port);
-                        if socket.connect(cx, dest, local_port).is_err() {
-                            return Err(());
-                        }
-                        connecting = true;
-                    }
-                    tcp::State::SynSent => {}
-                    tcp::State::Established => {
-                        break;
-                    }
-                    _ => {
-                        // Did something get sent before the connection closed?
-                        return if socket.can_recv() {
-                            Ok(())
-                        } else {
-                            println!("can't receive");
-                            Err(())
-                        };
-                    }
-                }
-
-                if let Some(_d) = iface.poll_delay(sys::net::time(), &sockets) {
-                    sleep(0.004);
-                }
-                halt();
-            }
+    /// Start connection establishment without waiting under network locks.
+    pub fn start_connect(&mut self, addr: IpAddress, port: u16) -> Result<(), i32> {
+        let mut net = NET.lock();
+        let (iface, _) = net.as_mut().ok_or(EIO)?;
+        let mut sockets = SOCKETS.lock();
+        let socket = sockets.get_mut::<tcp::Socket>(self.handle);
+        if socket.state() == tcp::State::SynSent {
+            return Err(EALREADY);
         }
+        if socket.state() != tcp::State::Closed {
+            return Err(EISCONN);
+        }
+        socket
+            .connect(
+                iface.context(),
+                (addr, port),
+                self.bound_port.unwrap_or_else(random_port),
+            )
+            .map_err(|_| EINVAL)?;
+        drop(sockets);
+        drop(net);
+        service::request();
         Ok(())
     }
 
+    /// Report completion of a previously started connection.
+    pub fn connect_status(&self) -> Result<(), i32> {
+        match SOCKETS.lock().get::<tcp::Socket>(self.handle).state() {
+            tcp::State::Established | tcp::State::CloseWait => Ok(()),
+            tcp::State::SynSent | tcp::State::SynReceived => Err(EAGAIN),
+            _ => Err(ECONNREFUSED),
+        }
+    }
+
+    /// Compatibility entry point; callers needing to block use net_io::retry.
+    pub fn connect(&mut self, addr: IpAddress, port: u16) -> Result<(), ()> {
+        self.start_connect(addr, port).map_err(|_| ())
+    }
+
+    /// Install a listener synchronously; listening itself never waits for input.
     pub fn listen(&mut self, port: u16) -> Result<(), ()> {
-        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
-            let mut sockets = SOCKETS.lock();
-            iface.poll(sys::net::time(), device, &mut sockets);
-            let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-            if socket.listen(port).is_err() {
-                return Err(());
-            }
-            self.listen_port = Some(port);
-
-            if let Some(_d) = iface.poll_delay(sys::net::time(), &sockets) {
-                sleep(0.004);
-            }
-            halt();
-            Ok(())
-        } else {
-            Err(())
-        }
+        SOCKETS
+            .lock()
+            .get_mut::<tcp::Socket>(self.handle)
+            .listen(port)
+            .map_err(|_| ())?;
+        self.listen_port = Some(port);
+        service::request();
+        Ok(())
     }
 
-    pub fn accept(&mut self) -> Result<IpAddress, ()> {
-        let timeout = 5.0;
-        let started = sys::clk::epoch_time();
-        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
-            loop {
-                if sys::clk::epoch_time() - started > timeout {
-                    return Err(());
-                }
-                let mut sockets = SOCKETS.lock();
-                iface.poll(sys::net::time(), device, &mut sockets);
-                let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-                if let Some(endpoint) = socket.remote_endpoint() {
-                    return Ok(endpoint.addr);
-                }
-
-                if let Some(_d) = iface.poll_delay(sys::net::time(), &sockets) {
-                    sleep(0.004);
-                }
-                halt();
-            }
-        } else {
-            Err(())
-        }
-    }
-
+    /// Return the bound endpoint without driving the network stack.
     pub fn local_endpoint(&self) -> Option<IpEndpoint> {
-        let sockets = SOCKETS.lock();
-        let socket = sockets.get::<tcp::Socket>(self.handle);
-        socket.local_endpoint()
+        SOCKETS
+            .lock()
+            .get::<tcp::Socket>(self.handle)
+            .local_endpoint()
     }
 
+    /// Return the peer endpoint without driving the network stack.
     pub fn remote_endpoint(&self) -> Option<IpEndpoint> {
-        let sockets = SOCKETS.lock();
-        let socket = sockets.get::<tcp::Socket>(self.handle);
-        socket.remote_endpoint()
+        SOCKETS
+            .lock()
+            .get::<tcp::Socket>(self.handle)
+            .remote_endpoint()
     }
 
-    /// Accept an incoming connection and return a new socket handle for the established
-    /// connection while keeping this socket listening.
+    /// Compatibility nonblocking accept; blocking is owned by the syscall layer.
     pub fn accept_new(&mut self) -> Result<(TcpSocket, IpEndpoint), ()> {
-        let listen_port = self.listen_port.ok_or(())?;
-
-        let timeout = 5.0;
-        let started = sys::clk::epoch_time();
-        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
-            loop {
-                if sys::clk::epoch_time() - started > timeout {
-                    return Err(());
-                }
-                let mut sockets = SOCKETS.lock();
-                iface.poll(sys::net::time(), device, &mut sockets);
-                let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-                let Some(endpoint) = socket.remote_endpoint() else {
-                    if let Some(_d) = iface.poll_delay(sys::net::time(), &sockets) {
-                        sleep(0.004);
-                    }
-                    halt();
-                    continue;
-                };
-
-                // Move the established connection into a new socket.
-                let removed = sockets.remove(self.handle);
-                let Socket::Tcp(accepted) = removed else {
-                    return Err(());
-                };
-                let accepted_handle = sockets.add(accepted);
-
-                // Recreate the listener socket in-place.
-                let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
-                let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
-                let listener = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
-                let listener_handle = sockets.add(listener);
-                self.handle = listener_handle;
-                self.bound_port = Some(listen_port);
-                self.listen_port = Some(listen_port);
-
-                // Start listening again.
-                let listener_sock = sockets.get_mut::<tcp::Socket>(self.handle);
-                let _ = listener_sock.listen(listen_port);
-
-                return Ok((
-                    TcpSocket {
-                        handle: accepted_handle,
-                        bound_port: None,
-                        listen_port: None,
-                    },
-                    endpoint,
-                ));
-            }
-        }
-        Err(())
+        self.try_accept_new()?.ok_or(())
     }
 
+    /// Accept a completed handshake even when the peer has sent no payload.
     pub fn try_accept_new(&mut self) -> Result<Option<(TcpSocket, IpEndpoint)>, ()> {
-        let listen_port = self.listen_port.ok_or(())?;
-
-        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
+        let port = self.listen_port.ok_or(())?;
+        let endpoint = {
             let mut sockets = SOCKETS.lock();
-            iface.poll(sys::net::time(), device, &mut sockets);
             let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-            let Some(endpoint) = socket.remote_endpoint() else {
+            if socket.state() == tcp::State::Closed {
+                socket.listen(port).map_err(|_| ())?;
+            }
+            if !matches!(
+                socket.state(),
+                tcp::State::Established | tcp::State::CloseWait
+            ) {
                 return Ok(None);
-            };
+            }
+            socket.remote_endpoint().ok_or(())?
+        };
+        // Keep the accepted socket in place and allocate just a new listener.
+        let mut listener = buffers();
+        listener.listen(port).map_err(|_| ())?;
+        let listener_handle = SOCKETS.lock().add(listener);
+        let accepted_handle = core::mem::replace(&mut self.handle, listener_handle);
+        service::request();
+        Ok(Some((
+            Self {
+                handle: accepted_handle,
+                bound_port: None,
+                listen_port: None,
+            },
+            endpoint,
+        )))
+    }
 
-            // Move the established connection into a new socket.
-            let removed = sockets.remove(self.handle);
-            let Socket::Tcp(accepted) = removed else {
-                return Err(());
-            };
-            let accepted_handle = sockets.add(accepted);
-
-            // Recreate the listener socket in-place.
-            let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
-            let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
-            let listener = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
-            let listener_handle = sockets.add(listener);
-            self.handle = listener_handle;
-            self.bound_port = Some(listen_port);
-            self.listen_port = Some(listen_port);
-
-            // Start listening again.
-            let listener_sock = sockets.get_mut::<tcp::Socket>(self.handle);
-            let _ = listener_sock.listen(listen_port);
-
-            return Ok(Some((
-                TcpSocket {
-                    handle: accepted_handle,
-                    bound_port: None,
-                    listen_port: None,
-                },
-                endpoint,
-            )));
+    /// Read currently buffered data, EOF, or EAGAIN; never halt in a syscall.
+    pub fn try_read(&mut self, buf: &mut [u8]) -> Result<usize, i32> {
+        if buf.is_empty() {
+            return Ok(0);
         }
+        let mut sockets = SOCKETS.lock();
+        let socket = sockets.get_mut::<tcp::Socket>(self.handle);
+        if matches!(
+            socket.state(),
+            tcp::State::SynSent | tcp::State::SynReceived
+        ) {
+            return Err(EAGAIN);
+        }
+        let result = if socket.can_recv() {
+            socket.recv_slice(buf).map_err(|_| EIO)
+        } else if !socket.may_recv() {
+            Ok(0)
+        } else {
+            Err(EAGAIN)
+        };
+        drop(sockets);
+        if result.is_ok() {
+            service::request();
+        }
+        result
+    }
 
-        Err(())
+    /// Queue available bytes and immediately return the partial count.
+    pub fn try_write(&mut self, buf: &[u8]) -> Result<usize, i32> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut sockets = SOCKETS.lock();
+        let socket = sockets.get_mut::<tcp::Socket>(self.handle);
+        if matches!(
+            socket.state(),
+            tcp::State::SynSent | tcp::State::SynReceived
+        ) {
+            return Err(EAGAIN);
+        }
+        let result = if socket.can_send() {
+            socket.send_slice(buf).map_err(|_| EIO)
+        } else if !socket.may_send() {
+            Err(EPIPE)
+        } else {
+            Err(EAGAIN)
+        };
+        drop(sockets);
+        if result.is_ok() {
+            service::request();
+        }
+        result
     }
 }
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
-        // Best-effort cleanup: when the last fd referencing this socket is dropped,
-        // remove it from the global SocketSet to reclaim buffers.
-        let mut sockets = SOCKETS.lock();
-        let _ = sockets.remove(self.handle);
+        service::detach(self.handle);
     }
 }
 
 impl FileIO for TcpSocket {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
-        let timeout = 5.0;
-        let started = sys::clk::epoch_time();
-        let mut bytes = 0;
-        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
-            let mut sockets = SOCKETS.lock();
-            loop {
-                if sys::clk::epoch_time() - started > timeout {
-                    return Err(());
-                }
-                iface.poll(sys::net::time(), device, &mut sockets);
-                let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-                if socket.can_recv() {
-                    bytes = socket.recv_slice(buf).map_err(|_| ())?;
-                    break;
-                }
-                if !socket.may_recv() {
-                    break;
-                }
-                if let Some(_d) = iface.poll_delay(sys::net::time(), &sockets) {
-                    sleep(0.004);
-                }
-                halt();
-            }
-            Ok(bytes)
-        } else {
-            Err(())
-        }
+        self.try_read(buf).map_err(|_| ())
     }
-
     fn write(&mut self, buf: &[u8]) -> Result<usize, ()> {
-        let timeout = 5.0;
-        let started = sys::clk::epoch_time();
-        let mut written = 0;
-        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
-            let mut sockets = SOCKETS.lock();
-            loop {
-                if sys::clk::epoch_time() - started > timeout {
-                    return Err(());
-                }
-                iface.poll(sys::net::time(), device, &mut sockets);
-                let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-                if written > 0 {
-                    break;
-                }
-                if socket.can_send() {
-                    match socket.send_slice(buf.as_ref()) {
-                        Ok(n) => {
-                            written = n;
-                        }
-                        Err(_) => return Err(()),
-                    }
-                }
-
-                if let Some(_d) = iface.poll_delay(sys::net::time(), &sockets) {
-                    sleep(0.004);
-                }
-                halt();
-            }
-            Ok(written)
-        } else {
-            Err(())
-        }
+        self.try_write(buf).map_err(|_| ())
     }
-
     fn close(&mut self) {
-        let mut closed = false;
-        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
-            let mut sockets = SOCKETS.lock();
-            loop {
-                iface.poll(sys::net::time(), device, &mut sockets);
-                let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-                if closed {
-                    break;
-                }
-                socket.close();
-                closed = true;
-
-                if let Some(_d) = iface.poll_delay(sys::net::time(), &sockets) {
-                    sleep(0.004);
-                }
-                halt();
-            }
-        }
+        SOCKETS.lock().get_mut::<tcp::Socket>(self.handle).close();
+        service::request();
     }
-
     fn poll(&mut self, event: IO) -> bool {
-        if let Some((ref mut iface, ref mut device)) = *NET.lock() {
-            let mut sockets = SOCKETS.lock();
-            iface.poll(sys::net::time(), device, &mut sockets);
-            let socket = sockets.get_mut::<tcp::Socket>(self.handle);
-
-            match event {
-                IO::Read => socket.can_recv(),
-                IO::Write => socket.can_send(),
+        let mut sockets = SOCKETS.lock();
+        let socket = sockets.get_mut::<tcp::Socket>(self.handle);
+        if let Some(port) = self.listen_port {
+            if socket.state() == tcp::State::Closed {
+                let _ = socket.listen(port);
             }
-        } else {
-            false
+            return matches!(event, IO::Read)
+                && matches!(
+                    socket.state(),
+                    tcp::State::Established | tcp::State::CloseWait
+                );
+        }
+        if matches!(
+            socket.state(),
+            tcp::State::SynSent | tcp::State::SynReceived
+        ) {
+            return false;
+        }
+        match event {
+            IO::Read => socket.can_recv() || !socket.may_recv(),
+            IO::Write => socket.can_send() || !socket.may_send(),
         }
     }
 }

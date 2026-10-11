@@ -1,7 +1,10 @@
+//! Ethernet device discovery and smoltcp tokens. NET serializes task-context
+//! interface access; drivers must not acquire it from IRQ. Tokens are exposed
+//! only when a DMA transmit descriptor is available, and never wait for one.
+
 mod pcnet;
 mod rtl8139;
 
-use crate::driver::timer::cmos::CMOS;
 use crate::sys::pci::{DeviceConfig, PciClaimError, PciOwner, PciOwnerKind};
 use crate::{log, sys};
 use alloc::format;
@@ -86,6 +89,9 @@ impl smoltcp::phy::Device for EthernetDevice {
         Self: 'b;
 
     fn receive(&mut self, _instant: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        if !self.tx_available() {
+            return None;
+        }
         if let Some(buffer) = self.receive_packet() {
             if self.config().is_debug_enabled() {
                 // usr::hex::print_hex(&buffer);
@@ -100,8 +106,7 @@ impl smoltcp::phy::Device for EthernetDevice {
     }
 
     fn transmit(&mut self, _instant: Instant) -> Option<Self::TxToken<'_>> {
-        let tx = TxToken { device: self };
-        Some(tx)
+        self.tx_available().then_some(TxToken { device: self })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -110,11 +115,6 @@ impl smoltcp::phy::Device for EthernetDevice {
         caps.max_burst_size = Some(64);
         caps
     }
-}
-
-fn time() -> Instant {
-    let mut cmos = CMOS::new();
-    Instant::from_micros((cmos.unix_time() * 1000000) as i64)
 }
 
 /// Configuration for an Ethernet device.
@@ -323,7 +323,7 @@ pub fn init() {
             log!("NET MAC {}", addr);
 
             let config = smoltcp::iface::Config::new(mac.into());
-            let iface = Interface::new(config, &mut device, time());
+            let iface = Interface::new(config, &mut device, Instant::from_micros(0));
 
             *NET.lock() = Some((iface, device));
         }
@@ -331,12 +331,31 @@ pub fn init() {
 
     if let Some(dev) = find_and_claim_device(0x10EC, 0x8139, "RTL8139") {
         let io = dev.io_base();
-        let nic = rtl8139::Device::new(io);
+        let nic = rtl8139::Device::new(io, dev.interrupt_line);
         add(EthernetDevice::RTL8139(nic), "RTL8139");
     }
     if let Some(dev) = find_and_claim_device(0x1022, 0x2000, "PCNET") {
         let io = dev.io_base();
         let nic = pcnet::Device::new(io);
         add(EthernetDevice::PCNET(nic), "PCNET");
+    }
+}
+
+impl EthernetDevice {
+    /// Reserve an available RTL8139 descriptor before exposing a TxToken.
+    fn tx_available(&mut self) -> bool {
+        match self {
+            Self::RTL8139(device) => device.tx_available(),
+            Self::PCNET(device) => device.tx_available(),
+        }
+    }
+
+    /// Enable interrupt-driven service when supported. PCNET retains a bounded
+    /// task-context fallback until its separate interrupt path is implemented.
+    pub fn enable_interrupts(&mut self) -> bool {
+        match self {
+            Self::RTL8139(device) => device.enable_interrupts(),
+            Self::PCNET(_) => false,
+        }
     }
 }

@@ -207,14 +207,8 @@ fn wait_for_ready(
     let wait_queue = proc::poll_wait_queue();
 
     loop {
-        // (1) Pump the network stack before each scan so protocol-timer-driven
-        //     TCP/UDP readiness (retransmit, peer segment, TIME-WAIT) is
-        //     observed without a per-tick broadcast (#69). The returned delay is
-        //     the smoltcp protocol-timer deadline; fold it into the effective
-        //     wait deadline below so a blocked poller wakes when that timer
-        //     should fire and re-pumps, instead of sleeping forever.
-        let net_delay_ns = sys::net::pump_network();
-
+        // The network service advances protocol timers independently of poll's
+        // user timeout and notifies this queue after socket state changes.
         // Check for a pending interrupting signal first: one queued before we
         // publish must abort now, not after a full block.
         if proc::current_has_sleep_interrupting_signal() {
@@ -251,24 +245,10 @@ fn wait_for_ready(
             }
         }
 
-        // Compute the effective deadline for this block: the earlier of the
-        // user timeout and the next smoltcp protocol-timer expiry. Arming the
-        // protocol deadline lets the one-shot clockevent wake us when smoltcp
-        // has timed work to do (retransmit, delayed-ACK, TIME-WAIT), even for
-        // an infinite poll(-1) with no user deadline — without it such a
-        // poller would strand forever, since NIC RX is only ingested by an
-        // explicit pump and there is no per-tick wake-all (#69).
-        let effective_deadline = match (deadline_ns, net_delay_ns) {
-            (Some(user), Some(net)) => Some(core::cmp::min(user, net)),
-            (Some(user), None) => Some(user),
-            (None, Some(net)) => Some(net),
-            (None, None) => None,
-        };
-
         // (4) Atomically block. await_io_until arms/cancels the IoTimeout token
         //     itself after entering AwaitingIo state, closing the arm-vs-wake
         //     race, and returns the reason execution resumed.
-        let reason = proc::await_io_until(effective_deadline);
+        let reason = proc::await_io_until(deadline_ns);
         wait_queue.finish_wait(wait_pid);
 
         // (5) After wake, recheck readiness, deadline, and signals. A signal
@@ -285,11 +265,8 @@ fn wait_for_ready(
                 // with no signal pending.
             }
             WakeReason::Deadline => {
-                // A deadline expired. If it was the user timeout, perform the
-                // final readiness scan (readiness observable at the moment of
-                // expiry wins over the timeout) and return. If it was only the
-                // protocol-timer deadline, loop to re-pump and rescan instead
-                // of returning a premature zero.
+                // A user deadline expired: a final readiness scan wins over
+                // timeout if data became observable at the expiry boundary.
                 let user_expired = deadline_ns
                     .map(|d| crate::driver::time::monotonic_ns() >= d)
                     .unwrap_or(false);
@@ -300,7 +277,6 @@ fn wait_for_ready(
                         Err(e) => return Err(e),
                     }
                 }
-                // Protocol-timer deadline: fall through to re-pump + rescan.
             }
             WakeReason::Event => {
                 // Readiness (or spurious) wake: re-scan and loop.
