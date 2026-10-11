@@ -1,4 +1,3 @@
-use crate::driver::timer::cmos::CMOS;
 use crate::driver::time::uptime_secs_f64 as uptime;
 use crate::println;
 use crate::sys::net::socket::SOCKETS;
@@ -7,7 +6,6 @@ use alloc::string::ToString;
 use core::str::FromStr;
 use smoltcp::socket::dhcpv4;
 use smoltcp::socket::dhcpv4::Event;
-use smoltcp::time::Instant;
 use smoltcp::wire::IpCidr;
 
 pub fn main() {
@@ -18,19 +16,16 @@ pub fn main() {
         let mut sockets = SOCKETS.lock();
         let dhcp_handle = sockets.add(dhcp_socket);
 
-        let mut cmos = CMOS::new();
-
-        let timeout = 30;
-        let started = cmos.unix_time();
+        let deadline = crate::driver::time::monotonic_ns().saturating_add(30_000_000_000);
 
         loop {
-            if cmos.unix_time() - started > timeout {
-                println!("ERROR: timeout");
+            if crate::driver::time::monotonic_ns() >= deadline {
+                sockets.remove(dhcp_handle);
+                println!("ERROR: DHCP timeout");
                 return;
             }
 
-            let ms = (cmos.unix_time() * 1000000) as i64;
-            let time = Instant::from_micros(ms);
+            let time = crate::sys::net::time();
             iface.poll(time, device, &mut sockets);
             let event = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll();
 
@@ -51,6 +46,8 @@ pub fn main() {
                         }
                     }
                     dhcp_config = Some((config.address, config.router, config.dns_servers));
+                    // Keep the DHCP protocol socket: deferred network service
+                    // must continue its lease timers after boot configuration.
                     break;
                 }
                 Some(Event::Deconfigured) => {}

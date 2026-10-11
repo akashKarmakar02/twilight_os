@@ -64,12 +64,13 @@ Every lock below is acquired from at least one IRQ handler. All sites use
 
 | Lock | Location | Task-context sites | IRQ-context sites |
 |------|----------|--------------------|--------------------|
+| `IRQ_HANDLERS` | `arch/x86_64/idt.rs` | shared INTx registration | `dispatch_irq` copies the fixed callback list before invoking handlers |
 | `PICS` | `arch/x86_64/idt.rs` | `init_pics`, `register_irq_handler`, `main` PIT mask | `dispatch_irq` EOI, `timer_preempt` EOI, keyboard/mouse ISR EOI |
 | `Tty.input_buffer` | `sys/console/tty.rs` | `input_read_ready`, `pop_input_now`, `poll`, `ioctl` TCSETSF | keyboard ISR → `put_input`, UART IRQ4 → `put_char_in_tty` |
 | `KEY_EVENT_QUEUE` | `driver/keyboard/mod.rs` | `KeyboardDev::pop_events`, `poll` | keyboard ISR → `enqueue_key_event` |
 | `PACKETS` | `driver/mouse/mod.rs` | `MouseDev::read`, `poll` | mouse ISR → `enqueue_packet` |
 | `TIMER_QUEUE` | `sys/timer/mod.rs` | `block_current_until`, `cancel_wait`, inserters | timer ISR → `expire_due`, `process_deferred_expiry` |
-| `WaitQueue.waiters` | `utils/sync.rs` | `prepare_current`, `finish_wait` | keyboard/UART ISR → `notify_all`, timer → `notify_one` |
+| `WaitQueue.waiters` | `utils/sync.rs` | `prepare_current`, `finish_wait` | keyboard/UART ISR → `notify_all`, timer → `notify_one`, RTL8139 ISR → network WORK `notify_one` |
 
 ### Locks that are IRQ-context-only (not shared)
 
@@ -94,7 +95,7 @@ order risks ABBA deadlock across nested acquisitions.
 
 1. `TIMER_QUEUE`
 2. `NET` → `SOCKETS` (network poll path takes NET then SOCKETS; per-socket call
-   sites mirror this)
+   sites mirror this); `SOCKETS` → network `CLOSING` for detached TCP lifetimes
 3. `WaitQueue.waiters`
 4. `PICS` (always released immediately after EOI; never held across another lock)
 
@@ -130,3 +131,19 @@ while acquiring another lock.
    allocate (or that the allocation is IRQ-safe). The heap lock is not IRQ-safe.
 4. Prefer leaf locks (no nested acquisition). If nesting is unavoidable, document
    the order here.
+
+## Deferred networking (#83)
+
+The RTL8139 ISR touches only dedicated mask/status I/O ports and the
+allocation-free WORK wait queue. NET, SOCKETS and CLOSING remain task-only
+locks; they must never be acquired from NIC hard IRQ. PID 0 runs the deferred
+service with IF clear, preserving the PROCESS_TABLE exclusion contract above.
+IRQ_HANDLERS uses lock_irq at every site; callback lists are copied and the
+registry guard dropped before callbacks run. Up to eight devices can share a
+line, and duplicate registration is idempotent.
+
+Internet socket syscall retries retain an Arc to OpenFile, publish a socket
+waiter, attempt the transfer under short guards, then drop all guards before
+await_io_until. Positive partial writes return immediately. Protocol polling
+and detached-close reclamation belong to deferred service; no scheduled TCP/UDP
+operation uses kernel HLT or executor::sleep. See [networking.md](networking.md).

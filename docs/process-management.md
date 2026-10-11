@@ -101,7 +101,7 @@ network socket, page-frame, PCI, console, and device spinlocks use the common
 preemption-aware wrappers.
 
 Blocking operations must release every guard before calling `await_io()`.
-Pipe and Unix-socket wait paths already follow this pattern. The syscall layer
+Pipe, Unix-socket and Internet-socket wait paths follow this pattern. The syscall layer
 also clones Unix socket state before a blocking read/write/accept/recvfrom, and
 TTY reads check canonical-line readiness before dropping fd/VFS guards and
 sleeping. The operation reacquires state and retries after wakeup.
@@ -187,3 +187,17 @@ Stop the counters with `kill PID` after recording their PIDs.
 - No full signal model
 
 These choices keep the kernel smaller and easier to reason about for a teaching OS.
+
+## Bootstrap network service (#83)
+
+PID 0 retains the existing bootstrap kernel stack after launching init as PID 1.
+Only this initial ProcessTable::run caller remains Runnable; synchronous launch
+callers retain their Waiting state. When resumed, PID 0 enters the network
+service, publishes its work waiter and awaits NIC events or absolute protocol
+and close deadlines. It has no userspace execution frame and runs with IF clear.
+
+An I/O wake that adds a Runnable peer while the current task has no quantum
+arms a fresh quantum and rearms the one-shot clockevent. Otherwise a NIC IRQ
+could wake the service while a sole CPU-bound userspace process keeps running
+with no scheduling event armed. This does not schedule in the IRQ or enable
+kernel preemption. See [networking.md](networking.md).

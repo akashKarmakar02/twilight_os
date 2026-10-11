@@ -5,13 +5,11 @@ pub mod udp;
 pub mod unix;
 
 use crate::driver::disk::ata::{FileIO, IO};
-use crate::task::executor::sleep;
+use crate::utils::sync::Mutex;
 use alloc::vec;
 use lazy_static::lazy_static;
 use smoltcp::iface::SocketSet;
-use smoltcp::time::Duration;
 use smoltcp::wire::{IpAddress, IpEndpoint};
-use crate::utils::sync::Mutex;
 use unix::UnixAddr;
 
 lazy_static! {
@@ -261,8 +259,4 @@ impl SocketFile {
 
 fn random_port() -> u16 {
     49152 + sys::rng::get_u16() % 16384
-}
-
-fn wait(duration: Duration) {
-    sleep((duration.total_micros() as f64) / 1000000.0);
 }

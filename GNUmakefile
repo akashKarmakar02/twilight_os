@@ -351,6 +351,15 @@ test-time: $(IMAGE_NAME).iso
 	# Non-destructive: boots the live ISO headless, never touches hdd.img.
 	tools/time-regression/run.sh $(IMAGE_NAME).iso
 
+.PHONY: test-net
+test-net: $(IMAGE_NAME).iso
+	# Snapshot disk attachment; loopback ports 18000, 18081 and 18083.
+	rustc +stable --edition=2024 --test kernel/twilight_kernel/src/sys/net/policy.rs -o /tmp/twilight-net-policy-test
+	/tmp/twilight-net-policy-test
+	rustc +stable --edition=2024 --test kernel/twilight_kernel/src/arch/x86_64/irq_registry.rs -o /tmp/twilight-irq-registry-test
+	/tmp/twilight-irq-registry-test
+	python3 tools/net-regression/run.py $(IMAGE_NAME).iso
+
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel/twilight_kernel clean

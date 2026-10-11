@@ -6,6 +6,7 @@ pub mod gdt;
 pub mod idt;
 pub mod io;
 pub mod irq;
+mod irq_registry;
 pub mod power;
 pub mod syscall;
 

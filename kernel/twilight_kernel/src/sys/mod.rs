@@ -1,5 +1,4 @@
 pub(crate) mod acpi;
-mod clk;
 pub mod console;
 pub mod framebuffer;
 pub mod fs;

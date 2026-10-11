@@ -62,3 +62,19 @@ Strict adherence to the ABI opens the possibility of **binary compatibility**. I
 
 ### **4. Documentation & Standards**
 Instead of defining and documenting a custom set of system calls, we can rely on the extensive documentation available for Linux (e.g., `man` pages). This lowers the barrier to entry for new developers working on TwilightOS.
+
+## Internet socket blocking (#83)
+
+TCP/UDP syscall waits are implemented in sys/syscall/net_io.rs. Socket methods
+make one attempt and preserve EAGAIN, partial counts, EOF and EPIPE. The syscall
+layer drops its OpenFile guard before awaiting events and retains only an Arc;
+accept reacquires the current process after blocking before installing its fd.
+Connect waits use an absolute five-second deadline; nonblocking TCP connect
+returns EINPROGRESS. The listener's O_NONBLOCK controls accept waiting, while
+accept4 SOCK_NONBLOCK controls only the accepted descriptor. UDP connect never
+waits for a handshake. Protocol work runs independently in the PID 0 network
+service; poll/select arm only their user deadlines.
+
+Read/write and sendto/recvfrom use the same Internet socket retry policy.
+SO_ERROR and full shutdown-direction semantics remain separate unsupported ABI
+work. Architecture and regression coverage: [networking.md](networking.md).

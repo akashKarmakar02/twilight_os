@@ -11,4 +11,5 @@ This folder contains developer-facing documentation for building, running, and h
 - TwilightFS (filesystem): filesystem.md
 - Memory management: memory-management.md
 - Process management: process-management.md
+- Networking: networking.md
 - USB xHCI driver: usb-xhci.md

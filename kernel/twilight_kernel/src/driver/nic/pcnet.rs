@@ -267,6 +267,13 @@ impl Device {
     }
 }
 
+impl Device {
+    /// Refuse a TX token while the next descriptor still belongs to the NIC.
+    pub fn tx_available(&self) -> bool {
+        is_buffer_owner(&self.tx_des, self.tx_id.load(Ordering::SeqCst))
+    }
+}
+
 impl EthernetDeviceIO for Device {
     fn config(&self) -> Arc<Config> {
         self.config.clone()

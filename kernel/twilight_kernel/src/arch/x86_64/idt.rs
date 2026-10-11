@@ -344,13 +344,20 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 pub static PICS: Mutex<ChainedPics> =
     Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
-static IRQ_HANDLERS: Mutex<[Option<fn()>; 16]> = Mutex::new([None; 16]);
+// PCI INTx lines can be shared (for example RTL8139 and xHCI on IRQ11).
+const HANDLERS_PER_IRQ: usize = 8;
+static IRQ_HANDLERS: Mutex<[[Option<fn()>; HANDLERS_PER_IRQ]; 16]> =
+    Mutex::new([[None; HANDLERS_PER_IRQ]; 16]);
 
 pub fn register_irq_handler(irq: u8, handler: fn()) -> Result<(), ()> {
     if irq >= 16 {
         return Err(());
     }
-    IRQ_HANDLERS.lock()[irq as usize] = Some(handler);
+    {
+        let mut handlers = IRQ_HANDLERS.lock_irq();
+        let line = &mut handlers[irq as usize];
+        super::irq_registry::insert(line, handler)?;
+    }
 
     // Unmask the IRQ in PIC
     unsafe {
@@ -379,8 +386,11 @@ fn dispatch_irq(irq: u8) {
         PICS.lock_irq().notify_end_of_interrupt(interrupt_index(irq));
     }
     if irq < 16 {
-        if let Some(h) = { IRQ_HANDLERS.lock()[irq as usize] } {
-            h();
+        // Copy the bounded list before invoking callbacks: handlers may register
+        // work, but cannot hold the registry lock while doing so.
+        let handlers = { IRQ_HANDLERS.lock_irq()[irq as usize] };
+        for handler in handlers.into_iter().flatten() {
+            handler();
         }
     }
 }
