@@ -19,7 +19,8 @@ TwilightOS includes built-in kernel drivers for the following hardware:
 | Category | Driver / Controller | Notes |
 | :--- | :--- | :--- |
 | **Interrupts** | APIC / IOAPIC | Local APIC and I/O APIC support for IRQ routing. |
-| **Timer** | PIT (8253/8254) | Programmable Interval Timer for scheduling ticks. |
+| **Timer** | LAPIC, PIT | One-shot LAPIC clockevents; PIT used for calibration/fallback support. |
+| **Clocksource** | TSC, HPET | Validated free-running source for monotonic time. |
 | **Time** | CMOS / RTC | Real Time Clock for wall-clock time. |
 | **Serial** | UART (16550) | Serial console output (`COM1`) for debug logging. |
 | **Storage** | ATA / IDE | Legacy PATA support. |
@@ -31,6 +32,9 @@ TwilightOS includes built-in kernel drivers for the following hardware:
 | **Network** | PCNET | AMD PCnet-FAST III (Am79C973). |
 | **Display** | UEFI GOP | UEFI Graphics Output Protocol (Linear Framebuffer). |
 
+Generic HID gamepads are development work outside current `master`; see the
+[gamepad design/status](usb/gamepads.md).
+
 ---
 
 ## Software Specifications
@@ -38,7 +42,9 @@ TwilightOS includes built-in kernel drivers for the following hardware:
 ### Kernel Architecture
 - **Language**: Rust (No-std, `alloc` enabled).
 - **Design**: Monolithic kernel with modular drivers.
-- **Scheduler**: Cooperative multitasking with async/await (Rust Futures) and SMP awareness.
+- **Scheduler**: Preemptive userspace with a 10 ms quantum, deferred kernel
+  rescheduling, and experimental kernel preemption disabled by default. APs
+  are detected and parked; scheduling remains BSP-only.
 - **Memory Management**:
     - Physical Memory Manager (Bitmap/Linked-list).
     - Virtual Memory Manager (Recursive mapping / Direct map).
@@ -70,9 +76,11 @@ TwilightOS includes built-in kernel drivers for the following hardware:
 ### Build System & Toolchain
 - **Host Toolchain**:
     - `cargo` + `rustc` (Nightly) for Kernel.
+    - Rust stable with `x86_64-unknown-linux-musl` for Rust userspace.
     - `musl-gcc` (via `musl-tools`) for C userspace applications.
     - `nasm` for assembly stubs.
 - **Userspace Builder**:
     - Custom `build.rs` script in `userspace/` directory.
-    - Detects project type: `Cargo.toml` (Rust), `build.zig` (Zig), `Makefile` (C/Make), or `*.c` (Raw C).
-    - Cross-compiles using `x86_64-linux-musl` target.
+    - Detects Makefile, Cargo, Zig, then plain C/C++ sources.
+    - Stages app executables under `rootfs/bin` and service aliases under `rootfs/sbin`.
+    - See [build-system.md](build-system.md) for image packaging and external Snes9x prerequisites.
