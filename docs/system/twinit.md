@@ -36,9 +36,44 @@ Supported values are:
 - `restart`: `never`, `on-failure`, or `always`;
 - `type`: `foreground`;
 - `runlevel`: `boot`, `default`, `single`, or `shutdown`;
-- `stdout` and `stderr`: `console` or `null`.
+- `stdout` and `stderr`: `console`, `null`, or `log`.
 
-Unknown fields and unsupported values invalidate only that service file; boot continues.
+Unsupported top-level fields and invalid supported values invalidate only that
+service file; boot continues. The parser is not a full TOML validator.
+
+For `log` output, twinit captures the service's pipe output and forwards lines
+to `twilogd`. Services without console output receive `/dev/null` on stdin.
+Logging starts first through an explicit bootstrap rule, not a dependency
+solver. See [twilogd.md](twilogd.md).
+
+## Packaged development services
+
+`network.toml` is a disabled placeholder for `/sbin/twnetd`, which is not yet
+provided. Kernel DHCP and protocol processing do not depend on this file.
+
+`txpc-client.toml` starts the TXPC smoke-test client once at the default
+runlevel. Its request for `dev.twilight.test` activates the server configured
+in `txpc-echo.toml`, which is otherwise not started at boot. Output goes to the
+logging service and `restart = "never"` keeps the client from looping.
+
+The bootstrap broker listens on `/run/twinit/bootstrap.sock`, separately from
+the read-only control socket. It handles named registration, on-demand startup,
+policy checks, and `SCM_RIGHTS` connection handoff. The small config parser only
+constructs TXPC metadata when `[txpc] name` exists; client capabilities alone
+in `[txpc.client]` are ignored. The test client therefore has its own unique
+name, distinct from the server's name:
+
+```toml
+[txpc]
+name = "dev.twilight.test-client"
+
+[txpc.client]
+capabilities = ["gui"]
+```
+
+Server policy can use `allow_all`, `allow_uids`, or required client
+capabilities under `[txpc.policy]`. This is a development broker, not a general
+dependency graph or a complete service-security model.
 
 ## Restart and reaping
 
@@ -82,6 +117,11 @@ If the socket cannot be bound (e.g. AF_UNIX is incomplete), twinit prints a warn
 
 ## Current limitations and future work
 
-There is no dependency solver, runtime runlevel switching, shutdown ordering, signal-driven control plane, socket activation, forking-service support, or dedicated logging daemon. Service configuration uses a constrained TOML parser rather than the complete TOML specification. The control socket provides read-only queries; service mutation commands (start, stop, restart, enable, disable) are not yet implemented.
+There is no dependency solver, runtime runlevel switching, shutdown ordering,
+signal-driven control plane, general socket activation, or forking-service
+support. TXPC provides named on-demand activation and twilogd provides logging.
+Service configuration uses a constrained TOML parser. The control socket
+remains read-only; start/stop/restart/enable/disable commands are not implemented.
 
-Future stages may add service mutation commands, dependency ordering, logging-daemon integration, socket activation, orderly shutdown, user sessions, and desktop session startup.
+Future stages may add service mutation commands, dependency ordering, general
+socket activation, orderly shutdown, and richer user-session management.

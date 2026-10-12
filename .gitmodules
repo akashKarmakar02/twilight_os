@@ -7,3 +7,21 @@
 [submodule "userspace/oksh"]
 	path = userspace/oksh
 	url = https://github.com/ibara/oksh.git
+[submodule "userspace/doomgeneric"]
+	path = userspace/doomgeneric
+	url = https://github.com/akashKarmakar02/doomgeneric.git
+	branch = twilight
+[submodule "userspace/apps/smolnes"]
+	path = userspace/apps/smolnes
+	url = https://github.com/akashKarmakar02/smolnes.git
+	branch = twilight
+[submodule "userspace/snes9x-fb"]
+	path = userspace/snes9x-fb
+	url = https://github.com/akashKarmakar02/snes9x-fb.git
+	branch = twilight
+[submodule "userspace/libs/libffi/upstream"]
+	path = userspace/libs/libffi/upstream
+	url = https://github.com/libffi/libffi.git
+[submodule "userspace/libs/wayland/upstream"]
+	path = userspace/libs/wayland/upstream
+	url = https://gitlab.freedesktop.org/wayland/wayland.git

@@ -1,4 +1,3 @@
-# Downloaded upstream sources and build artifacts for third-party libs.
-# The Makefiles download pinned, sha256-verified release tarballs on demand.
+# Cross-build objects, staging trees, and generated Meson cross files.
 */build/
 musl-cross.ini

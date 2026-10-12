@@ -1,48 +1,24 @@
-# libwayland-client (+ server/cursor/egl) — cross-compiled for musl with meson.
-#
-# This gives twilight_os the official libwayland-client .so and generated
-# protocol headers, so GUI apps can #include <wayland-client.h> and link
-# -lwayland-client instead of hand-rolling the Wayland wire protocol.
-#
-# Build strategy:
-#   - meson cross-build with musl-gcc (see musl-cross.ini).
-#   - -Dscanner=false: do not cross-compile a scanner. meson then resolves the
-#     *host* wayland-scanner as a native build dependency to generate the
-#     protocol C/headers. The host scanner (1.25.0) matches this wayland
-#     release, keeping the protocol XML in sync.
-#   - The cross pkg-config wrapper (musl-pkg-config) points meson at the musl
-#     libffi installed into the rootfs sysroot by ../libffi/.
-#
-# Driven by build_libraries() in userspace/build.rs via
-# `make install ROOTFS=../../../rootfs`. Downloads the pinned release tarball on
-# demand (sha256-verified) into a gitignored build/ dir.
-
-VERSION ?= 1.25.0
-TARBALL := wayland-$(VERSION).tar.gz
-URL     := https://gitlab.freedesktop.org/wayland/wayland/-/archive/$(VERSION)/$(TARBALL)
-SHA256  := 95413723f6cd0462770eda207a1c78d142d0a1bba9b0572a4ed1da6a9b27059c
+# Wayland — musl cross-build from the pinned upstream Git submodule.
+# A native scanner built from the same pin generates protocol code; libffi
+# is cross-built by ../libffi first. Outputs live in build/<revision>/ so a new
+# gitlink cannot reuse the preceding source revision's Meson configuration.
 
 ROOTFS ?= ../../../rootfs
-PREFIX   := $(ROOTFS)/usr/x86_64-linux-musl
+PREFIX := $(ROOTFS)/usr/x86_64-linux-musl
 INCLUDEDIR := $(PREFIX)/include
-LIBDIR   := $(PREFIX)/lib64
+LIBDIR := $(PREFIX)/lib64
 
-BUILD := build
-SRC   := $(BUILD)/wayland-$(VERSION)
-BUILDDIR := $(SRC)/_build
-
-# meson resolves cross-file binary paths relative to the current working
-# directory, not the cross-file's location, so a relative ./musl-pkg-config is
-# unreliable. Generate the cross-file from a template with an absolute path to
-# the wrapper (which lives alongside this Makefile).
-CROSSFILE := $(CURDIR)/musl-cross.ini
-
+SRC := $(CURDIR)/upstream
+REVISION := $(shell git -C "$(SRC)" rev-parse --verify HEAD 2>/dev/null)
+BUILD := $(CURDIR)/build/$(REVISION)
+CROSSFILE := $(CURDIR)/build/musl-cross.ini
+NATIVEFILE := $(BUILD)/native.ini
+SCANNER_BUILD := $(BUILD)/scanner
+SCANNER_PREFIX := $(BUILD)/host
+HOST_CC ?= cc
 MESON ?= meson
 
-# scanner=false  -> use the host wayland-scanner (native) to generate protocol
-#                   sources/headers; don't cross-compile one.
-# libraries=true -> build libwayland-{client,server,cursor,egl}.
-# tests/documentation/dtd_validation=false -> trim host-only build deps.
+# Keep the scanner native; only the libraries target the guest musl sysroot.
 MESON_OPTS := \
 	-Dscanner=false \
 	-Dlibraries=true \
@@ -52,46 +28,50 @@ MESON_OPTS := \
 	--prefix=/usr/x86_64-linux-musl \
 	--libdir=lib64
 
-.PHONY: all install clean distclean
+.PHONY: all install clean distclean check-source native-scanner
 
-all: $(BUILDDIR)/.built
+all: $(BUILD)/.setup
+	$(MESON) compile -C "$(BUILD)"
 
-$(CROSSFILE): musl-cross.ini.in
-	sed -e 's|@CROSSFILE_DIR@|$(CURDIR)|g' $< > $@
+check-source:
+	@test -f "$(SRC)/meson.build" || { \
+		echo "Wayland source missing: run git submodule update --init --recursive" >&2; \
+		exit 1; \
+	}
 
-$(SRC)/.extracted: $(BUILD)/$(TARBALL)
-	cd $(BUILD) && sha256sum -c $(CURDIR)/$(BUILD)/sha256.txt
-	cd $(BUILD) && tar xzf $(TARBALL)
-	touch $@
+$(CROSSFILE): musl-cross.ini.in Makefile
+	mkdir -p "$(@D)"
+	sed -e 's|@CROSSFILE_DIR@|$(CURDIR)|g' $< > "$@"
 
-$(BUILDDIR)/.setup: $(SRC)/.extracted $(CROSSFILE)
-	$(MESON) setup --cross-file $(CROSSFILE) $(MESON_OPTS) $(BUILDDIR) $(SRC)
-	touch $@
+# scanner=false in the cross-build still requires a native scanner with an
+# exact version match. Build that tool separately rather than depending on the
+# host distribution's Wayland version. Its Expat dependency remains native.
+$(SCANNER_BUILD)/build.ninja: | check-source
+	CC="$(HOST_CC)" $(MESON) setup -Dlibraries=false -Dscanner=true \
+		-Dtests=false -Ddocumentation=false -Ddtd_validation=false \
+		--prefix="$(SCANNER_PREFIX)" --libdir=lib "$(SCANNER_BUILD)" "$(SRC)"
 
-$(BUILDDIR)/.built: $(BUILDDIR)/.setup
-	$(MESON) compile -C $(BUILDDIR)
-	touch $@
+native-scanner: $(SCANNER_BUILD)/build.ninja
+	$(MESON) compile -C "$(SCANNER_BUILD)"
+	$(MESON) install -C "$(SCANNER_BUILD)"
+
+$(NATIVEFILE): Makefile
+	mkdir -p "$(@D)"
+	printf '%s\n' '[built-in options]' \
+		"pkg_config_path = ['$(SCANNER_PREFIX)/lib/pkgconfig']" > "$@"
+
+$(BUILD)/.setup: $(CROSSFILE) $(NATIVEFILE) | native-scanner
+	$(MESON) setup --reconfigure --native-file "$(NATIVEFILE)" \
+		--cross-file "$(CROSSFILE)" $(MESON_OPTS) "$(BUILD)" "$(SRC)"
+	touch "$@"
 
 install: all
-	$(MESON) install -C $(BUILDDIR) --destdir $(CURDIR)/$(BUILD)/stage
+	$(MESON) install -C "$(BUILD)" --destdir "$(BUILD)/stage"
 	mkdir -p $(LIBDIR) $(INCLUDEDIR)
-	# Shared libraries + soname/dev symlinks.
 	cp -a $(BUILD)/stage/usr/x86_64-linux-musl/lib64/libwayland-*.so* $(LIBDIR)/
-	# Public headers (wayland-client.h, generated *-protocol.h, wayland-util.h, ...).
 	cp -a $(BUILD)/stage/usr/x86_64-linux-musl/include/wayland-*.h $(INCLUDEDIR)/
 
 clean:
-	rm -rf $(BUILDDIR) $(BUILD)/stage
+	rm -rf build
 
 distclean: clean
-	rm -rf $(BUILD)
-
-# Download + verify the tarball on demand.
-$(BUILD)/$(TARBALL): $(BUILD)/sha256.txt | $(BUILD)
-	curl -fsSL -o $@ $(URL)
-
-$(BUILD)/sha256.txt: | $(BUILD)
-	printf '%s  %s\n' '$(SHA256)' '$(TARBALL)' > $@
-
-$(BUILD):
-	mkdir -p $(BUILD)

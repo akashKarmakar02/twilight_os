@@ -2,10 +2,9 @@
 #
 # The cross pkg-config wrapper below restricts dependency resolution to the musl
 # sysroot inside the twilight_os rootfs, so meson finds the musl libffi (a cross
-# dependency) instead of the host glibc libffi. The host wayland-scanner is a
-# *native* build dependency and is resolved separately by meson's native machine
-# lookup (it falls back to the system PATH), so it is intentionally not listed
-# here.
+# dependency) instead of the host glibc libffi. The matching host scanner is
+# selected separately through the generated Meson native file, so it is
+# intentionally not listed here.
 
 [binaries]
 c = 'musl-gcc'

@@ -18,7 +18,7 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
     <td><img src="docs/screenshots/img4.png" alt="Graphical Output" width="400"></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/img5.png" alt="twclock — Wayland layer-shell clock" width="400"></td>
+    <td><img src="docs/screenshots/img5.png" alt="twclock — Wayland desktop clock" width="400"></td>
     <td><img src="docs/screenshots/img6.png" alt="smolnes — Super Mario Bros. 3" width="400"></td>
   </tr>
 </table>
@@ -35,7 +35,7 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
 - **Logging**: `twilogd`, a system log daemon collecting structured logs over a Unix-domain socket (`twilogctl` to query/tail).
 - **Package Management**: `.ipk` packages via a bundled `opkg`.
 - **Wayland Compositor**: `twland`, a from-scratch Wayland compositor speaking raw wire protocol over Unix sockets — xdg-shell toplevel windows, wlr-layer-shell desktop surfaces, SHM buffer compositing to `/dev/fb0`, and real keyboard/mouse input. Includes native clients like `twclock`.
-- **Emulators & Games**: Doom (`fbdoom`), a CHIP-8 emulator, `smolnes` (NES, with NTSC frame pacing + gamepad input), and a Snes9x framebuffer port.
+- **Emulators & Games**: Doom (`fbdoom`), a CHIP-8 emulator, and `smolnes` (NES, with absolute monotonic frame pacing). Doom, Smolnes, Snes9x, and third-party library sources are pinned [Git submodules](docs/ports.md). The Snes9x [build wrapper](userspace/apps/snes9x/README.md) requires an Alpine distrobox.
 
 ### Kernel & Core
 - **Language**: Written in pure Rust (no standard library), `no_std`.
@@ -48,8 +48,8 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
 - **FreeBSD KPI compat layer**: A shim (`compat/freebsd_kpi/`) providing bus_space, bus_dma, callout, taskqueue, and mtx primitives so FreeBSD-style drivers can compile.
 - **Drivers**:
     - **Storage**: ATA/IDE with DMA, ATAPI CD-ROM, VirtIO Block.
-    - **USB**: UHCI and XHCI host controllers; HID keyboard/mouse/gamepad (`/dev/input/js0`) and MSC mass storage.
-    - **Input**: PS/2 keyboard & mouse, USB keyboard & mouse, gamepad.
+    - **USB**: UHCI and XHCI host controllers; HID keyboard/mouse and MSC mass storage. [Gamepad support](docs/usb/gamepads.md) remains development work outside `master`.
+    - **Input**: PS/2 keyboard & mouse, USB keyboard & mouse.
     - **Network**: RTL8139, PCNET.
     - **Display**: UEFI GOP framebuffer (`/dev/fb0`).
     - **Time**: TSC, HPET, PIT, CMOS/RTC, LAPIC one-shot timer.
@@ -70,26 +70,35 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
 | **Multitasking**     | 🚧 Beta          | Preemptive userspace scheduling; deferred-reschedule kernel; SMP detection (APs parked) |
 | **Graphics**         | 🚧 Experimenting | Wayland compositor (xdg-shell + layer-shell), framebuffer      |
 | **Package Mgmt**     | 🚧 Beta          | `.ipk` packages via bundled `opkg`                             |
-| **Doom**             | ✅ Done           | Vendored doomgeneric framebuffer and input port                |
+| **Doom**             | ✅ Done           | Doomgeneric framebuffer and input port, pinned as a submodule                |
 
 ## Build Instructions
 
 ### ✅ Requirements
 
-- **Rust** (nightly, via `rust-toolchain.toml`)
+- **Rust** (nightly, pinned in `kernel/rust-toolchain.toml`)
+- Rust stable with the `x86_64-unknown-linux-musl` target for userspace
 - `llvm-tools-preview`
 - `nasm`, `ld` (binutils), `xorriso`
 - `qemu` (emulator)
 - `musl-gcc` (for userspace LibC)
 - `cpio` (initramfs)
+- Meson, Ninja, pkg-config, a host C compiler, and Expat development headers for Wayland libraries/clients
+- `sgdisk` (gdisk) and mtools for HDD images
+- Autoconf, Automake, and Libtool to bootstrap the libffi source submodule
+- The [Alpine distrobox for Snes9x](userspace/apps/snes9x/README.md)
 
 ### ✅ Quick Start
 
 1. **Install Dependencies** (Ubuntu/Debian example):
    ```bash
-   sudo apt install build-essential nasm qemu-system-x86 xorriso gcc musl-tools cpio git curl
-   rustup target add x86_64-unknown-none
-   rustup component add llvm-tools-preview
+   sudo apt install build-essential nasm qemu-system-x86 xorriso musl-tools cpio git curl gdisk mtools meson ninja-build pkg-config libexpat1-dev autoconf automake libtool
+   git clone --recurse-submodules https://github.com/akashKarmakar02/twilight_os.git
+   cd twilight_os
+   # For an existing checkout: git submodule update --init --recursive
+   rustup toolchain install stable
+   rustup toolchain install nightly-2025-06-01 --component llvm-tools-preview --target x86_64-unknown-none
+   rustup target add --toolchain stable x86_64-unknown-linux-musl
    ```
 
 2. **Build & Run**:
@@ -99,7 +108,9 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
    *This downloads necessary bootloader files (Limine) and OVMF firmware automatically.*
 
 3. **First Boot**:
-   Inside the OS shell, initialize the disk:
+   The ISO provides a live system. To install onto a new development data disk
+   for persistent TwilightFS storage, run inside the guest (this initializes
+   the target disk):
    ```bash
    install
    ```
@@ -112,23 +123,28 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
 | `make run-x86_64-uefi` | Boot via OVMF UEFI firmware                                    |
 | `make run-bios`     | q35 machine, BIOS boot                                            |
 | `make run-blk-bios` | virtio-blk + qemu-xhci                                            |
+| `make kernel`      | Build the kernel only                                             |
+| `make userspace`   | Build libraries/apps and stage rootfs executables                 |
+| `make test-tty`    | Host framebuffer-terminal regression tests                        |
+| `make test-net`    | Snapshot QEMU networking and IPC regression                       |
 | `make test-time`    | Non-destructive headless timing regression matrix (no disk write) |
 | `make all-hdd`      | Build a GPT HDD image instead of an ISO                           |
 
 ## Userspace Highlights
 
-The `userspace/` directory contains a full suite of applications. A workspace `build.rs` auto-detects each app's build system (Cargo.toml, build.zig, Makefile, or plain C) and builds static binaries into `rootfs/bin/`.
+The `userspace/` builder detects Makefile, Cargo, Zig, or plain C projects and stages executables into `rootfs/bin/`. Most programs link statically against musl; Wayland clients and the Snes9x port also use shared libraries from the rootfs sysroot.
 
 - **`tcc`**: The compiler. Try `tcc -run hello.c`!
 - **`twland`**: The Wayland compositor — xdg-shell windows, layer-shell desktop surfaces, SHM rendering.
 - **`twinit`**: PID 1 service manager supervising `twilogd`, `httpd`, `twland`, and more.
 - **`httpd`**: A non-blocking HTTP server serving `/var/www`.
 - **`smolnes` / `fbdoom` / `chip8`**: Emulators and games running on the framebuffer.
+- **`snes9x`**: SNES framebuffer port in a source submodule; see its [build prerequisites](userspace/apps/snes9x/README.md).
 - **`clockcheck`**: Guest-side timing probe paired with the `tools/time-regression/` host harness.
 
 ## Documentation
 
-Developer-facing documentation lives in [`docs/`](docs/) — covering the [timekeeping subsystem](docs/timekeeping.md), [kernel locking](docs/kernel-locking.md), the [init system](docs/system/twinit.md), [Wayland compositor](docs/system/twland_wayland_transport.md), [filesystem internals](docs/filesystem/), [USB drivers](docs/usb/), and more.
+Start with the [documentation index](docs/README.md) for [build instructions](docs/build-system.md), [QEMU networking and host file transfers](docs/development.md), [timekeeping](docs/timekeeping.md), [kernel locking](docs/kernel-locking.md), [TTY behavior](docs/console.md), [init and services](docs/system/twinit.md), [Wayland](docs/system/twland_wayland_transport.md), and [filesystem internals](docs/filesystem/).
 
 View the documentation online at [https://twilight-os.vercel.app](https://twilight-os.vercel.app).
 

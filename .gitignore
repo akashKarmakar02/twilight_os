@@ -4,6 +4,12 @@
 /ovmf
 /.idea
 /.zig-cache
+/iso_root
+*.ipk
+*.nes
+*.sfc
+*.smc
+*.wad
 /rootfs/bin
 /rootfs/sbin
 /tools/time-regression/logs/*
@@ -25,3 +31,6 @@ usb.img
 /userspace/apps/*/src/*.o
 /userspace/apps/*/build/*.o
 /userspace/apps/fbdoom/fbdoom
+/userspace/apps/snes9x/snes9x
+/userspace/apps/txpc_client/txpc_client
+/userspace/apps/txpc_echo_service/txpc_echo_service

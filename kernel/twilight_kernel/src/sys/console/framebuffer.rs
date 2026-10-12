@@ -1,3 +1,6 @@
+//! Framebuffer text rendering, UTF-8 decoding, and cursor drawing.
+//! ANSI parsing and termios belong to `tty`; BEL must never consume a cell.
+
 use crate::sys::{
     console::font::get_glyph,
     framebuffer::{FRAMEBUFFER, convert_color, get_framebuffer},
@@ -321,6 +324,12 @@ impl FramebufferTerminal {
 
     /// Internal: Write a decoded Unicode character
     fn put_char_utf32(&mut self, c: char) {
+        // Like FreeBSD teken_input_char(), handle BEL outside glyph rendering.
+        // There is no bell backend yet; leave pixels and cursor untouched (#86).
+        if c == '\u{07}' {
+            return;
+        }
+
         self.erase_cursor();
         match c {
             '\n' => {

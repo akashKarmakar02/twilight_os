@@ -346,6 +346,11 @@ ifeq ($(KARCH),loongarch64)
 	mcopy -i $(IMAGE_NAME).hdd@@1M limine/BOOTLOONGARCH64.EFI ::/EFI/BOOT
 endif
 
+.PHONY: test-tty
+test-tty:
+	rustc +stable --edition=2024 --test tools/tty-regression/framebuffer.rs -o /tmp/twilight-tty-test
+	/tmp/twilight-tty-test
+
 .PHONY: test-time
 test-time: $(IMAGE_NAME).iso
 	# Non-destructive: boots the live ISO headless, never touches hdd.img.
