@@ -27,6 +27,45 @@ doc-update duty. Highlights you will be held to (details in AGENTS.md):
 
 ## Claude-specific operating notes
 
+### Creating Rust userspace apps (including twland-style services)
+
+Follow [AGENTS.md §7.5](AGENTS.md#75-rust-userspace-applications--creation-and-coding-rules)
+and the [tested app starter](docs/userspace.md#creating-a-rust-application).
+These are requirements for new Rust apps, not permission to rewrite existing
+applications without a functional reason.
+
+- Create `userspace/apps/<app>/` with stable Rust/edition 2024, a declared
+  minimum Rust version, `Cargo.toml`, committed `Cargo.lock`, `src/main.rs`,
+  and the existing Makefile integration pattern. Build the musl guest target
+  explicitly, keep static/non-PIE flags, propagate errors, and expose the
+  binary at the app root for staging. Ignore generated output. Do not rely
+  on the incomplete Cargo-only builder path ([#94](https://github.com/akashKarmakar02/twilight_os/issues/94)).
+- Rust userspace normally uses `std`; kernel `no_std`, panic handlers,
+  toolchain settings, and linker scripts do not belong in these apps. Verify
+  required syscalls/devices and dependency compatibility with Twilight.
+- Keep `main.rs` for startup/run/error reporting. Place transport, protocol
+  state, platform I/O, input, rendering, and feature policy in cohesive modules.
+  Reuse `twland`'s separated modules and existing shared interfaces; do not
+  copy its large `main.rs` as an architectural template. Document module
+  invariants and expose the smallest necessary API.
+- Use descriptive Rust naming, meaningful types/enums, references/slices,
+  explicit resource ownership, and contextual `Result` errors. Malformed
+  input must not panic or crash an entire service. Avoid hidden fallbacks,
+  unnecessary dependencies, blanket lint allowances, and hot-loop logging.
+- Own fds/mappings with RAII. Isolate FFI/unsafe, verify guest ABI layouts and
+  bounds, and write safety justifications. Validate all protocol lengths,
+  conversions, object lifetimes, and received descriptors; close resources
+  on failure/disconnect. Wayland fds travel through SCM_RIGHTS, and registry
+  discovery must not assume a fixed number of globals.
+- Use nonblocking readiness and bounded event-loop work, backpressure,
+  monotonic deadlines, and reusable buffers. Do not busy-spin or block all
+  clients on one operation. Make shutdown and buffer presentation explicit.
+- Run rustfmt, Clippy, and host tests with guest-only flags cleared and an
+  explicit host target, then verify the staged ELF and behavior in the guest
+  after the required builds. Host tests cover pure logic; guest checks cover
+  ABI/devices/IPC/rendering. Update the app/subsystem docs and deliberately
+  configure twinit only if the app is meant to run as a service.
+
 ### Planning
 For substantial issue-scoped work, write a plan to
 `.claude/plans/<slug>-<issue#>.md` first (established practice — issues #62–#72
@@ -38,9 +77,10 @@ scaffolding, not deliverables.
 - `qemu.log` regularly exceeds 100 MB — grep it, never read it whole.
 - `rootfs/bin/` and `rootfs/sbin/` are **generated** by `make userspace`; never
   hand-edit staged binaries there. Sources live under `userspace/apps/`.
-- Git submodules: `userspace/apps/tcc`, `userspace/vi`, `userspace/oksh` —
-  treat as read-only dependencies; submodule changes go through their own repos
-  first (AGENTS.md §10.2).
+- Git submodules are inventoried in `.gitmodules` and [docs/ports.md](docs/ports.md).
+  Commit and push source changes in their own repositories before updating
+  OS gitlinks; upstream-only remotes need a project fork for local changes
+  (AGENTS.md §10.2).
 - Guest serial console exit is `Ctrl-A x` when running QEMU with `-serial stdio`.
 - Build outputs (`twilight-os.iso`, `system.tfs`, `initramfs.cpio`, `hdd.img`,
   `qemu.log`) are gitignored artifacts — don't stage them; also never stage
@@ -58,6 +98,8 @@ First boot on a fresh `hdd.img`: run `install` in the guest shell, then reboot,
 for persistent TwilightFS.
 
 ### Key subsystem docs (read before touching)
+- [`docs/userspace.md`](docs/userspace.md) — app creation, build/staging rules,
+  and host/guest verification; Rust apps must also follow AGENTS.md §7.5.
 - [`docs/kernel-locking.md`](docs/kernel-locking.md) — IRQ-shared lock audit;
   any lock touched ⇒ this doc touched.
 - [`docs/timekeeping.md`](docs/timekeeping.md) — clocksource/clockevent split;
