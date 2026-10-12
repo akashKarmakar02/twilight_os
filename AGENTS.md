@@ -14,6 +14,8 @@ Companion documents you are also expected to honor:
   architecture. If you touch time, you touch this document.
 - [`docs/repository-layout.md`](docs/repository-layout.md),
   [`docs/development.md`](docs/development.md) — human-written context.
+- [`docs/userspace.md`](docs/userspace.md) — app discovery, Rust app creation,
+  guest build/staging rules, and known builder limitations.
 
 ---
 
@@ -381,8 +383,134 @@ latency. Treat it accordingly:
 - **Scheduler**: deferred-reschedule kernel — explicit `cond_resched()` safe
   points; `enable_preemption()`/`disable_preemption()` nest. Wakeups go through
   the token-safe deadline queue; absolute deadlines only.
-- **Userspace apps** are freestanding by default; check whether an app builds
-  against `twigl`/wayland libs before inventing new platform shims.
+- **Userspace apps** target the guest musl environment. Rust apps normally use
+  `std`; follow §7.5. Check existing `twigl`/Wayland integration before
+  inventing platform shims.
+
+### 7.5 Rust userspace applications — creation and coding rules
+
+These rules apply to native Rust programs under `userspace/apps/`, including
+services and graphical applications like `twland`. They supplement the
+general standards above; existing code is a reference for integration and
+ownership boundaries, not an exemption from keeping new code readable.
+
+#### App layout and build integration
+
+- Create a standalone package at `userspace/apps/<app>/` with `Cargo.toml`,
+  committed `Cargo.lock`, `src/main.rs`, and a `Makefile`. Use stable Rust,
+  edition 2024, and declare the minimum `rust-version` required by the code.
+  Do not add a userspace app to the kernel workspace or copy its bare-metal
+  linker script, nightly settings, `no_std`, or custom panic handler.
+- Follow the `twland`/`twinit` Makefile integration: explicitly build
+  `x86_64-unknown-linux-musl` in release mode, use the existing static/non-PIE
+  flags, propagate build errors, and copy the declared binary to the app
+  root. The directory, Cargo binary, and staged command names must agree or
+  have an explicit documented mapping. Ignore that generated executable.
+- The builder discovers Makefiles before Cargo manifests and stages the
+  named app-root executable into `rootfs/bin`. Do not hand-install there or
+  depend on the host's default Cargo target, an existing staged binary, or
+  a developer's global configuration. Cargo-only integration is currently
+  incomplete ([#94](https://github.com/akashKarmakar02/twilight_os/issues/94));
+  use the working Makefile path. The starter is in
+  [docs/userspace.md](docs/userspace.md#creating-a-rust-application).
+- Use `std` and existing Unix interfaces where supported. Check the kernel
+  syscall implementation and relevant docs before assuming a Linux API,
+  thread facility, or runtime works. Isolate platform-specific operations;
+  do not add a dependency or async runtime merely to avoid a small helper.
+  Document required syscalls, devices, runtime libraries, and service setup.
+- Keep dependency features minimal, check musl/guest compatibility and
+  licensing, and commit lockfile changes deliberately. New third-party ports
+  follow the submodule workflow in §10.2; native Twilight apps stay in-tree.
+
+#### Modules, types, and errors
+
+- Keep `main.rs` focused on argument/config loading, initialization, running
+  the app, and reporting its final error/exit status. Split protocol framing,
+  protocol state, platform I/O, input, rendering, and feature policy into
+  their owning modules as needed. Register modules in their parent; do not
+  create empty layers or a generic `utils.rs` for unrelated concerns.
+- Use `twland/src/wire.rs`, `input.rs`, `framebuffer.rs`, and `shell/layer/`
+  as ownership examples. Its large existing `main.rs` is not the template
+  for new feature placement. Each module documents ownership and invariants
+  with `//!`; exposed interfaces get `///`. Prefer private or `pub(crate)`
+  visibility, exposing only what callers need.
+- Use `snake_case` for functions/modules/variables, `UpperCamelCase` for
+  types/variants, and `SCREAMING_SNAKE_CASE` for constants. Model meaningful
+  states with enums and domain types instead of boolean combinations or
+  sentinel integers. Keep ABI/wire constants named and sourced; reuse shared
+  definitions rather than inventing incompatible copies.
+- Prefer references and slices to unnecessary clones. Give resources clear
+  owners; use `Rc`, `Arc`, interior mutability, locks, or globals only when
+  their sharing model is required and documented. Do not use `unsafe`,
+  leaked allocations, or cloning to sidestep an ownership design problem.
+- Return `Result` for operational failures, propagate with `?`, and attach
+  operation/path/client context where it is useful. Validate CLI/config and
+  peer input without `unwrap`, `expect`, or panic. Reserve assertions and
+  `expect` for documented internal invariants, and tests. A malformed client
+  should normally lose its connection, not terminate the entire service.
+- Report actionable errors once at the responsible boundary. Avoid ignored
+  `Result`s, blanket fallbacks, and per-frame/per-packet debug logs. Return
+  normally from `main` (for example with `ExitCode`) so owners can clean up;
+  do not call `process::exit` deep inside libraries or the event loop.
+- Require rustfmt and Clippy checks for new code. Add targeted lint allowances
+  only with a reason; never disable a lint across a crate to hide a defect or
+  reformat unrelated existing modules in a feature commit.
+
+#### Resource safety, ABI, and protocol boundaries
+
+- Prefer `File`, `UnixStream`, and standard owned-fd types. A borrowed fd does
+  not grant ownership; create an owner from a raw fd only after an explicit
+  ownership transfer. Adopt received descriptors immediately and close them
+  on every rejection/error path. Do not duplicate an existing fd wrapper
+  without a documented guest compatibility reason.
+- Put raw FFI, ioctl, and mapping operations behind small safe interfaces in
+  the owning platform/transport module. Match the guest ABI, use `repr(C)`
+  where required, verify layout/size/alignment, check return values, and give
+  each unsafe operation a `// SAFETY:` justification. Unsafe public APIs
+  must document their caller obligations in a `# Safety` section.
+- Document mmap ownership, length, mutability, and unmapping. Validate offsets,
+  strides, formats, and sizes with checked arithmetic before constructing
+  slices or accessing pixels. External/shared mutation must not invalidate
+  Rust reference aliasing guarantees. Keep mappings alive while borrowed
+  buffers are used; cleanup must not panic or double-close/unmap resources.
+- Treat wire data as untrusted: bound lengths, queued data, objects, and fd
+  counts; check integer conversions, truncation, unknown opcodes, and object
+  lifetimes before dispatch. Decode byte fields explicitly instead of casting
+  arbitrary input to Rust structs. Handle partial reads/writes, EOF,
+  `Interrupted`, and `WouldBlock` according to the transport contract.
+- Respect protocol lifecycle and ordering. For Wayland, reuse the existing
+  framing/SCM_RIGHTS implementation and shared XML; fd arguments are ancillary
+  descriptors, not payload integers. Discover capabilities through registry
+  events and synchronization, never a fixed global count. Buffer release,
+  configure acknowledgement, disconnect, and object destruction are explicit
+  state transitions with resource cleanup.
+
+#### Event loops, performance, and verification
+
+- Use readiness-driven nonblocking I/O for services/compositors, bounded work
+  per client per iteration, and backpressure. Idle loops must block or wait
+  with a documented bound; do not spin on `WouldBlock`, block the whole loop
+  on one client, or hold a lock across I/O. Add threads only when necessary
+  and supported; document synchronization and shutdown ownership.
+- Measure elapsed time with monotonic clocks. Use accumulated absolute
+  deadlines for periodic work, retaining the original deadline across
+  interruptions. Bound catch-up work after stalls. Reuse buffers in hot paths
+  and validate counts before reserving memory. For software rendering, follow
+  the frame composition/presentation boundary in `framebuffer.rs`; avoid
+  redundant full-frame work and measure performance claims.
+- Separate parsers, layout, state transitions, and deadline arithmetic from
+  hardware so host unit tests can exercise malformed/truncated input, resource
+  rejection, disconnects, and boundary values. Avoid tests that require a
+  live `/dev/fb0` or guest socket just to check pure logic.
+- Run formatting, Clippy, and host tests from the app directory with an
+  explicit host target and guest-only Rust flags cleared. Then run §4.3's
+  kernel/userspace builds, inspect the staged ELF target/linkage, rebuild the
+  image, and exercise the feature in Twilight. A host pass does not prove
+  that the guest ABI, syscalls, devices, or service startup work.
+- Document the app's build/run instructions, interfaces, resource ownership,
+  limitations, and verification commands. Add a twinit config only for an
+  intended service, with explicit enable/restart/logging behavior; do not
+  introduce boot-time side effects merely to smoke-test a new executable.
 
 ---
 
