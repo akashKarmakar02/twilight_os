@@ -11,8 +11,9 @@
 - `sgdisk` (gdisk package)
 - `mtools` (mformat, mmd, mcopy)
 - Rust stable with `x86_64-unknown-linux-musl`
-- Meson, Ninja, pkg-config, and host `wayland-scanner`
-- [External Snes9x source and Alpine distrobox](../userspace/apps/snes9x/README.md)
+- Meson, Ninja, pkg-config, a host C compiler, and Expat development headers
+- Autoconf, Automake, and Libtool for the libffi Git source
+- [Alpine distrobox for Snes9x](../userspace/apps/snes9x/README.md)
 
 ## Build and run (x86_64)
 

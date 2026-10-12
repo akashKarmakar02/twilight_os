@@ -7,8 +7,9 @@
 | `kernel/twilight_common/` | Shared types and syscall ABI |
 | `kernel/twilight_proc/` | Workspace procedural macros |
 | `userspace/build.rs` | Library builds, app discovery, and rootfs staging |
-| `userspace/apps/` | Application sources and the external Snes9x wrapper |
-| `userspace/libs/` | Cross-built libffi, Wayland, and twigl libraries |
+| `userspace/apps/` | Native applications, port submodules, and build wrappers |
+| `userspace/libs/` | libffi/Wayland wrappers and source submodules; native twigl |
+| `userspace/doomgeneric/`, `userspace/snes9x-fb/` | Emulator source submodules used by app wrappers |
 | `userspace/protocols/` | Shared Wayland protocol XML |
 | `rootfs/` | Base filesystem content packed into `system.tfs` |
 | `tools/mktfs/` | Host TwilightFS image builder |
@@ -24,10 +25,11 @@ The kernel's owning directories are `arch/x86_64/`, `driver/`,
 `kernel/twilight_kernel/src/`. Register new modules in their subsystem's
 `mod.rs`; see [AGENTS.md](../AGENTS.md).
 
-Git submodules are `userspace/apps/tcc`, `userspace/vi`, and `userspace/oksh`.
-Initialize them with `git submodule update --init --recursive`. Snes9x uses an
-external sibling checkout, not a submodule; see its
-[build wrapper](../userspace/apps/snes9x/README.md).
+Git submodules cover TinyCC, vi, oksh, Doomgeneric, Smolnes, Snes9x, libffi,
+and Wayland. Initialize them with `git submodule update --init --recursive`.
+See [ports.md](ports.md) for source paths, remotes, and the update workflow.
+Snes9x source is inside this checkout; its [build wrapper](../userspace/apps/snes9x/README.md)
+still requires the Alpine build environment.
 
 Generated outputs include `kernel/target/`, `userspace/target/`,
 `kernel/twilight_kernel/kernel`, `rootfs/bin/`, `rootfs/sbin/`,

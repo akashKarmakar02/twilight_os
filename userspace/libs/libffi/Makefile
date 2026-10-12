@@ -1,32 +1,21 @@
-# libffi — cross-compiled for the musl sysroot with musl-gcc.
-#
-# libwayland-client has a hard runtime dependency on libffi (ffi_call, used for
-# event dispatch). The host ships only a glibc libffi, so we build libffi from
-# source against musl and install the .so + headers into the rootfs sysroot
-# where wayland's meson build finds it via the cross pkg-config wrapper.
-#
-# This Makefile is driven by build_libraries() in userspace/build.rs, which
-# runs `make install ROOTFS=../../../rootfs`. It downloads the pinned release
-# tarball on demand (with sha256 verification) into a gitignored build/ dir, so
-# the upstream source is never committed to the tree.
-
-VERSION ?= 3.5.2
-TARBALL := libffi-$(VERSION).tar.gz
-URL     := https://github.com/libffi/libffi/releases/download/v$(VERSION)/$(TARBALL)
-SHA256  := f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc
+# libffi — musl cross-build from the pinned upstream Git submodule.
+# build_libraries() runs `make install ROOTFS=../../../rootfs` here.
+# Autotools generates ignored files in upstream/; objects and staging stay in
+# build/<revision>/ so changing the gitlink selects a fresh configuration.
 
 ROOTFS ?= ../../../rootfs
-PREFIX   := $(ROOTFS)/usr/x86_64-linux-musl
+PREFIX := $(ROOTFS)/usr/x86_64-linux-musl
 INCLUDEDIR := $(PREFIX)/include
-LIBDIR   := $(PREFIX)/lib64
+LIBDIR := $(PREFIX)/lib64
 
-BUILD := build
-SRC   := $(BUILD)/libffi-$(VERSION)
+SRC := $(CURDIR)/upstream
+REVISION := $(shell git -C "$(SRC)" rev-parse --verify HEAD 2>/dev/null)
+BUILD := $(CURDIR)/build/$(REVISION)
+AUTOTOOLS_INPUTS := $(wildcard $(SRC)/configure.ac $(SRC)/Makefile.am $(SRC)/m4/*.m4)
 
-# musl's sysroot has no linux/ UAPI headers, and libffi's static-exec
-# trampoline code (src/tramp.c) includes <linux/limits.h>. Static trampolines
-# are an optional optimization; closures (what wayland uses) work without them,
-# so disable them rather than vendoring UAPI headers.
+# Musl lacks linux/limits.h, required only for optional static trampolines.
+# Closures used by Wayland work without that optimization. Documentation is
+# not installed into the guest, so the cross-build does not require texinfo.
 CONFIGURE_FLAGS := \
 	--host=x86_64-linux-musl \
 	--prefix=/usr/x86_64-linux-musl \
@@ -34,27 +23,30 @@ CONFIGURE_FLAGS := \
 	--includedir=/usr/x86_64-linux-musl/include \
 	--enable-shared \
 	--disable-static \
-	--disable-exec-static-tramp
+	--disable-exec-static-tramp \
+	--disable-docs
 
-.PHONY: all install clean distclean
+.PHONY: all install clean distclean check-source
 
-all: $(SRC)/.built
+all: $(BUILD)/Makefile
+	$(MAKE) -C "$(BUILD)" -j$$(nproc)
 
-$(SRC)/.extracted: $(BUILD)/$(TARBALL)
-	cd $(BUILD) && sha256sum -c $(CURDIR)/$(BUILD)/sha256.txt
-	cd $(BUILD) && tar xzf $(TARBALL)
-	touch $@
+check-source:
+	@test -f "$(SRC)/configure.ac" || { \
+		echo "libffi source missing: run git submodule update --init --recursive" >&2; \
+		exit 1; \
+	}
 
-$(SRC)/.configured: $(SRC)/.extracted
-	cd $(SRC) && CC=musl-gcc ./configure $(CONFIGURE_FLAGS)
-	touch $@
+$(BUILD)/.bootstrap: $(AUTOTOOLS_INPUTS) | check-source
+	mkdir -p "$(BUILD)"
+	cd "$(SRC)" && ./autogen.sh
+	touch "$@"
 
-$(SRC)/.built: $(SRC)/.configured
-	$(MAKE) -C $(SRC) -j$$(nproc)
-	touch $@
+$(BUILD)/Makefile: $(BUILD)/.bootstrap
+	cd "$(BUILD)" && CC=musl-gcc "$(SRC)/configure" $(CONFIGURE_FLAGS)
 
 install: all
-	$(MAKE) -C $(SRC) install DESTDIR=$(CURDIR)/$(BUILD)/stage
+	$(MAKE) -C "$(BUILD)" install DESTDIR="$(BUILD)/stage"
 	mkdir -p $(LIBDIR) $(INCLUDEDIR) $(LIBDIR)/pkgconfig
 	cp -a $(BUILD)/stage/usr/x86_64-linux-musl/lib64/libffi.so* $(LIBDIR)/
 	cp -a $(BUILD)/stage/usr/x86_64-linux-musl/lib64/pkgconfig/libffi.pc $(LIBDIR)/pkgconfig/
@@ -62,18 +54,6 @@ install: all
 	cp -a $(BUILD)/stage/usr/x86_64-linux-musl/include/ffitarget.h $(INCLUDEDIR)/
 
 clean:
-	rm -rf $(SRC) $(BUILD)/stage
+	rm -rf build
 
 distclean: clean
-	rm -rf $(BUILD)
-
-# Download + verify the tarball on demand. The sha256 is pinned in this file and
-# materialized into build/sha256.txt so `sha256sum -c` can verify it.
-$(BUILD)/$(TARBALL): $(BUILD)/sha256.txt | $(BUILD)
-	curl -fsSL -o $@ $(URL)
-
-$(BUILD)/sha256.txt: | $(BUILD)
-	printf '%s  %s\n' '$(SHA256)' '$(TARBALL)' > $@
-
-$(BUILD):
-	mkdir -p $(BUILD)

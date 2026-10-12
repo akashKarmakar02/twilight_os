@@ -2,7 +2,7 @@
 #
 # Links the official libwayland-client.so (cross-built for musl by issue #57's
 # userspace/libs/wayland) and generates the xdg-shell bindings from the vendored
-# protocol XML files with the host wayland-scanner.
+# protocol XML files with the native scanner from the pinned Wayland source.
 
 CC := musl-gcc
 CFLAGS ?= -O2 -Wall -Wextra -std=c11
@@ -13,7 +13,6 @@ LDLIBS ?= -lwayland-client
 # Generated xdg-shell bindings from the vendored protocol XML. The client header
 # has typed static-inline request wrappers; the public-code C source defines the
 # interface structs (xdg_wm_base_interface, ...) the wrappers reference.
-WAYLAND_SCANNER ?= wayland-scanner
 XDG_XML := ../../protocols/xdg-shell.xml
 XDG_HEADER := xdg-shell-client-protocol.h
 XDG_SRC := xdg-shell-protocol.c
@@ -60,3 +59,6 @@ $(BIN): $(OBJS)
 
 clean:
 	rm -f $(BIN) $(OBJS) $(XDG_HEADER) $(XDG_SRC) $(LAYER_HEADER) $(LAYER_SRC)
+
+include ../../libs/wayland/scanner.mk
+$(XDG_HEADER) $(XDG_SRC) $(LAYER_HEADER) $(LAYER_SRC): | wayland-scanner-ready

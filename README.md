@@ -35,7 +35,7 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
 - **Logging**: `twilogd`, a system log daemon collecting structured logs over a Unix-domain socket (`twilogctl` to query/tail).
 - **Package Management**: `.ipk` packages via a bundled `opkg`.
 - **Wayland Compositor**: `twland`, a from-scratch Wayland compositor speaking raw wire protocol over Unix sockets — xdg-shell toplevel windows, wlr-layer-shell desktop surfaces, SHM buffer compositing to `/dev/fb0`, and real keyboard/mouse input. Includes native clients like `twclock`.
-- **Emulators & Games**: Doom (`fbdoom`), a CHIP-8 emulator, and `smolnes` (NES, with absolute monotonic frame pacing). An external Snes9x framebuffer port has a [build wrapper](userspace/apps/snes9x/README.md); its source and Alpine build environment must be provided separately.
+- **Emulators & Games**: Doom (`fbdoom`), a CHIP-8 emulator, and `smolnes` (NES, with absolute monotonic frame pacing). Doom, Smolnes, Snes9x, and third-party library sources are pinned [Git submodules](docs/ports.md). The Snes9x [build wrapper](userspace/apps/snes9x/README.md) requires an Alpine distrobox.
 
 ### Kernel & Core
 - **Language**: Written in pure Rust (no standard library), `no_std`.
@@ -70,7 +70,7 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
 | **Multitasking**     | 🚧 Beta          | Preemptive userspace scheduling; deferred-reschedule kernel; SMP detection (APs parked) |
 | **Graphics**         | 🚧 Experimenting | Wayland compositor (xdg-shell + layer-shell), framebuffer      |
 | **Package Mgmt**     | 🚧 Beta          | `.ipk` packages via bundled `opkg`                             |
-| **Doom**             | ✅ Done           | Vendored doomgeneric framebuffer and input port                |
+| **Doom**             | ✅ Done           | Doomgeneric framebuffer and input port, pinned as a submodule                |
 
 ## Build Instructions
 
@@ -83,16 +83,19 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
 - `qemu` (emulator)
 - `musl-gcc` (for userspace LibC)
 - `cpio` (initramfs)
-- Meson, Ninja, pkg-config, and host `wayland-scanner` for Wayland libraries/clients
+- Meson, Ninja, pkg-config, a host C compiler, and Expat development headers for Wayland libraries/clients
 - `sgdisk` (gdisk) and mtools for HDD images
-- The [external Snes9x source and Alpine distrobox](userspace/apps/snes9x/README.md)
+- Autoconf, Automake, and Libtool to bootstrap the libffi source submodule
+- The [Alpine distrobox for Snes9x](userspace/apps/snes9x/README.md)
 
 ### ✅ Quick Start
 
 1. **Install Dependencies** (Ubuntu/Debian example):
    ```bash
-   sudo apt install build-essential nasm qemu-system-x86 xorriso musl-tools cpio git curl gdisk mtools meson ninja-build pkg-config libwayland-bin
-   git submodule update --init --recursive
+   sudo apt install build-essential nasm qemu-system-x86 xorriso musl-tools cpio git curl gdisk mtools meson ninja-build pkg-config libexpat1-dev autoconf automake libtool
+   git clone --recurse-submodules https://github.com/akashKarmakar02/twilight_os.git
+   cd twilight_os
+   # For an existing checkout: git submodule update --init --recursive
    rustup toolchain install stable
    rustup toolchain install nightly-2025-06-01 --component llvm-tools-preview --target x86_64-unknown-none
    rustup target add --toolchain stable x86_64-unknown-linux-musl
@@ -129,14 +132,14 @@ It currently targets **x86_64** (Limine boot, UEFI + BIOS).
 
 ## Userspace Highlights
 
-The `userspace/` builder detects Makefile, Cargo, Zig, or plain C projects and stages executables into `rootfs/bin/`. Most programs link statically against musl; Wayland clients and the external Snes9x port also use shared libraries from the rootfs sysroot.
+The `userspace/` builder detects Makefile, Cargo, Zig, or plain C projects and stages executables into `rootfs/bin/`. Most programs link statically against musl; Wayland clients and the Snes9x port also use shared libraries from the rootfs sysroot.
 
 - **`tcc`**: The compiler. Try `tcc -run hello.c`!
 - **`twland`**: The Wayland compositor — xdg-shell windows, layer-shell desktop surfaces, SHM rendering.
 - **`twinit`**: PID 1 service manager supervising `twilogd`, `httpd`, `twland`, and more.
 - **`httpd`**: A non-blocking HTTP server serving `/var/www`.
 - **`smolnes` / `fbdoom` / `chip8`**: Emulators and games running on the framebuffer.
-- **`snes9x`**: External SNES framebuffer port; see its [build prerequisites](userspace/apps/snes9x/README.md).
+- **`snes9x`**: SNES framebuffer port in a source submodule; see its [build prerequisites](userspace/apps/snes9x/README.md).
 - **`clockcheck`**: Guest-side timing probe paired with the `tools/time-regression/` host harness.
 
 ## Documentation

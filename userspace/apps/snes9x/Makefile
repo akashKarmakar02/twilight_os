@@ -1,9 +1,9 @@
 # Snes9x — Twilight OS framebuffer port.
 #
 # Thin wrapper that delegates to the snes9x-fb source tree, exactly like the
-# fbdoom app delegates to userspace/doomgeneric. The snes9x-fb repo lives as a
-# sibling of twilight_os (~/Desktop/projects/snes9x-fb); its twilight/ subfolder
-# holds the real Makefile + the /dev/fb0 frontend.
+# fbdoom app delegates to userspace/doomgeneric. The pinned source submodule
+# is userspace/snes9x-fb; its twilight/ subfolder holds the real Makefile and
+# the /dev/fb0 frontend.
 #
 # The Snes9x core is C++. Fedora's g++ targets glibc and produces binaries that
 # won't run against the musl/libstdc++ in the Twilight rootfs, so the build is
@@ -14,10 +14,9 @@
 # No static linking — the binary uses /lib/ld-musl-x86_64.so.1 + libstdc++.so,
 # both present in the rootfs.
 
-# Sibling repo: twilight_os and snes9x-fb both live under the same parent
-# (~/Desktop/projects). From userspace/apps/snes9x/ that's four levels up.
-# Resolve to an absolute path so distrobox (which starts in $HOME) can find it.
-SNES_DIR ?= $(abspath ../../../../snes9x-fb/twilight)
+# Resolve to an absolute path so distrobox can find the in-tree submodule.
+# SNES_DIR may still point to another checkout for port development.
+SNES_DIR ?= $(abspath ../../snes9x-fb/twilight)
 
 # The Alpine distrobox name. Override with SNES_BOX=... if yours differs.
 SNES_BOX ?= alpine
@@ -26,7 +25,7 @@ SNES_BOX ?= alpine
 
 all:
 	@test -f "$(SNES_DIR)/Makefile" || { \
-		echo "Snes9x source missing: set SNES_DIR to snes9x-fb/twilight (see README.md)" >&2; \
+		echo "Snes9x source missing: run git submodule update --init --recursive (see README.md)" >&2; \
 		exit 1; \
 	}
 	# Force Alpine's native gcc/g++ (both musl-linked). build.rs exports

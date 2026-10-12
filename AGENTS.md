@@ -123,7 +123,14 @@ Git submodules (upstream/ported projects — special handling, §10.2):
 userspace/apps/tcc    (fork: akashKarmakar02/tinycc, musl port)
 userspace/vi          (fork: akashKarmakar02/viless)
 userspace/oksh        (upstream: ibara/oksh)
+userspace/doomgeneric (fork: akashKarmakar02/doomgeneric, Twilight branch)
+userspace/apps/smolnes (fork: akashKarmakar02/smolnes, Twilight branch)
+userspace/snes9x-fb   (fork: akashKarmakar02/snes9x-fb, Twilight branch)
+userspace/libs/libffi/upstream (upstream: libffi/libffi)
+userspace/libs/wayland/upstream (upstream: wayland/wayland on freedesktop GitLab)
 ```
+
+See [`docs/ports.md`](docs/ports.md) for initialization and update procedures.
 
 ---
 
@@ -465,12 +472,14 @@ semantics, fd lifetime across SCM_RIGHTS passes, and lock-ordering cycles.
 
 ### 10.2 Submodule conduct
 
-`userspace/apps/tcc`, `userspace/vi`, `userspace/oksh` are git submodules. Never
-edit inside them casually: commit submodule work in the submodule's repo first
-(tcc and vi are the project's own forks), then bump the superproject's pointer
-in a separate commit. Note `.gitmodules` uses the upstream URL for oksh — don't
-push changes meant for the fork there. When in doubt, treat submodule contents
-as read-only dependencies and surface the need as an issue.
+All application ports and third-party library sources listed in §3 and
+`.gitmodules` are git submodules. Commit and push submodule changes in the
+owning repository first, then bump the superproject's pointer in a separate
+commit. TinyCC, vi, Doomgeneric, Smolnes, and Snes9x use the project's forks.
+Oksh, libffi, and Wayland use upstream remotes: do not push Twilight changes
+there; prepare a project fork if modifications are needed. When in doubt,
+treat submodule contents as read-only dependencies and surface the need as an
+issue. See [`docs/ports.md`](docs/ports.md).
 
 ---
 

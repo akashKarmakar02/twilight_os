@@ -9,7 +9,8 @@ as development work.
 - [Build targets and prerequisites](build-system.md)
 - [Repository layout](repository-layout.md)
 - [Development, QEMU, and host file transfers](development.md)
-- [Userspace applications and external ports](userspace.md)
+- [Userspace applications](userspace.md)
+- [Port sources and Git submodules](ports.md)
 - [Hardware and ABI specifications](specifications.md)
 
 ## Kernel

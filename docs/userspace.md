@@ -19,7 +19,7 @@ statically; Wayland clients and Snes9x can use shared sysroot libraries.
 ## Environment variables
 - `CC`: overrides the C compiler used for Makefile and C builds (defaults to `musl-gcc`).
 - `TWILIGHT_NO_PIE`: set to `0` to allow PIE; by default, PIE is disabled for static userland binaries.
-- `SNES_DIR`, `SNES_BOX`: external Snes9x source directory and Alpine distrobox.
+- `SNES_DIR`, `SNES_BOX`: Snes9x source directory override and Alpine distrobox name.
 
 ## Bundled apps
 Highlights include `tcc`, `oksh`, `vi`, core command-line utilities, `curl`,
@@ -28,17 +28,17 @@ Highlights include `tcc`, `oksh`, `vi`, core command-line utilities, `curl`,
 shared memory, polling, networking, and Wayland. Browse `userspace/apps/` for
 the full list; oksh and vi also have standalone submodule build paths.
 
-## External Snes9x port
+## Snes9x port
 
-`userspace/apps/snes9x/Makefile` delegates to a separately checked-out
-`snes9x-fb/twilight` tree. It requires an Alpine distrobox with musl-native C++
-tools; the wrapper is discovered by the ordinary userspace build. Its source
-is not vendored or fetched automatically. Follow the
+`userspace/apps/snes9x/Makefile` delegates to the pinned
+`userspace/snes9x-fb/twilight` source submodule. It requires an Alpine distrobox
+with musl-native C++ tools; the wrapper is discovered by the ordinary userspace
+build. Initialize submodules and follow the
 [wrapper README](../userspace/apps/snes9x/README.md) before building.
 
 ## Smolnes
 
-The in-tree NES framebuffer port uses accumulated absolute monotonic deadlines
+The `userspace/apps/smolnes` source submodule uses accumulated absolute monotonic deadlines
 for frame pacing. Run `make -C userspace/apps/smolnes test` for its host pacing
 tests. Current `master` uses keyboard input; the generic gamepad work is
 described separately in [usb/gamepads.md](usb/gamepads.md).
@@ -55,7 +55,7 @@ compiler invocation alone does not prove the staged copy was refreshed.
 
 ## Doom
 
-The complete doomgeneric source is vendored in `userspace/doomgeneric`.
+The Doom port source is pinned as the `userspace/doomgeneric` submodule.
 The Twilight framebuffer and input port is built through
 `userspace/apps/fbdoom/Makefile`, so the normal userspace build installs
 `fbdoom` into `rootfs/bin`:
@@ -72,6 +72,16 @@ fbdoom -iwad /doom.wad
 
 See `userspace/doomgeneric/TWILIGHT.md` for upstream provenance, port details,
 and standalone build instructions.
+
+## Third-party sources
+
+All application ports and downloaded library sources are pinned submodules;
+see [ports.md](ports.md) for the inventory and update workflow. The libffi and
+Wayland wrappers build their `upstream/` submodules rather than downloading
+tarballs. Their objects and staging trees use `build/<commit>/`, so a changed
+pin selects a fresh configuration. Autoconf, Automake, and Libtool bootstrap
+libffi; the cross-build disables guest documentation. Twilight's own apps and
+twigl remain ordinary source directories.
 
 ## Adding a new app
 1. Create a new directory under `userspace/apps/<name>`.

@@ -9,7 +9,6 @@ CPPFLAGS ?= -I. -I../../../rootfs/usr/x86_64-linux-musl/include
 LDFLAGS ?= -L../../../rootfs/usr/x86_64-linux-musl/lib64 -Wl,-rpath,/usr/x86_64-linux-musl/lib64
 LDLIBS ?= -lwayland-client
 
-WAYLAND_SCANNER ?= wayland-scanner
 LAYER_XML := ../../protocols/wlr-layer-shell-unstable-v1.xml
 LAYER_HEADER := wlr-layer-shell-unstable-v1-client-protocol.h
 LAYER_SOURCE := wlr-layer-shell-unstable-v1-protocol.c
@@ -51,3 +50,6 @@ $(BIN): $(OBJECTS)
 
 clean:
 	rm -f $(BIN) $(OBJECTS) $(LAYER_HEADER) $(LAYER_SOURCE) $(XDG_SOURCE)
+
+include ../../libs/wayland/scanner.mk
+$(LAYER_HEADER) $(LAYER_SOURCE) $(XDG_SOURCE): | wayland-scanner-ready

@@ -10,8 +10,11 @@ The kernel uses the pinned nightly in `kernel/rust-toolchain.toml`, the
 `x86_64-unknown-none` target, and `llvm-tools-preview`. Userspace uses Rust
 stable with `x86_64-unknown-linux-musl`, musl-gcc, and make. Native tools include
 nasm, binutils, xorriso, cpio, QEMU, git, and curl. Wayland builds need Meson,
-Ninja, pkg-config, and a host `wayland-scanner` compatible with the pinned
-release. HDD images need gdisk and mtools.
+Ninja, pkg-config, a host C compiler, and Expat development headers
+(`libexpat1-dev` on Debian/Ubuntu, `expat-devel` on Fedora). The wrapper builds
+a matching native scanner from the pinned Wayland source. The libffi source
+submodule needs Autoconf, Automake, and Libtool.
+HDD images need gdisk and mtools.
 
 Initialize Git submodules and the userspace toolchain:
 
@@ -21,10 +24,15 @@ rustup toolchain install stable
 rustup target add --toolchain stable x86_64-unknown-linux-musl
 ```
 
-The Snes9x wrapper also requires an external `snes9x-fb` checkout and an Alpine
-distrobox with musl-native C++ tools. Set up its
+The Snes9x source comes from the `userspace/snes9x-fb` submodule. Its wrapper
+also requires an Alpine distrobox with musl-native C++ tools. Set up its
 [prerequisites](../userspace/apps/snes9x/README.md) before `make userspace`;
 the normal builder discovers this wrapper along with other apps.
+
+All third-party application and library sources are pinned in `.gitmodules`;
+see [ports.md](ports.md). Library wrappers build from the Git checkouts into
+ignored `build/<commit>/` directories. They no longer download release tarballs.
+Initialize submodules before building; `make` does not update source pins.
 
 ## Targets
 
@@ -74,7 +82,7 @@ not install onto it implicitly.
   a GNU host toolchain on supported musl hosts.
 - `CC`, `TWILIGHT_NO_PIE`: userspace compiler and PIE policy; see
   [userspace.md](userspace.md).
-- `SNES_DIR`, `SNES_BOX`: external Snes9x source/build environment overrides.
+- `SNES_DIR`, `SNES_BOX`: Snes9x source/build environment overrides.
 
 Limine and required OVMF files are downloaded on demand. `make clean` retains
 these assets; `make distclean` removes them.
