@@ -1,0 +1,10 @@
+name = "network"
+description = "Placeholder for future supervised network configuration"
+exec = "/sbin/twnetd"
+args = []
+enabled = false
+runlevel = "default"
+restart = "on-failure"
+type = "foreground"
+stdout = "console"
+stderr = "console"

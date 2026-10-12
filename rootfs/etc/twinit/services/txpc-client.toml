@@ -1,0 +1,16 @@
+name = "txpc-test-client"
+description = "TXPC bootstrap test client"
+exec = "/bin/txpc_client"
+args = []
+enabled = true
+runlevel = "default"
+restart = "never"
+type = "foreground"
+stdout = "log"
+stderr = "log"
+
+[txpc]
+name = "dev.twilight.test-client"
+
+[txpc.client]
+capabilities = ["gui"]
